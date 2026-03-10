@@ -195,6 +195,46 @@ Key design decisions:
 - **Stream processing** — text is sent to Discord as it arrives (before tool calls), so users see progress during long research tasks
 - **Send queue** — messages are serialized to avoid Discord rejecting overlapping replies
 
+## Troubleshooting
+
+### Bot sends a message but it's empty or gets no response
+
+Claude is hanging. The most common cause is `stdin` — Claude's CLI expects an interactive terminal and blocks waiting for consent. The bot sets `stdio: ["ignore", "pipe", "pipe"]` to prevent this. If you've modified the spawn options, make sure stdin is set to `"ignore"`.
+
+### Bot appears stuck after receiving a message
+
+Check if an MCP server is unreachable. Claude waits for **all** MCP servers to connect before it starts processing. One hanging server blocks everything.
+
+To diagnose, remove `.mcp.json` temporarily and test. Add servers back one at a time.
+
+### Error code 143
+
+Claude was killed by a timeout (`SIGTERM`). The default timeout is 1 hour (`CLAUDE_TIMEOUT_MS=3600000`). If your tasks need more time, increase it in `.env`. If the task should have been fast, check for hanging MCP servers (see above).
+
+### Claude hangs when spawned from inside another Claude session
+
+The bot strips Claude-specific environment variables (`CLAUDECODE`, `CLAUDE_AGENT_SDK_VERSION`, etc.) before spawning. If you're running the bot from within a Claude Code terminal and it still hangs, check that the `cleanEnv` block in `bot.js` is removing all `CLAUDE_*` vars.
+
+### Discord rejects messages (no error, message just doesn't appear)
+
+Discord has a 2000 character limit per message. The bot splits long responses automatically, but if you see missing messages, check the logs for send errors:
+
+```bash
+grep "Failed to send" bot.log
+```
+
+### Bot responds but doesn't see my messages
+
+Make sure **Message Content Intent** is enabled in the [Discord Developer Portal](https://discord.com/developers/applications) under your bot's **Privileged Gateway Intents**. Without it, the bot receives empty message bodies.
+
+### "Claude exited with code 1"
+
+Usually means Claude CLI isn't authenticated. Run `claude` manually in your terminal to check. You may need to run `claude auth` first.
+
+### Logs show "Non-JSON line from Claude"
+
+This is usually harmless — Claude CLI sometimes outputs non-JSON warnings to stdout (e.g., deprecation notices). The bot skips these lines. If you see many of them, set `LOG_LEVEL=debug` to investigate.
+
 ## License
 
 ISC
