@@ -14,7 +14,7 @@ const log = pino({
 // --- Config ---
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
-const PRODUCT_OWNER_DIR = "/home/xrgarcia/code/slashbin-product-owner";
+const CLAUDE_CWD = process.env.CLAUDE_CWD || process.cwd();
 const BOT_SYSTEM_PROMPT = [
   "You are running inside a Discord bot. Keep responses concise — Discord has a 2000 char limit per message.",
   "Do NOT perform startup rituals — no reading soul.md, no checking ray issues, no reading files unless the question needs it.",
@@ -51,7 +51,7 @@ const client = new Client({
 });
 
 client.once("ready", () => {
-  log.info({ tag: client.user.tag, cwd: PRODUCT_OWNER_DIR }, "Bot online");
+  log.info({ tag: client.user.tag, cwd: CLAUDE_CWD }, "Bot online");
   log.info(
     { allowedUsers: ALLOWED_USER_IDS.length || "all", monitoredChannels: MONITOR_CHANNELS },
     "Access config"
@@ -178,7 +178,7 @@ function runClaude(prompt, channelId, reqLog, sendMessage) {
 
     const startTime = Date.now();
     const child = spawn(CLAUDE_BIN, args, {
-      cwd: PRODUCT_OWNER_DIR,
+      cwd: CLAUDE_CWD,
       env: cleanEnv,
       stdio: ["ignore", "pipe", "pipe"],
       timeout: CLAUDE_TIMEOUT_MS,
