@@ -75,20 +75,56 @@ MONITOR_CHANNELS=
 npm start
 ```
 
-Or with pretty logs in development:
+The bot runs as a long-lived process — it stays connected to Discord and handles messages until stopped.
+
+### Running as a daemon
+
+For always-on use, run the bot as a background process that survives terminal closes and restarts on crashes.
+
+**With pm2** (recommended):
 
 ```bash
-node bot.js
+npm install -g pm2
+pm2 start bot.js --name discord-bot
+pm2 save        # persist across reboots
+pm2 logs        # tail logs
+pm2 restart discord-bot  # restart after config changes
 ```
 
-For production, run with a process manager:
+**With systemd** (Linux):
+
+```ini
+# /etc/systemd/system/discord-bot.service
+[Unit]
+Description=Claude Code Discord Bot
+After=network.target
+
+[Service]
+Type=simple
+User=your-user
+WorkingDir=/path/to/slashbin-discord-bot
+ExecStart=/usr/bin/node bot.js
+Restart=always
+RestartSec=10
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
+```
 
 ```bash
-# With nohup
-nohup node bot.js >> /tmp/bot.log 2>&1 &
-
-# Or use pm2, systemd, etc.
+sudo systemctl enable discord-bot
+sudo systemctl start discord-bot
+journalctl -u discord-bot -f  # tail logs
 ```
+
+**With nohup** (quick and simple):
+
+```bash
+nohup node bot.js >> bot.log 2>&1 &
+```
+
+> **Note:** `nohup` won't auto-restart on crashes. Use pm2 or systemd for production.
 
 ## Usage
 
