@@ -153,6 +153,7 @@ Each Discord channel gets its own Claude Code session. Messages in the same chan
 | `ALLOWED_USERS` | (all users) | Comma-separated Discord user IDs |
 | `MONITOR_CHANNELS` | (none) | Channels where bot responds without @mention |
 | `CLAUDE_BIN` | `claude` | Path to Claude Code binary |
+| `CLAUDE_CWD` | current directory | Working directory for Claude sessions — point at the repo with your `CLAUDE.md` and `.mcp.json` |
 | `CLAUDE_TIMEOUT_MS` | `3600000` | Max time per Claude session (ms). Default: 1 hour |
 | `LOG_LEVEL` | `info` | Pino log level: `debug`, `info`, `warn`, `error` |
 | `NODE_ENV` | (none) | Set to `production` to disable pretty logging |
