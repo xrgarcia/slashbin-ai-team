@@ -5,3 +5,4 @@ node_modules/
 CLAUDE.md
 *.log
 .bot.pid
+.bot-sessions.json
