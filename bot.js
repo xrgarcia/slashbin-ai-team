@@ -30,6 +30,8 @@ const ALLOWED_BOTS = process.env.ALLOWED_BOTS
   ? process.env.ALLOWED_BOTS.split(",").filter(Boolean)
   : [];
 const MAX_BOT_EXCHANGES = parseInt(process.env.MAX_BOT_EXCHANGES, 10) || 2;
+const REMEMBER_MAX_MESSAGES = parseInt(process.env.REMEMBER_MAX_MESSAGES, 10) || 100;
+const REMEMBER_MAX_CHANNELS = parseInt(process.env.REMEMBER_MAX_CHANNELS, 10) || 10;
 
 if (!DISCORD_TOKEN) {
   log.fatal("DISCORD_TOKEN environment variable is required");
@@ -67,6 +69,47 @@ if (sessions.size > 0) {
 // Key: channelId, Value: { count: number, lastBotId: string }
 // Resets when a human sends a message in the channel.
 const botExchanges = new Map();
+
+// --- Discord history fetching for /remember ---
+async function fetchChannelHistory(channelIds, reqLog) {
+  const history = [];
+
+  for (const channelId of channelIds.slice(0, REMEMBER_MAX_CHANNELS)) {
+    try {
+      const channel = await client.channels.fetch(channelId);
+      if (!channel || !channel.isTextBased()) continue;
+
+      const channelName = channel.name || `DM-${channelId}`;
+      const messages = await channel.messages.fetch({ limit: REMEMBER_MAX_MESSAGES });
+
+      // Sort oldest first for chronological reading
+      const sorted = [...messages.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+
+      for (const m of sorted) {
+        history.push({
+          channel: channelName,
+          author: m.author.tag,
+          timestamp: m.createdAt.toISOString(),
+          content: m.content.substring(0, 2000),
+        });
+      }
+
+      reqLog.debug({ channelId, channelName, fetched: sorted.length }, "Fetched channel history");
+    } catch (err) {
+      reqLog.warn({ channelId, err: err.message }, "Failed to fetch channel history");
+    }
+  }
+
+  return history;
+}
+
+function formatHistoryForPrompt(history) {
+  if (history.length === 0) return "(No Discord chat history found)";
+
+  return history
+    .map((m) => `[${m.timestamp}] #${m.channel} | ${m.author}: ${m.content}`)
+    .join("\n");
+}
 
 // --- Discord client ---
 const client = new Client({
@@ -135,6 +178,66 @@ client.on("messageCreate", async (msg) => {
       ? `Active session: \`${session.sessionId}\` (last used ${Math.round((Date.now() - session.lastUsed) / 1000)}s ago)`
       : "No active session";
     await msg.reply(status);
+    return;
+  }
+
+  if (prompt.startsWith("/remember")) {
+    const query = prompt.replace(/^\/remember\s*/, "").trim();
+    if (!query) {
+      await msg.reply("Usage: `/remember <what you want to recall>`\nExample: `/remember the conversation about retry logic`");
+      return;
+    }
+
+    reqLog.info({ query }, "Remember command");
+    const typing = setInterval(() => msg.channel.sendTyping(), 8000);
+    msg.channel.sendTyping();
+
+    try {
+      // Collect channels the bot has sessions in + current channel
+      const channelIds = new Set([msg.channel.id, ...sessions.keys()]);
+      const history = await fetchChannelHistory([...channelIds], reqLog);
+      const historyText = formatHistoryForPrompt(history);
+
+      reqLog.info({ channels: channelIds.size, messages: history.length }, "Fetched history for /remember");
+
+      const rememberPrompt = [
+        `The user is asking you to recall: "${query}"`,
+        "",
+        "Search the following sources to find relevant information:",
+        "",
+        "## Source 1: Discord Chat History",
+        "Below is recent chat history from Discord channels this bot participates in.",
+        "Search it for conversations, decisions, and context related to the query.",
+        "",
+        "```",
+        historyText,
+        "```",
+        "",
+        "## Source 2: Local Knowledge (search these yourself)",
+        "- CLAUDE.md in the current working directory — system context and rules",
+        "- docs/ directory — architecture, runbooks, incidents, schemas",
+        "- .claude/ directory — memory files with persistent knowledge",
+        "- ~/.claude/ directory — past conversation transcripts (JSONL files)",
+        "",
+        "## Instructions",
+        "1. First search the Discord chat history above for relevant messages",
+        "2. Then use your file reading tools to search local files for related context",
+        "3. Synthesize what you find into a clear, concise answer",
+        "4. Cite sources: quote Discord messages with timestamps, or reference file paths",
+        "5. If you find nothing relevant, say so honestly",
+      ].join("\n");
+
+      const sendQueue = createSendQueue(msg, reqLog);
+
+      // Use a fresh session for /remember — don't pollute the channel's ongoing conversation
+      await runClaudeRemember(rememberPrompt, reqLog, sendQueue.enqueue);
+      clearInterval(typing);
+      await sendQueue.flush();
+    } catch (err) {
+      clearInterval(typing);
+      reqLog.error({ err }, "Remember command failed");
+      await msg.reply(`Error: ${err.message}`);
+    }
     return;
   }
 
@@ -302,6 +405,93 @@ function runClaude(prompt, channelId, reqLog, sendMessage) {
 
     child.on("error", (err) => {
       reqLog.error({ err }, "Failed to spawn Claude");
+      reject(new Error(`Failed to spawn claude: ${err.message}`));
+    });
+  });
+}
+
+function runClaudeRemember(prompt, reqLog, sendMessage) {
+  return new Promise((resolve, reject) => {
+    const systemPrompt = "You are a recall assistant. Search all available sources to answer the user's query. Be thorough but concise — Discord has a 2000 char limit. Cite timestamps and file paths.";
+
+    const args = [
+      "--output-format", "stream-json",
+      "--allow-dangerously-skip-permissions",
+      "--dangerously-skip-permissions",
+      "--verbose",
+      "--append-system-prompt", systemPrompt,
+      "-p", prompt,
+    ];
+
+    const cleanEnv = { ...process.env };
+    delete cleanEnv.CLAUDECODE;
+    delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
+    delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
+    delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
+
+    const startTime = Date.now();
+    const child = spawn(CLAUDE_BIN, args, {
+      cwd: CLAUDE_CWD,
+      env: cleanEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: CLAUDE_TIMEOUT_MS,
+    });
+
+    let buffer = "";
+    let turnText = "";
+
+    child.stdout.on("data", (data) => {
+      buffer += data.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+          handleStreamEvent(event, reqLog, sendMessage, () => {}, {
+            getTurnText: () => turnText,
+            setTurnText: (t) => { turnText = t; },
+          });
+        } catch {
+          // skip non-JSON
+        }
+      }
+    });
+
+    child.stderr.on("data", (data) => {
+      reqLog.warn({ stderr: data.toString().trim() }, "Claude remember stderr");
+    });
+
+    child.on("close", (code) => {
+      const elapsed = Date.now() - startTime;
+
+      if (buffer.trim()) {
+        try {
+          const event = JSON.parse(buffer);
+          handleStreamEvent(event, reqLog, sendMessage, () => {}, {
+            getTurnText: () => turnText,
+            setTurnText: (t) => { turnText = t; },
+          });
+        } catch { /* ignore */ }
+      }
+
+      if (turnText.trim()) {
+        sendMessage(turnText);
+      }
+
+      if (code !== 0) {
+        reqLog.error({ code, elapsed }, "Claude remember exited with non-zero code");
+        reject(new Error(`Claude exited with code ${code} after ${Math.round(elapsed / 1000)}s`));
+        return;
+      }
+
+      reqLog.info({ elapsed }, "Claude remember completed");
+      resolve();
+    });
+
+    child.on("error", (err) => {
+      reqLog.error({ err }, "Failed to spawn Claude for remember");
       reject(new Error(`Failed to spawn claude: ${err.message}`));
     });
   });
