@@ -1,6 +1,8 @@
 require("dotenv").config();
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
+const { readFileSync, writeFileSync } = require("fs");
+const { join } = require("path");
 const pino = require("pino");
 
 // --- Logger ---
@@ -34,8 +36,31 @@ if (!DISCORD_TOKEN) {
   process.exit(1);
 }
 
-// --- Session tracking ---
-const sessions = new Map();
+// --- Session tracking (disk-backed) ---
+const SESSION_FILE = join(__dirname, ".bot-sessions.json");
+
+function loadSessions() {
+  try {
+    const data = JSON.parse(readFileSync(SESSION_FILE, "utf8"));
+    return new Map(Object.entries(data));
+  } catch {
+    return new Map();
+  }
+}
+
+function saveSessions() {
+  try {
+    const obj = Object.fromEntries(sessions);
+    writeFileSync(SESSION_FILE, JSON.stringify(obj, null, 2));
+  } catch (err) {
+    log.warn({ err }, "Failed to persist sessions");
+  }
+}
+
+const sessions = loadSessions();
+if (sessions.size > 0) {
+  log.info({ restored: sessions.size }, "Restored sessions from disk");
+}
 
 // --- Bot-to-bot exchange tracking ---
 // Tracks consecutive bot↔bot exchanges per channel to prevent infinite loops.
@@ -98,6 +123,7 @@ client.on("messageCreate", async (msg) => {
   // Handle special commands
   if (prompt === "/new") {
     sessions.delete(msg.channel.id);
+    saveSessions();
     reqLog.info("Session cleared by user");
     await msg.reply("Session cleared. Next message starts a fresh conversation.");
     return;
@@ -267,6 +293,7 @@ function runClaude(prompt, channelId, reqLog, sendMessage) {
 
       if (sessionId) {
         sessions.set(channelId, { sessionId, lastUsed: Date.now() });
+        saveSessions();
       }
 
       reqLog.info({ elapsed, sessionId }, "Claude completed");
