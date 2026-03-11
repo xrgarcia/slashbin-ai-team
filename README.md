@@ -176,10 +176,35 @@ journalctl -u discord-bot -f  # tail logs
 - **Monitored channels** — set `MONITOR_CHANNELS` in `.env` to have the bot respond to all messages in specific channels (no @mention needed)
 - `/new` — clears the session, starts fresh
 - `/status` — shows current session info
+- `/remember <query>` — searches Discord chat history and local knowledge to recall past conversations
 
 ### How sessions work
 
 Each Discord channel gets its own Claude Code session. Messages in the same channel continue the conversation with full context — sessions persist until you type `/new`. Claude Code stores sessions on disk, and the bot persists the channel-to-session mapping to `.bot-sessions.json`, so conversations survive bot restarts, idle time, and even reboots.
+
+### Cross-session recall with /remember
+
+The `/remember` command lets you search across Discord chat history and local knowledge to recall past conversations, decisions, and context — even from other channels or sessions.
+
+```
+/remember the conversation about retry logic
+/remember what we decided about the database schema
+/remember when we discussed the deployment issue last week
+```
+
+**What it searches:**
+
+| Source | How |
+|---|---|
+| Discord chat history | Fetches recent messages from all channels the bot has participated in |
+| `CLAUDE.md` | Reads the system prompt / project context in your working directory |
+| `docs/` directory | Searches architecture docs, runbooks, incidents, schemas |
+| `.claude/` memory files | Persistent knowledge saved across sessions |
+| `~/.claude/` transcripts | Past Claude Code conversation history (JSONL files) |
+
+The bot fetches up to `REMEMBER_MAX_MESSAGES` messages (default: 100) from up to `REMEMBER_MAX_CHANNELS` channels (default: 10), then hands everything to Claude to search and synthesize. Results include citations — Discord message timestamps and file paths — so you can trace back to the source.
+
+`/remember` always uses a fresh session so it doesn't pollute your ongoing conversation.
 
 ## Configuration
 
@@ -205,6 +230,8 @@ All personalization lives in three gitignored files — the bot code itself is g
 | `SESSION_TIMEOUT_MS` | `1800000` | Session inactivity timeout (ms). Default: 30 minutes |
 | `CLAUDE_TIMEOUT_MS` | `3600000` | Max time per Claude session (ms). Default: 1 hour |
 | `CLAUDE_BIN` | `claude` | Path to Claude Code binary |
+| `REMEMBER_MAX_MESSAGES` | `100` | Max messages per channel for `/remember` search |
+| `REMEMBER_MAX_CHANNELS` | `10` | Max channels to search for `/remember` |
 | `LOG_LEVEL` | `info` | Pino log level: `debug`, `info`, `warn`, `error` |
 | `NODE_ENV` | (none) | Set to `production` to disable pretty logging |
 
