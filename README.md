@@ -216,22 +216,31 @@ npm run summarize          # summarize new messages since last run
 npm run summarize:dry      # preview what would be summarized (no changes)
 ```
 
-The summarizer:
-1. Fetches all messages since the last checkpoint (per channel)
-2. Groups them by date
-3. Sends each day's messages to Claude for structured summarization
-4. Saves summaries as markdown files in `.bot-history/` (e.g., `2026-03-11-engineering-discussion.md`)
-5. Tracks a per-channel checkpoint so it never re-processes messages
+**Option 1: Built-in background summarizer (recommended)**
 
-Run it on a schedule for hands-off operation:
+Set `SUMMARIZE_INTERVAL_MS` in `.env` to enable automatic summarization as part of the bot process — no extra scripts or cron jobs needed:
+
+```env
+# Summarize once per day (86400000ms = 24 hours)
+SUMMARIZE_INTERVAL_MS=86400000
+```
+
+The bot runs the first summarization cycle 10 seconds after startup, then repeats on the configured interval. It reuses the bot's existing Discord connection — no second login required.
+
+**Option 2: Standalone script**
+
+For manual runs or if you prefer external scheduling:
 
 ```bash
-# With cron (daily at midnight)
-0 0 * * * cd /path/to/slashbin-discord-bot && node summarize.js >> summarize.log 2>&1
-
-# With pm2
-pm2 start summarize.js --cron "0 0 * * *" --no-autorestart --name discord-summarizer
+npm run summarize          # summarize new messages since last run
+npm run summarize:dry      # preview what would be summarized (no changes)
 ```
+
+Both options use the same logic:
+1. Fetch all messages since the last checkpoint (per channel)
+2. Group by date, summarize each day with Claude
+3. Save as `.bot-history/2026-03-11-engineering.md`
+4. Track per-channel checkpoint so messages are never re-processed
 
 By default, the summarizer processes the same channels listed in `MONITOR_CHANNELS`. Set `SUMMARIZE_CHANNELS` in `.env` to override.
 
@@ -261,6 +270,7 @@ All personalization lives in three gitignored files — the bot code itself is g
 | `CLAUDE_BIN` | `claude` | Path to Claude Code binary |
 | `REMEMBER_MAX_MESSAGES` | `100` | Max messages per channel for `/remember` search |
 | `REMEMBER_MAX_CHANNELS` | `10` | Max channels to search for `/remember` |
+| `SUMMARIZE_INTERVAL_MS` | `0` (disabled) | Enable background summarization. Set to interval in ms (e.g., `86400000` = daily) |
 | `SUMMARIZE_CHANNELS` | `MONITOR_CHANNELS` | Channels to summarize (defaults to monitored channels) |
 | `SUMMARIZE_BATCH_SIZE` | `200` | Max messages per channel per summarization run |
 | `LOG_LEVEL` | `info` | Pino log level: `debug`, `info`, `warn`, `error` |
