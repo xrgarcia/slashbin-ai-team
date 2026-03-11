@@ -111,23 +111,26 @@ npm start
 
 That's it. The bot is online.
 
-## How to use
+## Managing the bot
 
-- **DM the bot** — it responds to all direct messages
-- **Mention in a server** — `@YourBot what's the status of open issues?`
-- **Monitored channels** — set `MONITOR_CHANNELS` in `.env` to have the bot respond to all messages in specific channels (no @mention needed)
-- `/new` — clears the session, starts fresh
-- `/status` — shows current session info
+The built-in process manager handles start, stop, and restart with PID file tracking. Works on Linux, macOS, and Windows.
 
-### How sessions work
+```bash
+npm start          # start bot in background
+npm stop           # graceful shutdown
+npm restart        # stop + start
+npm run status     # show PID, uptime, recent logs
+npm run logs       # tail last 20 lines of bot.log
+npm run logs 50    # tail last 50 lines
+```
 
-Each Discord channel gets its own Claude Code session. Messages in the same channel continue the conversation (with full context) for 30 minutes. After 30 minutes of inactivity, the next message starts a fresh session.
+The manager writes a `.bot.pid` file to track the running process. `npm start` will refuse to start a second instance. `npm stop` sends SIGINT for graceful shutdown (5s timeout, then force kill).
 
-## Running as a daemon
+### Running as a system service
 
-For always-on use, run the bot as a background process that survives terminal closes and restarts on crashes.
+For auto-restart on crashes or reboots, use a system service manager instead of the built-in manager.
 
-**With pm2** (recommended):
+**With pm2:**
 
 ```bash
 npm install -g pm2
@@ -164,13 +167,19 @@ sudo systemctl start discord-bot
 journalctl -u discord-bot -f  # tail logs
 ```
 
-**With nohup** (quick and simple):
+> **Note:** When using pm2 or systemd, don't mix with `npm start/stop` — use one or the other.
 
-```bash
-nohup node bot.js >> bot.log 2>&1 &
-```
+## How to use
 
-> **Note:** `nohup` won't auto-restart on crashes. Use pm2 or systemd for production.
+- **DM the bot** — it responds to all direct messages
+- **Mention in a server** — `@YourBot what's the status of open issues?`
+- **Monitored channels** — set `MONITOR_CHANNELS` in `.env` to have the bot respond to all messages in specific channels (no @mention needed)
+- `/new` — clears the session, starts fresh
+- `/status` — shows current session info
+
+### How sessions work
+
+Each Discord channel gets its own Claude Code session. Messages in the same channel continue the conversation (with full context) for 30 minutes. After 30 minutes of inactivity, the next message starts a fresh session.
 
 ## Configuration
 
