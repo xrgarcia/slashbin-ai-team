@@ -1,7 +1,7 @@
 require("dotenv").config();
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
-const { readFileSync, writeFileSync, readdirSync } = require("fs");
+const { readFileSync, writeFileSync, readdirSync, mkdirSync } = require("fs");
 const { join } = require("path");
 const pino = require("pino");
 
@@ -32,6 +32,13 @@ const ALLOWED_BOTS = process.env.ALLOWED_BOTS
 const MAX_BOT_EXCHANGES = parseInt(process.env.MAX_BOT_EXCHANGES, 10) || 2;
 const REMEMBER_MAX_MESSAGES = parseInt(process.env.REMEMBER_MAX_MESSAGES, 10) || 100;
 const REMEMBER_MAX_CHANNELS = parseInt(process.env.REMEMBER_MAX_CHANNELS, 10) || 10;
+const SUMMARIZE_INTERVAL_MS = parseInt(process.env.SUMMARIZE_INTERVAL_MS, 10) || 0; // 0 = disabled
+const SUMMARIZE_CHANNELS = process.env.SUMMARIZE_CHANNELS
+  ? process.env.SUMMARIZE_CHANNELS.split(",").filter(Boolean)
+  : MONITOR_CHANNELS;
+const SUMMARIZE_BATCH_SIZE = parseInt(process.env.SUMMARIZE_BATCH_SIZE, 10) || 200;
+const HISTORY_DIR = join(__dirname, ".bot-history");
+const CHECKPOINT_FILE = join(HISTORY_DIR, ".checkpoints.json");
 
 if (!DISCORD_TOKEN) {
   log.fatal("DISCORD_TOKEN environment variable is required");
@@ -602,6 +609,222 @@ setInterval(() => {
     log.debug({ activeSessions: sessions.size }, "Session inventory");
   }
 }, 10 * 60 * 1000);
+
+// --- Background summarizer (opt-in via SUMMARIZE_INTERVAL_MS) ---
+function loadCheckpoints() {
+  try {
+    return JSON.parse(readFileSync(CHECKPOINT_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveCheckpoints(checkpoints) {
+  mkdirSync(HISTORY_DIR, { recursive: true });
+  writeFileSync(CHECKPOINT_FILE, JSON.stringify(checkpoints, null, 2));
+}
+
+async function fetchMessagesSince(channel, afterId) {
+  const allMessages = [];
+  let lastId = afterId;
+
+  while (true) {
+    const options = { limit: 100 };
+    if (lastId) options.after = lastId;
+
+    const batch = await channel.messages.fetch(options);
+    if (batch.size === 0) break;
+
+    const sorted = [...batch.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+    allMessages.push(...sorted);
+    lastId = sorted[sorted.length - 1].id;
+
+    if (allMessages.length >= SUMMARIZE_BATCH_SIZE) break;
+    if (batch.size < 100) break;
+  }
+
+  return allMessages;
+}
+
+function groupByDate(messages) {
+  const groups = {};
+  for (const m of messages) {
+    const date = m.createdAt.toISOString().split("T")[0];
+    if (!groups[date]) groups[date] = [];
+    groups[date].push({
+      timestamp: m.createdAt.toISOString(),
+      author: m.author.tag,
+      content: m.content.substring(0, 2000),
+      isBot: m.author.bot,
+    });
+  }
+  return groups;
+}
+
+function summarizeWithClaude(channelName, date, messages) {
+  return new Promise((resolve, reject) => {
+    const transcript = messages
+      .map((m) => `[${m.timestamp}] ${m.isBot ? "(bot) " : ""}${m.author}: ${m.content}`)
+      .join("\n");
+
+    const prompt = [
+      `Summarize this Discord conversation from #${channelName} on ${date}.`,
+      "",
+      "Create a structured summary with:",
+      "- **Topics discussed** — what subjects came up",
+      "- **Decisions made** — any conclusions or agreements",
+      "- **Action items** — tasks assigned or next steps identified",
+      "- **Key context** — important facts, debugging results, or technical details worth remembering",
+      "",
+      "Be thorough but concise. Preserve specific details like error messages, file paths, issue numbers, and names.",
+      "Do NOT add commentary — just summarize what happened.",
+      "",
+      "```",
+      transcript,
+      "```",
+    ].join("\n");
+
+    const args = [
+      "--output-format", "stream-json",
+      "--verbose",
+      "--allow-dangerously-skip-permissions",
+      "--dangerously-skip-permissions",
+      "-p", prompt,
+      "--append-system-prompt", "You are a summarization assistant. Output only the summary, no preamble. Keep it under 2000 characters.",
+    ];
+
+    const cleanEnv = { ...process.env };
+    delete cleanEnv.CLAUDECODE;
+    delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
+    delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
+    delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
+
+    const child = spawn(CLAUDE_BIN, args, {
+      cwd: CLAUDE_CWD,
+      env: cleanEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 120000,
+    });
+
+    let buffer = "";
+    let result = "";
+
+    child.stdout.on("data", (data) => {
+      buffer += data.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+          if (event.type === "assistant" && event.message?.content) {
+            for (const block of event.message.content) {
+              if (block.type === "text") result += block.text;
+            }
+          }
+        } catch { /* skip */ }
+      }
+    });
+
+    child.on("close", (code) => {
+      if (buffer.trim()) {
+        try {
+          const event = JSON.parse(buffer);
+          if (event.type === "assistant" && event.message?.content) {
+            for (const block of event.message.content) {
+              if (block.type === "text") result += block.text;
+            }
+          }
+        } catch { /* ignore */ }
+      }
+
+      if (code !== 0) {
+        reject(new Error(`Claude exited with code ${code}`));
+        return;
+      }
+      resolve(result.trim());
+    });
+
+    child.on("error", (err) => reject(err));
+  });
+}
+
+function writeSummary(channelName, date, messageCount, summary) {
+  mkdirSync(HISTORY_DIR, { recursive: true });
+  const filename = `${date}-${channelName}.md`;
+  const filepath = join(HISTORY_DIR, filename);
+  const content = [
+    `# ${channelName} — ${date}`,
+    "",
+    `> ${messageCount} messages summarized`,
+    "",
+    summary,
+    "",
+  ].join("\n");
+  writeFileSync(filepath, content);
+  return filepath;
+}
+
+let summarizing = false;
+
+async function runSummarizer() {
+  if (summarizing) return;
+  if (SUMMARIZE_CHANNELS.length === 0) return;
+  summarizing = true;
+
+  const sumLog = log.child({ component: "summarizer" });
+  sumLog.info({ channels: SUMMARIZE_CHANNELS.length }, "Summarizer cycle starting");
+
+  const checkpoints = loadCheckpoints();
+  let totalMessages = 0;
+  let totalSummaries = 0;
+
+  for (const channelId of SUMMARIZE_CHANNELS) {
+    try {
+      const channel = await client.channels.fetch(channelId);
+      if (!channel || !channel.isTextBased()) continue;
+
+      const channelName = (channel.name || `dm-${channelId}`).replace(/[^a-zA-Z0-9-_]/g, "-");
+      const afterId = checkpoints[channelId] || null;
+
+      const messages = await fetchMessagesSince(channel, afterId);
+      if (messages.length === 0) continue;
+
+      totalMessages += messages.length;
+      const groups = groupByDate(messages);
+
+      for (const date of Object.keys(groups).sort()) {
+        const dayMessages = groups[date];
+        try {
+          const summary = await summarizeWithClaude(channelName, date, dayMessages);
+          writeSummary(channelName, date, dayMessages.length, summary);
+          totalSummaries++;
+          sumLog.info({ channel: channelName, date, messages: dayMessages.length }, "Summary saved");
+        } catch (err) {
+          sumLog.error({ channel: channelName, date, err: err.message }, "Failed to summarize");
+        }
+      }
+
+      checkpoints[channelId] = messages[messages.length - 1].id;
+      saveCheckpoints(checkpoints);
+    } catch (err) {
+      sumLog.error({ channelId, err: err.message }, "Failed to process channel");
+    }
+  }
+
+  sumLog.info({ totalMessages, totalSummaries }, "Summarizer cycle complete");
+  summarizing = false;
+}
+
+if (SUMMARIZE_INTERVAL_MS > 0) {
+  // Run first cycle shortly after bot connects (give Discord client time to be ready)
+  setTimeout(() => {
+    runSummarizer();
+    setInterval(runSummarizer, SUMMARIZE_INTERVAL_MS);
+  }, 10000);
+  log.info({ intervalMs: SUMMARIZE_INTERVAL_MS, channels: SUMMARIZE_CHANNELS }, "Background summarizer enabled");
+}
 
 // Graceful shutdown
 process.on("SIGINT", () => {
