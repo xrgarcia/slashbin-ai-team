@@ -15,20 +15,18 @@ const log = pino({
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
 const CLAUDE_CWD = process.env.CLAUDE_CWD || process.cwd();
-const BOT_SYSTEM_PROMPT = [
-  "You are running inside a Discord bot. Keep responses concise — Discord has a 2000 char limit per message.",
-  "Do NOT perform startup rituals — no reading soul.md, no checking ray issues, no reading files unless the question needs it.",
-  "Do NOT give long responses. Summarize and offer to elaborate if the answer is complex.",
-  "You CAN read, write, and edit files in this repo. You CAN git commit and push when asked.",
-].join(" ");
-const MAX_DISCORD_LENGTH = 1900;
+const MAX_DISCORD_LENGTH = parseInt(process.env.MAX_DISCORD_LENGTH, 10) || 1900;
+const SESSION_TIMEOUT_MS = parseInt(process.env.SESSION_TIMEOUT_MS, 10) || 30 * 60 * 1000;
+const CLAUDE_TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS, 10) || 3600000; // 1 hour default
 const ALLOWED_USER_IDS = process.env.ALLOWED_USERS
   ? process.env.ALLOWED_USERS.split(",").filter(Boolean)
   : [];
 const MONITOR_CHANNELS = process.env.MONITOR_CHANNELS
   ? process.env.MONITOR_CHANNELS.split(",").filter(Boolean)
   : [];
-const CLAUDE_TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS, 10) || 3600000; // 1 hour default
+const ALLOWED_BOTS = process.env.ALLOWED_BOTS
+  ? process.env.ALLOWED_BOTS.split(",").filter(Boolean)
+  : [];
 
 if (!DISCORD_TOKEN) {
   log.fatal("DISCORD_TOKEN environment variable is required");
@@ -37,7 +35,6 @@ if (!DISCORD_TOKEN) {
 
 // --- Session tracking ---
 const sessions = new Map();
-const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 
 // --- Discord client ---
 const client = new Client({
@@ -59,7 +56,7 @@ client.once("ready", () => {
 });
 
 client.on("messageCreate", async (msg) => {
-  if (msg.author.bot) return;
+  if (msg.author.bot && !ALLOWED_BOTS.includes(msg.author.id)) return;
 
   if (ALLOWED_USER_IDS.length > 0 && !ALLOWED_USER_IDS.includes(msg.author.id)) {
     return;
@@ -153,12 +150,15 @@ function runClaude(prompt, channelId, reqLog, sendMessage) {
   return new Promise((resolve, reject) => {
     const session = sessions.get(channelId);
 
+    const systemPrompt = process.env.BOT_SYSTEM_PROMPT ||
+      "You are running inside a Discord bot. Keep responses concise — Discord has a 2000 char limit per message. Do NOT perform startup rituals. Be brief.";
+
     const args = [
       "--output-format", "stream-json",
       "--allow-dangerously-skip-permissions",
       "--dangerously-skip-permissions",
       "--verbose",
-      "--append-system-prompt", BOT_SYSTEM_PROMPT,
+      "--append-system-prompt", systemPrompt,
     ];
 
     if (session && Date.now() - session.lastUsed < SESSION_TIMEOUT_MS) {

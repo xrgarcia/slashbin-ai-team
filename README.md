@@ -159,11 +159,14 @@ All personalization lives in three gitignored files — the bot code itself is g
 | Variable | Default | Description |
 |---|---|---|
 | `DISCORD_TOKEN` | (required) | Discord bot token |
+| `CLAUDE_CWD` | current directory | **Your project repo** — where `CLAUDE.md`, `.mcp.json`, and `.claude/commands/` live |
 | `ALLOWED_USERS` | (all users) | Comma-separated Discord user IDs to restrict access |
 | `MONITOR_CHANNELS` | (none) | Channels where bot responds without @mention |
-| `CLAUDE_CWD` | current directory | **Your project repo** — where `CLAUDE.md`, `.mcp.json`, and `.claude/commands/` live |
-| `CLAUDE_BIN` | `claude` | Path to Claude Code binary |
+| `ALLOWED_BOTS` | (none) | Bot user IDs allowed to interact (enables bot-to-bot communication) |
+| `BOT_SYSTEM_PROMPT` | (built-in) | Override the system prompt appended to every Claude session |
+| `SESSION_TIMEOUT_MS` | `1800000` | Session inactivity timeout (ms). Default: 30 minutes |
 | `CLAUDE_TIMEOUT_MS` | `3600000` | Max time per Claude session (ms). Default: 1 hour |
+| `CLAUDE_BIN` | `claude` | Path to Claude Code binary |
 | `LOG_LEVEL` | `info` | Pino log level: `debug`, `info`, `warn`, `error` |
 | `NODE_ENV` | (none) | Set to `production` to disable pretty logging |
 
