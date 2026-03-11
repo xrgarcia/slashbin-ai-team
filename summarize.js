@@ -129,6 +129,7 @@ function summarizeWithClaude(channelName, date, messages) {
 
     const args = [
       "--output-format", "stream-json",
+      "--verbose",
       "--allow-dangerously-skip-permissions",
       "--dangerously-skip-permissions",
       "-p", prompt,
