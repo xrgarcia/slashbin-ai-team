@@ -175,7 +175,8 @@ journalctl -u discord-bot -f  # tail logs
 - **Mention in a server** — `@YourBot what's the status of open issues?`
 - **Monitored channels** — set `MONITOR_CHANNELS` in `.env` to have the bot respond to all messages in specific channels (no @mention needed)
 - `/new` — clears the session, starts fresh
-- `/status` — shows current session info
+- `/stop` (or just `stop`) — immediately kills the running Claude process in the channel
+- `/status` — shows current session info and whether Claude is running
 ### How sessions work
 
 Each Discord channel gets its own Claude Code session. Messages in the same channel continue the conversation with full context — sessions persist until you type `/new`. Claude Code stores sessions on disk, and the bot persists the channel-to-session mapping to `.bot-sessions.json`, so conversations survive bot restarts, idle time, and even reboots.

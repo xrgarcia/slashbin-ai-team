@@ -73,6 +73,10 @@ if (sessions.size > 0) {
   log.info({ restored: sessions.size }, "Restored sessions from disk");
 }
 
+// --- Active Claude process tracking ---
+// Key: channelId, Value: ChildProcess (the running Claude CLI process)
+const activeProcesses = new Map();
+
 // --- Bot-to-bot exchange tracking ---
 // Tracks consecutive bot↔bot exchanges per channel to prevent infinite loops.
 // Key: channelId, Value: { count: number, lastBotId: string }
@@ -140,10 +144,24 @@ client.on("messageCreate", async (msg) => {
     return;
   }
 
+  if (prompt === "/stop" || prompt === "stop") {
+    const child = activeProcesses.get(msg.channel.id);
+    if (child) {
+      child.kill("SIGTERM");
+      activeProcesses.delete(msg.channel.id);
+      reqLog.info("Claude process killed by /stop");
+      await msg.reply("Stopped. Claude process terminated.");
+    } else {
+      await msg.reply("Nothing running in this channel.");
+    }
+    return;
+  }
+
   if (prompt === "/status") {
     const session = sessions.get(msg.channel.id);
+    const running = activeProcesses.has(msg.channel.id);
     const status = session
-      ? `Active session: \`${session.sessionId}\` (last used ${Math.round((Date.now() - session.lastUsed) / 1000)}s ago)`
+      ? `Active session: \`${session.sessionId}\` (last used ${Math.round((Date.now() - session.lastUsed) / 1000)}s ago)${running ? " — **running**" : ""}`
       : "No active session";
     await msg.reply(status);
     return;
@@ -262,6 +280,8 @@ async function runClaude(prompt, channelId, reqLog, sendMessage) {
       timeout: CLAUDE_TIMEOUT_MS,
     });
 
+    activeProcesses.set(channelId, child);
+
     let sessionId = null;
     let buffer = "";
     let turnText = ""; // text accumulated in the current assistant turn
@@ -291,6 +311,7 @@ async function runClaude(prompt, channelId, reqLog, sendMessage) {
     });
 
     child.on("close", (code) => {
+      activeProcesses.delete(channelId);
       const elapsed = Date.now() - startTime;
 
       if (buffer.trim()) {
