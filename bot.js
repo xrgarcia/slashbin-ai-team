@@ -1,8 +1,11 @@
 require("dotenv").config();
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
-const { readFileSync, writeFileSync, mkdirSync } = require("fs");
+const { readFileSync, writeFileSync, mkdirSync, unlinkSync } = require("fs");
 const { join } = require("path");
+const { pipeline } = require("stream/promises");
+const { createWriteStream } = require("fs");
+const os = require("os");
 const pino = require("pino");
 
 // --- Logger ---
@@ -131,7 +134,11 @@ client.on("messageCreate", async (msg) => {
   let prompt = msg.content
     .replace(new RegExp(`<@!?${client.user.id}>`, "g"), "")
     .trim();
-  if (!prompt) return;
+
+  // Check for image attachments
+  const hasImages = msg.attachments.some((a) => isImageAttachment(a));
+  if (!prompt && !hasImages) return;
+  if (!prompt && hasImages) prompt = "What do you see in this image?";
 
   const reqLog = log.child({ channel: msg.channel.id, user: msg.author.tag, prompt: prompt.substring(0, 80) });
 
@@ -173,8 +180,12 @@ client.on("messageCreate", async (msg) => {
   // Queue for sending messages to Discord without overlap
   const sendQueue = createSendQueue(msg, reqLog);
 
+  let imagePaths = [];
   try {
-    await runClaude(prompt, msg.channel.id, reqLog, sendQueue.enqueue);
+    if (hasImages) {
+      imagePaths = await downloadAttachmentImages(msg.attachments, reqLog);
+    }
+    await runClaude(prompt, msg.channel.id, reqLog, sendQueue.enqueue, imagePaths);
     clearInterval(typing);
     await sendQueue.flush();
   } catch (err) {
@@ -182,6 +193,8 @@ client.on("messageCreate", async (msg) => {
     await sendQueue.flush();
     reqLog.error({ err }, "Claude invocation failed");
     await msg.reply(`Error: ${err.message}`);
+  } finally {
+    cleanupImages(imagePaths, reqLog);
   }
 });
 
@@ -222,7 +235,50 @@ function createSendQueue(msg, reqLog) {
   };
 }
 
-async function runClaude(prompt, channelId, reqLog, sendMessage) {
+// --- Image attachment handling ---
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
+
+function isImageAttachment(attachment) {
+  const name = (attachment.name || "").toLowerCase();
+  const contentType = (attachment.contentType || "").toLowerCase();
+  return contentType.startsWith("image/") || IMAGE_EXTENSIONS.has(name.substring(name.lastIndexOf(".")));
+}
+
+async function downloadImage(url, filename) {
+  const { Readable } = require("stream");
+  const tmpPath = join(os.tmpdir(), `discord-img-${Date.now()}-${filename}`);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to download image: ${res.status}`);
+  const nodeStream = Readable.fromWeb(res.body);
+  await pipeline(nodeStream, createWriteStream(tmpPath));
+  return tmpPath;
+}
+
+async function downloadAttachmentImages(attachments, reqLog) {
+  const imagePaths = [];
+  for (const [, attachment] of attachments) {
+    if (!isImageAttachment(attachment)) continue;
+    try {
+      const path = await downloadImage(attachment.url, attachment.name || "image.png");
+      imagePaths.push(path);
+      reqLog.info({ name: attachment.name, size: attachment.size }, "Downloaded image attachment");
+    } catch (err) {
+      reqLog.warn({ name: attachment.name, err: err.message }, "Failed to download image attachment");
+    }
+  }
+  return imagePaths;
+}
+
+function cleanupImages(imagePaths, reqLog) {
+  for (const p of imagePaths) {
+    try { unlinkSync(p); } catch { /* ignore */ }
+  }
+  if (imagePaths.length > 0) {
+    reqLog.debug({ count: imagePaths.length }, "Cleaned up temp image files");
+  }
+}
+
+async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []) {
   // Fetch recent history from all channels to inject as context
   let recentContext = "";
   try {
@@ -252,6 +308,11 @@ async function runClaude(prompt, channelId, reqLog, sendMessage) {
       "--append-system-prompt", systemPrompt,
     ];
 
+    // Add image flags for any attached images
+    for (const imgPath of imagePaths) {
+      args.push("--image", imgPath);
+    }
+
     if (session) {
       const idleMs = Date.now() - session.lastUsed;
       args.push("--resume", session.sessionId, "-p", prompt);
@@ -262,7 +323,7 @@ async function runClaude(prompt, channelId, reqLog, sendMessage) {
       }
     } else {
       args.push("-p", prompt);
-      reqLog.info("Starting new Claude session");
+      reqLog.info({ images: imagePaths.length }, "Starting new Claude session");
     }
 
     // Build a clean env without Claude nesting vars
