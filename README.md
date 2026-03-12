@@ -192,6 +192,14 @@ RECENT_CONTEXT_CHANNELS=...     # Channels to load (defaults to MONITOR_CHANNELS
 
 This works alongside session resume — the session provides Claude's internal conversation state, while recent context provides cross-channel awareness of what's been discussed.
 
+### Image support
+
+The bot can see images posted in Discord. Attach an image to your message and the bot will pass it to Claude for analysis. This works with PNG, JPG, GIF, WebP, and BMP files.
+
+- **Image + text** — attach an image and include a message (e.g., "What's wrong with this UI?")
+- **Image only** — attach an image with no text and the bot will ask Claude to describe it
+- Images are downloaded to a temp directory, passed to Claude via `--image`, and cleaned up after
+
 ### Chat history summarization
 
 The summarizer compresses Discord chat history into searchable daily summaries stored in `.bot-history/`.
