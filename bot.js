@@ -39,6 +39,9 @@ const SUMMARIZE_CHANNELS = process.env.SUMMARIZE_CHANNELS
   : MONITOR_CHANNELS;
 const SUMMARIZE_BATCH_SIZE = parseInt(process.env.SUMMARIZE_BATCH_SIZE, 10) || 200;
 const RECENT_CONTEXT_HOURS = parseFloat(process.env.RECENT_CONTEXT_HOURS) || 1;
+const RECENT_CONTEXT_MAX_MESSAGES = parseInt(process.env.RECENT_CONTEXT_MAX_MESSAGES, 10) || 30;
+const RECENT_CONTEXT_MAX_CHARS = parseInt(process.env.RECENT_CONTEXT_MAX_CHARS, 10) || 12000;
+const SUMMARY_LOOKBACK_HOURS = parseInt(process.env.SUMMARY_LOOKBACK_HOURS, 10) || 48;
 const RECENT_CONTEXT_CHANNELS = process.env.RECENT_CONTEXT_CHANNELS
   ? process.env.RECENT_CONTEXT_CHANNELS.split(",").filter(Boolean)
   : MONITOR_CHANNELS;
@@ -308,21 +311,23 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
       "--append-system-prompt", systemPrompt,
     ];
 
-    // Add image flags for any attached images
-    for (const imgPath of imagePaths) {
-      args.push("--image", imgPath);
+    // Build the final prompt with image paths prepended
+    let finalPrompt = prompt;
+    if (imagePaths.length > 0) {
+      const imageRefs = imagePaths.map(p => `[Attached image: ${p}]`).join("\n");
+      finalPrompt = `${imageRefs}\n\n${prompt}`;
     }
 
     if (session) {
       const idleMs = Date.now() - session.lastUsed;
-      args.push("--resume", session.sessionId, "-p", prompt);
+      args.push("--resume", session.sessionId, "-p", finalPrompt);
       if (idleMs > SESSION_TIMEOUT_MS) {
         reqLog.info({ sessionId: session.sessionId, idleMin: Math.round(idleMs / 60000) }, "Resuming stale session");
       } else {
         reqLog.info({ sessionId: session.sessionId }, "Resuming session");
       }
     } else {
-      args.push("-p", prompt);
+      args.push("-p", finalPrompt);
       reqLog.info({ images: imagePaths.length }, "Starting new Claude session");
     }
 
@@ -489,7 +494,7 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000);
 
-// --- Recent context loader (last N hours across all channels) ---
+// --- Recent context loader (tiered: summaries + sliding window) ---
 // Discord snowflake: (timestamp_ms - DISCORD_EPOCH) << 22
 const DISCORD_EPOCH = 1420070400000n;
 
@@ -497,11 +502,41 @@ function timestampToSnowflake(timestampMs) {
   return String((BigInt(timestampMs) - DISCORD_EPOCH) << 22n);
 }
 
-async function fetchRecentHistory() {
-  if (RECENT_CONTEXT_CHANNELS.length === 0) return "";
+/**
+ * Load recent summaries from .bot-history/ for the last N hours.
+ * These are compressed context from the background summarizer.
+ */
+function loadRecentSummaries() {
+  const { readdirSync } = require("fs");
+  const cutoffMs = Date.now() - SUMMARY_LOOKBACK_HOURS * 3600000;
+  const cutoffDate = new Date(cutoffMs).toISOString().split("T")[0];
 
-  const cutoffMs = Date.now() - RECENT_CONTEXT_HOURS * 3600000;
-  const afterSnowflake = timestampToSnowflake(cutoffMs);
+  try {
+    const files = readdirSync(HISTORY_DIR)
+      .filter((f) => f.endsWith(".md") && !f.startsWith("."))
+      .sort()
+      .filter((f) => f >= cutoffDate); // filenames start with YYYY-MM-DD
+
+    const summaries = [];
+    for (const file of files) {
+      try {
+        const content = readFileSync(join(HISTORY_DIR, file), "utf8").trim();
+        if (content) summaries.push(content);
+      } catch { /* skip unreadable */ }
+    }
+    return summaries;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fetch the last N messages (sliding window) from monitored channels.
+ * Uses message count, not time window, so context size is predictable.
+ */
+async function fetchRecentMessages() {
+  if (RECENT_CONTEXT_CHANNELS.length === 0) return [];
+
   const allMessages = [];
 
   for (const channelId of RECENT_CONTEXT_CHANNELS) {
@@ -510,49 +545,96 @@ async function fetchRecentHistory() {
       if (!channel || !channel.isTextBased()) continue;
 
       const channelName = channel.name || `dm-${channelId}`;
-      let lastId = afterSnowflake;
+      // Fetch last N messages (most recent first from Discord API)
+      const batch = await channel.messages.fetch({ limit: RECENT_CONTEXT_MAX_MESSAGES });
+      if (batch.size === 0) continue;
 
-      while (true) {
-        const batch = await channel.messages.fetch({ limit: 100, after: lastId });
-        if (batch.size === 0) break;
-
-        const sorted = [...batch.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
-        for (const m of sorted) {
-          allMessages.push({
-            timestamp: m.createdAt.toISOString(),
-            ts: m.createdTimestamp,
-            channel: channelName,
-            author: m.author.tag || m.author.username,
-            isBot: m.author.bot,
-            content: m.content.substring(0, 1500),
-          });
-        }
-        lastId = sorted[sorted.length - 1].id;
-
-        if (batch.size < 100) break;
-        if (allMessages.length > 500) break; // safety cap
+      for (const m of batch.values()) {
+        allMessages.push({
+          timestamp: m.createdAt.toISOString(),
+          ts: m.createdTimestamp,
+          channel: channelName,
+          author: m.author.tag || m.author.username,
+          isBot: m.author.bot,
+          content: m.content.substring(0, 1500),
+        });
       }
     } catch (err) {
-      log.warn({ channelId, err: err.message }, "Failed to fetch recent history for channel");
+      log.warn({ channelId, err: err.message }, "Failed to fetch recent messages for channel");
     }
   }
 
-  if (allMessages.length === 0) return "";
-
-  // Sort chronologically across all channels
+  // Sort chronologically, take the most recent N across all channels
   allMessages.sort((a, b) => a.ts - b.ts);
+  return allMessages.slice(-RECENT_CONTEXT_MAX_MESSAGES);
+}
 
-  const lines = allMessages.map((m) => {
-    const time = m.timestamp.replace("T", " ").replace(/\.\d+Z$/, "Z");
-    const botTag = m.isBot ? " (bot)" : "";
-    return `[${time}] #${m.channel} | ${m.author}${botTag}: ${m.content}`;
-  });
+/**
+ * Build tiered context: summaries (compressed background) + recent messages (immediate).
+ * Respects RECENT_CONTEXT_MAX_CHARS to keep system prompt bounded.
+ */
+async function fetchRecentHistory() {
+  const sections = [];
+  let totalChars = 0;
 
-  return [
-    `--- Recent conversation history (last ${RECENT_CONTEXT_HOURS}h, ${allMessages.length} messages) ---`,
-    ...lines,
-    "--- End recent history ---",
-  ].join("\n");
+  // Layer 1: Recent summaries (compressed, oldest first)
+  const summaries = loadRecentSummaries();
+  if (summaries.length > 0) {
+    const summaryBlock = [
+      "--- Recent session summaries (compressed history) ---",
+      ...summaries,
+      "--- End summaries ---",
+    ].join("\n");
+
+    // Reserve at least 4000 chars for raw messages
+    const summaryBudget = RECENT_CONTEXT_MAX_CHARS - 4000;
+    if (summaryBlock.length <= summaryBudget) {
+      sections.push(summaryBlock);
+      totalChars += summaryBlock.length;
+    } else if (summaryBudget > 500) {
+      // Truncate from the oldest summaries
+      const truncated = summaryBlock.substring(summaryBlock.length - summaryBudget);
+      const firstNewline = truncated.indexOf("\n");
+      sections.push("--- Recent session summaries (truncated) ---\n" + truncated.substring(firstNewline + 1));
+      totalChars += summaryBudget;
+    }
+  }
+
+  // Layer 2: Raw recent messages (sliding window)
+  const messages = await fetchRecentMessages();
+  if (messages.length > 0) {
+    const lines = messages.map((m) => {
+      const time = m.timestamp.replace("T", " ").replace(/\.\d+Z$/, "Z");
+      const botTag = m.isBot ? " (bot)" : "";
+      return `[${time}] #${m.channel} | ${m.author}${botTag}: ${m.content}`;
+    });
+
+    let messageBlock = [
+      `--- Recent messages (last ${messages.length}) ---`,
+      ...lines,
+      "--- End recent messages ---",
+    ].join("\n");
+
+    // Trim messages from the oldest if over budget
+    const remaining = RECENT_CONTEXT_MAX_CHARS - totalChars;
+    if (messageBlock.length > remaining && remaining > 500) {
+      // Drop oldest messages until it fits
+      while (lines.length > 5 && messageBlock.length > remaining) {
+        lines.shift();
+        messageBlock = [
+          `--- Recent messages (last ${lines.length}) ---`,
+          ...lines,
+          "--- End recent messages ---",
+        ].join("\n");
+      }
+    }
+
+    if (messageBlock.length <= RECENT_CONTEXT_MAX_CHARS - totalChars) {
+      sections.push(messageBlock);
+    }
+  }
+
+  return sections.join("\n\n");
 }
 
 // --- Background summarizer (opt-in via SUMMARIZE_INTERVAL_MS) ---

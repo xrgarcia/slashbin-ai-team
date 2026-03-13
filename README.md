@@ -181,16 +181,23 @@ journalctl -u discord-bot -f  # tail logs
 
 Each Discord channel gets its own Claude Code session. Messages in the same channel continue the conversation with full context — sessions persist until you type `/new`. Claude Code stores sessions on disk, and the bot persists the channel-to-session mapping to `.bot-sessions.json`, so conversations survive bot restarts, idle time, and even reboots.
 
-### Recent context loading
+### Tiered context loading
 
-On every Claude spawn (new session or resumed), the bot fetches the last hour of messages from all monitored channels and injects them into Claude's system prompt. This means the bot always has recent conversational context — even after a session timeout or bot restart.
+On every Claude spawn, the bot injects two layers of context into the system prompt:
+
+1. **Recent summaries** — compressed daily summaries from `.bot-history/` (last 48h). These provide cross-session awareness without raw message bloat.
+2. **Recent messages** — the last 30 raw messages from monitored channels. This is the immediate conversational context.
 
 ```env
-RECENT_CONTEXT_HOURS=1          # How far back to fetch (default: 1 hour)
-RECENT_CONTEXT_CHANNELS=...     # Channels to load (defaults to MONITOR_CHANNELS)
+RECENT_CONTEXT_MAX_MESSAGES=30   # Sliding window size (default: 30)
+RECENT_CONTEXT_MAX_CHARS=12000   # Total context budget in chars (default: 12000)
+SUMMARY_LOOKBACK_HOURS=48        # How far back to load summaries (default: 48h)
+RECENT_CONTEXT_CHANNELS=...      # Channels to load (defaults to MONITOR_CHANNELS)
 ```
 
-This works alongside session resume — the session provides Claude's internal conversation state, while recent context provides cross-channel awareness of what's been discussed.
+The total injected context is capped at `RECENT_CONTEXT_MAX_CHARS` (default 12K). Summaries get 8K budget, raw messages get 4K. Oldest content is trimmed first when over budget.
+
+This works alongside session resume — the session provides Claude's internal conversation state, while tiered context provides cross-channel and cross-session awareness.
 
 ### Image support
 
@@ -198,7 +205,7 @@ The bot can see images posted in Discord. Attach an image to your message and th
 
 - **Image + text** — attach an image and include a message (e.g., "What's wrong with this UI?")
 - **Image only** — attach an image with no text and the bot will ask Claude to describe it
-- Images are downloaded to a temp directory, passed to Claude via `--image`, and cleaned up after
+- Images are downloaded to a temp directory, referenced in the prompt text, and cleaned up after
 
 ### Chat history summarization
 
@@ -213,9 +220,9 @@ Set `SUMMARIZE_INTERVAL_MS` in `.env` to enable automatic summarization:
 SUMMARIZE_INTERVAL_MS=3600000
 ```
 
-The bot runs the first cycle 10 seconds after startup, then repeats on the interval. Together with recent context loading, this creates a two-tier memory:
-- **Last hour**: raw messages injected into every Claude session
-- **Older**: summarized into `.bot-history/` files, searchable via skills
+The bot runs the first cycle 10 seconds after startup, then repeats on the interval. Summaries are automatically loaded into every Claude session's context (last 48h). Together with the sliding message window, this creates a two-tier memory:
+- **Recent**: last 30 raw messages injected into every Claude session
+- **Background**: daily summaries from `.bot-history/` provide compressed cross-session awareness
 
 **Standalone script**
 
@@ -258,7 +265,9 @@ All personalization lives in three gitignored files — the bot code itself is g
 | `SESSION_TIMEOUT_MS` | `1800000` | Session inactivity timeout (ms). Default: 30 minutes |
 | `CLAUDE_TIMEOUT_MS` | `3600000` | Max time per Claude session (ms). Default: 1 hour |
 | `CLAUDE_BIN` | `claude` | Path to Claude Code binary |
-| `RECENT_CONTEXT_HOURS` | `1` | Hours of recent messages to inject into every Claude session |
+| `RECENT_CONTEXT_MAX_MESSAGES` | `30` | Max recent messages per channel (sliding window) |
+| `RECENT_CONTEXT_MAX_CHARS` | `12000` | Total context budget in characters |
+| `SUMMARY_LOOKBACK_HOURS` | `48` | How far back to load summaries from `.bot-history/` |
 | `RECENT_CONTEXT_CHANNELS` | `MONITOR_CHANNELS` | Channels to load recent context from |
 | `SUMMARIZE_INTERVAL_MS` | `0` (disabled) | Enable background summarization. Set to interval in ms (e.g., `3600000` = hourly) |
 | `SUMMARIZE_CHANNELS` | `MONITOR_CHANNELS` | Channels to summarize (defaults to monitored channels) |
