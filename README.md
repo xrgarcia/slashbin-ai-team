@@ -264,6 +264,8 @@ All personalization lives in three gitignored files — the bot code itself is g
 | `BOT_SYSTEM_PROMPT` | (built-in) | Override the system prompt appended to every Claude session |
 | `SESSION_TIMEOUT_MS` | `1800000` | Session inactivity timeout (ms). Default: 30 minutes |
 | `CLAUDE_TIMEOUT_MS` | `3600000` | Max time per Claude session (ms). Default: 1 hour |
+| `CLAUDE_MODEL` | (CLI default) | Claude model for interactive sessions (e.g., `claude-opus-4-6`, `claude-sonnet-4-6`) |
+| `SUMMARIZE_MODEL` | `CLAUDE_MODEL` | Claude model for summarization. Falls back to `CLAUDE_MODEL`, then CLI default. Use a cheaper model to save tokens. |
 | `CLAUDE_BIN` | `claude` | Path to Claude Code binary |
 | `RECENT_CONTEXT_MAX_MESSAGES` | `30` | Max recent messages per channel (sliding window) |
 | `RECENT_CONTEXT_MAX_CHARS` | `12000` | Total context budget in characters |
@@ -330,7 +332,7 @@ Edit `.mcp.json` to connect databases, APIs, and other tools:
 
 - **Change what Claude knows** — edit `CLAUDE.md` with your product context, terminology, and behavioral rules
 - **Add file access** — use `--add-dir` in the spawn args (in `bot.js`) to give Claude read/write access to additional directories
-- **Change the model** — set `--model` in the spawn args. Defaults to whatever your Claude Code CLI is configured to use
+- **Change the model** — set `CLAUDE_MODEL` in `.env` (e.g., `claude-opus-4-6`). Set `SUMMARIZE_MODEL` separately if you want a cheaper model for summaries. Defaults to whatever your Claude Code CLI is configured to use
 
 ## Architecture
 

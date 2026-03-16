@@ -127,11 +127,13 @@ function summarizeWithClaude(channelName, date, messages) {
       "```",
     ].join("\n");
 
+    const summarizeModel = process.env.SUMMARIZE_MODEL || process.env.CLAUDE_MODEL;
     const args = [
       "--output-format", "stream-json",
       "--verbose",
       "--allow-dangerously-skip-permissions",
       "--dangerously-skip-permissions",
+      ...(summarizeModel ? ["--model", summarizeModel] : []),
       "-p", prompt,
       "--append-system-prompt", "You are a summarization assistant. Output only the summary, no preamble. Keep it under 2000 characters.",
     ];
