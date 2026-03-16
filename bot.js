@@ -1,11 +1,10 @@
 require("dotenv").config();
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
-const { readFileSync, writeFileSync, mkdirSync, unlinkSync } = require("fs");
+const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync } = require("fs");
 const { join } = require("path");
 const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
-const os = require("os");
 const pino = require("pino");
 
 // --- Logger ---
@@ -21,8 +20,7 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
 const CLAUDE_CWD = process.env.CLAUDE_CWD || process.cwd();
 const MAX_DISCORD_LENGTH = parseInt(process.env.MAX_DISCORD_LENGTH, 10) || 1900;
-const SESSION_TIMEOUT_MS = parseInt(process.env.SESSION_TIMEOUT_MS, 10) || 30 * 60 * 1000;
-const CLAUDE_TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS, 10) || 3600000; // 1 hour default
+const CLAUDE_TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS, 10) || 3600000;
 const ALLOWED_USER_IDS = process.env.ALLOWED_USERS
   ? process.env.ALLOWED_USERS.split(",").filter(Boolean)
   : [];
@@ -33,62 +31,201 @@ const ALLOWED_BOTS = process.env.ALLOWED_BOTS
   ? process.env.ALLOWED_BOTS.split(",").filter(Boolean)
   : [];
 const MAX_BOT_EXCHANGES = parseInt(process.env.MAX_BOT_EXCHANGES, 10) || 2;
-const SUMMARIZE_INTERVAL_MS = parseInt(process.env.SUMMARIZE_INTERVAL_MS, 10) || 0; // 0 = disabled
+const SUMMARIZE_INTERVAL_MS = parseInt(process.env.SUMMARIZE_INTERVAL_MS, 10) || 0;
 const SUMMARIZE_CHANNELS = process.env.SUMMARIZE_CHANNELS
   ? process.env.SUMMARIZE_CHANNELS.split(",").filter(Boolean)
   : MONITOR_CHANNELS;
 const SUMMARIZE_BATCH_SIZE = parseInt(process.env.SUMMARIZE_BATCH_SIZE, 10) || 200;
-const RECENT_CONTEXT_HOURS = parseFloat(process.env.RECENT_CONTEXT_HOURS) || 1;
-const RECENT_CONTEXT_MAX_MESSAGES = parseInt(process.env.RECENT_CONTEXT_MAX_MESSAGES, 10) || 30;
-const RECENT_CONTEXT_MAX_CHARS = parseInt(process.env.RECENT_CONTEXT_MAX_CHARS, 10) || 12000;
 const SUMMARY_LOOKBACK_HOURS = parseInt(process.env.SUMMARY_LOOKBACK_HOURS, 10) || 48;
-const RECENT_CONTEXT_CHANNELS = process.env.RECENT_CONTEXT_CHANNELS
-  ? process.env.RECENT_CONTEXT_CHANNELS.split(",").filter(Boolean)
-  : MONITOR_CHANNELS;
 const HISTORY_DIR = process.env.BOT_HISTORY_DIR
   ? (process.env.BOT_HISTORY_DIR.startsWith("/") ? process.env.BOT_HISTORY_DIR : join(__dirname, process.env.BOT_HISTORY_DIR))
   : join(__dirname, ".bot-history");
 const CHECKPOINT_FILE = join(HISTORY_DIR, ".checkpoints.json");
+
+// --- Conversation buffer config ---
+const BUFFER_FILE = join(__dirname, ".conversation-buffer.txt");
+const BUFFER_MAX_BYTES = parseInt(process.env.BUFFER_MAX_BYTES, 10) || 32 * 1024;
+const BUFFER_TRUNCATE_RESPONSE = parseInt(process.env.BUFFER_TRUNCATE_RESPONSE, 10) || 500;
+const ATTACHMENTS_DIR = process.env.BOT_ATTACHMENTS_DIR
+  ? (process.env.BOT_ATTACHMENTS_DIR.startsWith("/") ? process.env.BOT_ATTACHMENTS_DIR : join(__dirname, process.env.BOT_ATTACHMENTS_DIR))
+  : join(HISTORY_DIR, "attachments");
 
 if (!DISCORD_TOKEN) {
   log.fatal("DISCORD_TOKEN environment variable is required");
   process.exit(1);
 }
 
-// --- Session tracking (disk-backed) ---
-const SESSION_FILE = join(__dirname, ".bot-sessions.json");
+// Ensure directories exist
+mkdirSync(HISTORY_DIR, { recursive: true });
+mkdirSync(ATTACHMENTS_DIR, { recursive: true });
 
-function loadSessions() {
+// --- Conversation buffer ---
+
+function formatBufferLine(channelName, author, text, fileRefs) {
+  const now = new Date();
+  const ts = `${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  let line = `[${ts} #${channelName}] ${author}: ${text}`;
+  if (fileRefs && fileRefs.length > 0) {
+    const refs = fileRefs.map(f => `[file: ${f.name} ${Math.round(f.size / 1024)}KB ${f.path}]`).join(" ");
+    line += ` ${refs}`;
+  }
+  return line;
+}
+
+function appendToBuffer(line) {
+  appendFileSync(BUFFER_FILE, line + "\n");
+}
+
+function readBuffer() {
   try {
-    const data = JSON.parse(readFileSync(SESSION_FILE, "utf8"));
-    return new Map(Object.entries(data));
+    return readFileSync(BUFFER_FILE, "utf8");
   } catch {
-    return new Map();
+    return "";
   }
 }
 
-function saveSessions() {
+function getBufferSize() {
   try {
-    const obj = Object.fromEntries(sessions);
-    writeFileSync(SESSION_FILE, JSON.stringify(obj, null, 2));
-  } catch (err) {
-    log.warn({ err }, "Failed to persist sessions");
+    return statSync(BUFFER_FILE).size;
+  } catch {
+    return 0;
   }
 }
 
-const sessions = loadSessions();
-if (sessions.size > 0) {
-  log.info({ restored: sessions.size }, "Restored sessions from disk");
+let rotating = false;
+
+async function rotateBuffer() {
+  if (rotating) return;
+  if (getBufferSize() <= BUFFER_MAX_BYTES) return;
+  rotating = true;
+
+  try {
+    const content = readBuffer();
+    const lines = content.split("\n").filter(Boolean);
+    // Keep the newest 60%, summarize the oldest 40%
+    const cutIndex = Math.floor(lines.length * 0.4);
+    const oldLines = lines.slice(0, cutIndex);
+    const keepLines = lines.slice(cutIndex);
+
+    if (oldLines.length > 0) {
+      // Summarize the old lines
+      const rotLog = log.child({ component: "buffer-rotation" });
+      rotLog.info({ oldLines: oldLines.length, keepLines: keepLines.length }, "Rotating buffer");
+
+      try {
+        const summary = await summarizeBufferLines(oldLines);
+        const date = new Date().toISOString().split("T")[0];
+        writeSummary("buffer-rotation", date, oldLines.length, summary);
+        rotLog.info({ date, lines: oldLines.length }, "Rotation summary saved");
+      } catch (err) {
+        rotLog.warn({ err: err.message }, "Failed to summarize during rotation, trimming anyway");
+      }
+
+      // Clean up orphaned attachments
+      const keepContent = keepLines.join("\n");
+      cleanOrphanedAttachments(keepContent);
+    }
+
+    // Write back only the kept lines
+    writeFileSync(BUFFER_FILE, keepLines.join("\n") + "\n");
+  } finally {
+    rotating = false;
+  }
+}
+
+function cleanOrphanedAttachments(bufferContent) {
+  try {
+    const files = readdirSync(ATTACHMENTS_DIR);
+    for (const file of files) {
+      const filePath = join(ATTACHMENTS_DIR, file);
+      if (!bufferContent.includes(filePath)) {
+        try {
+          unlinkSync(filePath);
+          log.debug({ file }, "Cleaned orphaned attachment");
+        } catch { /* ignore */ }
+      }
+    }
+  } catch { /* ignore if dir doesn't exist */ }
+}
+
+async function recordMessage(msg) {
+  const channelName = msg.channel.name || "DM";
+  const author = msg.author.username || msg.author.tag;
+  let text = msg.content || "";
+
+  // Download and record any attachments
+  const fileRefs = [];
+  for (const [, attachment] of msg.attachments) {
+    try {
+      const savedPath = await downloadAttachmentPersistent(attachment, msg.id);
+      fileRefs.push({ name: attachment.name || "file", size: attachment.size || 0, path: savedPath });
+    } catch (err) {
+      log.debug({ name: attachment.name, err: err.message }, "Failed to download attachment for buffer");
+    }
+  }
+
+  if (!text && fileRefs.length === 0) return fileRefs;
+
+  const line = formatBufferLine(channelName, author, text, fileRefs);
+  appendToBuffer(line);
+
+  // Check if rotation needed (async, don't block)
+  if (getBufferSize() > BUFFER_MAX_BYTES) {
+    rotateBuffer().catch(err => log.warn({ err: err.message }, "Buffer rotation failed"));
+  }
+
+  return fileRefs;
+}
+
+function recordBotResponse(channelName, responseText) {
+  if (!responseText || !responseText.trim()) return;
+
+  let text = responseText.trim();
+  if (text.length > BUFFER_TRUNCATE_RESPONSE) {
+    const fullLength = text.length;
+    text = `${text.substring(0, BUFFER_TRUNCATE_RESPONSE)}... [truncated, ${fullLength} chars total]`;
+  }
+
+  const botName = client.user ? (client.user.username || client.user.tag) : "Bot";
+  const line = formatBufferLine(channelName, botName, text, null);
+  appendToBuffer(line);
+}
+
+// --- Persistent attachment handling ---
+const ATTACHMENT_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf", ".txt", ".json", ".csv"]);
+
+function isDownloadableAttachment(attachment) {
+  const name = (attachment.name || "").toLowerCase();
+  const contentType = (attachment.contentType || "").toLowerCase();
+  const ext = name.substring(name.lastIndexOf("."));
+  return contentType.startsWith("image/") || ATTACHMENT_EXTENSIONS.has(ext);
+}
+
+function isImageAttachment(attachment) {
+  const contentType = (attachment.contentType || "").toLowerCase();
+  const name = (attachment.name || "").toLowerCase();
+  return contentType.startsWith("image/") || [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"].some(ext => name.endsWith(ext));
+}
+
+async function downloadAttachmentPersistent(attachment, messageId) {
+  const { Readable } = require("stream");
+  const filename = `${messageId}-${attachment.name || "file"}`;
+  const savePath = join(ATTACHMENTS_DIR, filename);
+
+  // Skip if already downloaded
+  if (existsSync(savePath)) return savePath;
+
+  const res = await fetch(attachment.url);
+  if (!res.ok) throw new Error(`Failed to download: ${res.status}`);
+  const nodeStream = Readable.fromWeb(res.body);
+  await pipeline(nodeStream, createWriteStream(savePath));
+  return savePath;
 }
 
 // --- Active Claude process tracking ---
-// Key: channelId, Value: ChildProcess (the running Claude CLI process)
 const activeProcesses = new Map();
 
 // --- Bot-to-bot exchange tracking ---
-// Tracks consecutive bot↔bot exchanges per channel to prevent infinite loops.
-// Key: channelId, Value: { count: number, lastBotId: string }
-// Resets when a human sends a message in the channel.
 const botExchanges = new Map();
 
 // --- Discord client ---
@@ -102,6 +239,15 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
+// --- WebSocket crash resilience ---
+client.on("error", (err) => {
+  log.error({ err: err.message }, "Discord client error");
+});
+
+client.on("shardError", (err) => {
+  log.error({ err: err.message }, "Discord WebSocket error");
+});
+
 client.once("ready", () => {
   log.info({ tag: client.user.tag, cwd: CLAUDE_CWD }, "Bot online");
   log.info(
@@ -111,6 +257,18 @@ client.once("ready", () => {
 });
 
 client.on("messageCreate", async (msg) => {
+  // Skip own messages (bot responses are recorded via recordBotResponse)
+  if (msg.author.id === client.user?.id) return;
+
+  // Record ALL messages to buffer before any response filtering
+  let fileRefs = [];
+  try {
+    fileRefs = await recordMessage(msg);
+  } catch (err) {
+    log.debug({ err: err.message }, "Failed to record message to buffer");
+  }
+
+  // --- Response filtering (only below this point) ---
   if (msg.author.bot && !ALLOWED_BOTS.includes(msg.author.id)) return;
 
   if (ALLOWED_USER_IDS.length > 0 && !ALLOWED_USER_IDS.includes(msg.author.id)) {
@@ -132,7 +290,6 @@ client.on("messageCreate", async (msg) => {
       return;
     }
   } else {
-    // Human message resets the counter
     botExchanges.delete(msg.channel.id);
   }
 
@@ -140,22 +297,13 @@ client.on("messageCreate", async (msg) => {
     .replace(new RegExp(`<@!?${client.user.id}>`, "g"), "")
     .trim();
 
-  // Check for image attachments
-  const hasImages = msg.attachments.some((a) => isImageAttachment(a));
-  if (!prompt && !hasImages) return;
-  if (!prompt && hasImages) prompt = "What do you see in this image?";
+  const hasAttachments = fileRefs.length > 0;
+  if (!prompt && !hasAttachments) return;
+  if (!prompt && hasAttachments) prompt = "What do you see in this attachment?";
 
   const reqLog = log.child({ channel: msg.channel.id, user: msg.author.tag, prompt: prompt.substring(0, 80) });
 
   // Handle special commands
-  if (prompt === "/new") {
-    sessions.delete(msg.channel.id);
-    saveSessions();
-    reqLog.info("Session cleared by user");
-    await msg.reply("Session cleared. Next message starts a fresh conversation.");
-    return;
-  }
-
   if (prompt === "/stop" || prompt === "stop") {
     const child = activeProcesses.get(msg.channel.id);
     if (child) {
@@ -170,36 +318,38 @@ client.on("messageCreate", async (msg) => {
   }
 
   if (prompt === "/status") {
-    const session = sessions.get(msg.channel.id);
+    const bufSize = getBufferSize();
+    const bufLines = readBuffer().split("\n").filter(Boolean).length;
     const running = activeProcesses.has(msg.channel.id);
-    const status = session
-      ? `Active session: \`${session.sessionId}\` (last used ${Math.round((Date.now() - session.lastUsed) / 1000)}s ago)${running ? " — **running**" : ""}`
-      : "No active session";
-    await msg.reply(status);
+    let attachCount = 0;
+    try { attachCount = readdirSync(ATTACHMENTS_DIR).length; } catch { /* ignore */ }
+    await msg.reply(`Buffer: ${Math.round(bufSize / 1024)}KB / ${Math.round(BUFFER_MAX_BYTES / 1024)}KB (${bufLines} messages, ${attachCount} attachments)${running ? " — **running**" : ""}`);
     return;
   }
 
   const typing = setInterval(() => msg.channel.sendTyping(), 8000);
   msg.channel.sendTyping();
 
-  // Queue for sending messages to Discord without overlap
   const sendQueue = createSendQueue(msg, reqLog);
+  const channelName = msg.channel.name || "DM";
 
-  let imagePaths = [];
+  // Collect image paths from attachments for Claude prompt
+  const imagePaths = fileRefs
+    .filter(f => isImageAttachment({ name: f.name, contentType: "" }))
+    .map(f => f.path);
+
   try {
-    if (hasImages) {
-      imagePaths = await downloadAttachmentImages(msg.attachments, reqLog);
-    }
-    await runClaude(prompt, msg.channel.id, reqLog, sendQueue.enqueue, imagePaths);
+    const responseText = await runClaude(prompt, msg.channel.id, reqLog, sendQueue.enqueue, imagePaths);
     clearInterval(typing);
     await sendQueue.flush();
+
+    // Record bot's response to buffer
+    recordBotResponse(channelName, responseText);
   } catch (err) {
     clearInterval(typing);
     await sendQueue.flush();
     reqLog.error({ err }, "Claude invocation failed");
     await msg.reply(`Error: ${err.message}`);
-  } finally {
-    cleanupImages(imagePaths, reqLog);
   }
 });
 
@@ -232,7 +382,6 @@ function createSendQueue(msg, reqLog) {
       drain();
     },
     async flush() {
-      // Wait for all pending sends to complete
       while (pending.length > 0 || sending) {
         await new Promise((r) => setTimeout(r, 100));
       }
@@ -240,69 +389,68 @@ function createSendQueue(msg, reqLog) {
   };
 }
 
-// --- Image attachment handling ---
-const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
+// --- Context building (buffer + summaries) ---
 
-function isImageAttachment(attachment) {
-  const name = (attachment.name || "").toLowerCase();
-  const contentType = (attachment.contentType || "").toLowerCase();
-  return contentType.startsWith("image/") || IMAGE_EXTENSIONS.has(name.substring(name.lastIndexOf(".")));
-}
+function loadRecentSummaries() {
+  const cutoffMs = Date.now() - SUMMARY_LOOKBACK_HOURS * 3600000;
+  const cutoffDate = new Date(cutoffMs).toISOString().split("T")[0];
 
-async function downloadImage(url, filename) {
-  const { Readable } = require("stream");
-  const tmpPath = join(os.tmpdir(), `discord-img-${Date.now()}-${filename}`);
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Failed to download image: ${res.status}`);
-  const nodeStream = Readable.fromWeb(res.body);
-  await pipeline(nodeStream, createWriteStream(tmpPath));
-  return tmpPath;
-}
+  try {
+    const files = readdirSync(HISTORY_DIR)
+      .filter((f) => f.endsWith(".md") && !f.startsWith("."))
+      .sort()
+      .filter((f) => f >= cutoffDate);
 
-async function downloadAttachmentImages(attachments, reqLog) {
-  const imagePaths = [];
-  for (const [, attachment] of attachments) {
-    if (!isImageAttachment(attachment)) continue;
-    try {
-      const path = await downloadImage(attachment.url, attachment.name || "image.png");
-      imagePaths.push(path);
-      reqLog.info({ name: attachment.name, size: attachment.size }, "Downloaded image attachment");
-    } catch (err) {
-      reqLog.warn({ name: attachment.name, err: err.message }, "Failed to download image attachment");
+    const summaries = [];
+    for (const file of files) {
+      try {
+        const content = readFileSync(join(HISTORY_DIR, file), "utf8").trim();
+        if (content) summaries.push(content);
+      } catch { /* skip unreadable */ }
     }
+    return summaries;
+  } catch {
+    return [];
   }
-  return imagePaths;
 }
 
-function cleanupImages(imagePaths, reqLog) {
-  for (const p of imagePaths) {
-    try { unlinkSync(p); } catch { /* ignore */ }
+function buildContextPrompt() {
+  const sections = [];
+
+  // Layer 1: Recent summaries (compressed history beyond buffer window)
+  const summaries = loadRecentSummaries();
+  if (summaries.length > 0) {
+    sections.push(
+      "--- Conversation history (summaries from prior sessions) ---",
+      ...summaries,
+      "--- End summaries ---"
+    );
   }
-  if (imagePaths.length > 0) {
-    reqLog.debug({ count: imagePaths.length }, "Cleaned up temp image files");
+
+  // Layer 2: Conversation buffer (recent activity across all channels)
+  const buffer = readBuffer();
+  if (buffer.trim()) {
+    sections.push(
+      "--- Conversation buffer (recent activity across all channels) ---",
+      buffer.trim(),
+      "--- End conversation buffer ---"
+    );
   }
+
+  return sections.join("\n\n");
 }
+
+// --- Claude invocation (fresh session per message) ---
 
 async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []) {
-  // Fetch recent history from all channels to inject as context
-  let recentContext = "";
-  try {
-    recentContext = await fetchRecentHistory();
-    if (recentContext) {
-      reqLog.info({ chars: recentContext.length }, "Loaded recent channel history");
-    }
-  } catch (err) {
-    reqLog.warn({ err: err.message }, "Failed to load recent history, proceeding without");
-  }
+  const context = buildContextPrompt();
 
   return new Promise((resolve, reject) => {
-    const session = sessions.get(channelId);
-
     const basePrompt = process.env.BOT_SYSTEM_PROMPT ||
       "You are running inside a Discord bot. Keep responses concise — Discord has a 2000 char limit per message. Do NOT perform startup rituals. Be brief.";
 
-    const systemPrompt = recentContext
-      ? `${basePrompt}\n\n${recentContext}`
+    const systemPrompt = context
+      ? `${basePrompt}\n\n${context}`
       : basePrompt;
 
     const args = [
@@ -310,28 +458,20 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
       "--allow-dangerously-skip-permissions",
       "--dangerously-skip-permissions",
       "--verbose",
+      ...(process.env.CLAUDE_MODEL ? ["--model", process.env.CLAUDE_MODEL] : []),
       "--append-system-prompt", systemPrompt,
     ];
 
-    // Build the final prompt with image paths prepended
+    // Build the final prompt with image/file paths prepended
     let finalPrompt = prompt;
     if (imagePaths.length > 0) {
       const imageRefs = imagePaths.map(p => `[Image attached by user — use the Read tool on "${p}" to view it]`).join("\n");
       finalPrompt = `${imageRefs}\n\n${prompt}`;
     }
 
-    if (session) {
-      const idleMs = Date.now() - session.lastUsed;
-      args.push("--resume", session.sessionId, "-p", finalPrompt);
-      if (idleMs > SESSION_TIMEOUT_MS) {
-        reqLog.info({ sessionId: session.sessionId, idleMin: Math.round(idleMs / 60000) }, "Resuming stale session");
-      } else {
-        reqLog.info({ sessionId: session.sessionId }, "Resuming session");
-      }
-    } else {
-      args.push("-p", finalPrompt);
-      reqLog.info({ images: imagePaths.length }, "Starting new Claude session");
-    }
+    // Always fresh session — no --resume
+    args.push("-p", finalPrompt);
+    reqLog.info({ images: imagePaths.length }, "Starting fresh Claude session");
 
     // Build a clean env without Claude nesting vars
     const cleanEnv = { ...process.env };
@@ -350,23 +490,24 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
 
     activeProcesses.set(channelId, child);
 
-    let sessionId = null;
-    let buffer = "";
-    let turnText = ""; // text accumulated in the current assistant turn
+    let jsonBuffer = "";
+    let turnText = "";
+    let fullResponse = ""; // Accumulate full response for buffer recording
 
     child.stdout.on("data", (data) => {
-      buffer += data.toString();
+      jsonBuffer += data.toString();
 
-      const lines = buffer.split("\n");
-      buffer = lines.pop();
+      const lines = jsonBuffer.split("\n");
+      jsonBuffer = lines.pop();
 
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line);
-          handleStreamEvent(event, reqLog, sendMessage, (id) => { sessionId = id; }, {
+          handleStreamEvent(event, reqLog, sendMessage, {
             getTurnText: () => turnText,
             setTurnText: (t) => { turnText = t; },
+            appendResponse: (t) => { fullResponse += t; },
           });
         } catch {
           reqLog.warn({ raw: line.substring(0, 200) }, "Non-JSON line from Claude");
@@ -382,12 +523,13 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
       activeProcesses.delete(channelId);
       const elapsed = Date.now() - startTime;
 
-      if (buffer.trim()) {
+      if (jsonBuffer.trim()) {
         try {
-          const event = JSON.parse(buffer);
-          handleStreamEvent(event, reqLog, sendMessage, (id) => { sessionId = id; }, {
+          const event = JSON.parse(jsonBuffer);
+          handleStreamEvent(event, reqLog, sendMessage, {
             getTurnText: () => turnText,
             setTurnText: (t) => { turnText = t; },
+            appendResponse: (t) => { fullResponse += t; },
           });
         } catch {
           // ignore
@@ -397,6 +539,7 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
       // Send any remaining text from the last turn
       if (turnText.trim()) {
         sendMessage(turnText);
+        fullResponse += turnText;
         turnText = "";
       }
 
@@ -406,13 +549,8 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
         return;
       }
 
-      if (sessionId) {
-        sessions.set(channelId, { sessionId, lastUsed: Date.now() });
-        saveSessions();
-      }
-
-      reqLog.info({ elapsed, sessionId }, "Claude completed");
-      resolve();
+      reqLog.info({ elapsed }, "Claude completed");
+      resolve(fullResponse);
     });
 
     child.on("error", (err) => {
@@ -422,10 +560,9 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
   });
 }
 
-function handleStreamEvent(event, reqLog, sendMessage, setSessionId, turnState) {
+function handleStreamEvent(event, reqLog, sendMessage, state) {
   switch (event.type) {
     case "system":
-      if (event.session_id) setSessionId(event.session_id);
       reqLog.info({ sessionId: event.session_id }, "Claude session started");
       break;
 
@@ -433,14 +570,13 @@ function handleStreamEvent(event, reqLog, sendMessage, setSessionId, turnState) 
       if (event.message?.content) {
         for (const block of event.message.content) {
           if (block.type === "text") {
-            // Accumulate text for this turn
-            turnState.setTurnText(turnState.getTurnText() + block.text);
+            state.setTurnText(state.getTurnText() + block.text);
           } else if (block.type === "tool_use") {
-            // Tool call coming — send any accumulated text first so user sees progress
-            const pending = turnState.getTurnText();
+            const pending = state.getTurnText();
             if (pending.trim()) {
               sendMessage(pending);
-              turnState.setTurnText("");
+              state.appendResponse(pending);
+              state.setTurnText("");
             }
             reqLog.info({ tool: block.name, inputPreview: JSON.stringify(block.input).substring(0, 120) }, "Tool call");
           }
@@ -449,7 +585,6 @@ function handleStreamEvent(event, reqLog, sendMessage, setSessionId, turnState) 
       break;
 
     case "result":
-      if (event.session_id) setSessionId(event.session_id);
       reqLog.info(
         { costUsd: event.cost_usd, durationMs: event.duration_ms, inputTokens: event.total_input_tokens, outputTokens: event.total_output_tokens },
         "Claude result summary"
@@ -489,157 +624,98 @@ function splitMessage(text) {
   return chunks;
 }
 
-// Log session count every 10 minutes (sessions persist until /new or bot restart)
-setInterval(() => {
-  if (sessions.size > 0) {
-    log.debug({ activeSessions: sessions.size }, "Session inventory");
-  }
-}, 10 * 60 * 1000);
+// --- Buffer rotation summarizer ---
 
-// --- Recent context loader (tiered: summaries + sliding window) ---
-// Discord snowflake: (timestamp_ms - DISCORD_EPOCH) << 22
-const DISCORD_EPOCH = 1420070400000n;
+function summarizeBufferLines(lines) {
+  return new Promise((resolve, reject) => {
+    const transcript = lines.join("\n");
 
-function timestampToSnowflake(timestampMs) {
-  return String((BigInt(timestampMs) - DISCORD_EPOCH) << 22n);
-}
-
-/**
- * Load recent summaries from .bot-history/ for the last N hours.
- * These are compressed context from the background summarizer.
- */
-function loadRecentSummaries() {
-  const { readdirSync } = require("fs");
-  const cutoffMs = Date.now() - SUMMARY_LOOKBACK_HOURS * 3600000;
-  const cutoffDate = new Date(cutoffMs).toISOString().split("T")[0];
-
-  try {
-    const files = readdirSync(HISTORY_DIR)
-      .filter((f) => f.endsWith(".md") && !f.startsWith("."))
-      .sort()
-      .filter((f) => f >= cutoffDate); // filenames start with YYYY-MM-DD
-
-    const summaries = [];
-    for (const file of files) {
-      try {
-        const content = readFileSync(join(HISTORY_DIR, file), "utf8").trim();
-        if (content) summaries.push(content);
-      } catch { /* skip unreadable */ }
-    }
-    return summaries;
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Fetch the last N messages (sliding window) from monitored channels.
- * Uses message count, not time window, so context size is predictable.
- */
-async function fetchRecentMessages() {
-  if (RECENT_CONTEXT_CHANNELS.length === 0) return [];
-
-  const allMessages = [];
-
-  for (const channelId of RECENT_CONTEXT_CHANNELS) {
-    try {
-      const channel = await client.channels.fetch(channelId);
-      if (!channel || !channel.isTextBased()) continue;
-
-      const channelName = channel.name || `dm-${channelId}`;
-      // Fetch last N messages (most recent first from Discord API)
-      const batch = await channel.messages.fetch({ limit: RECENT_CONTEXT_MAX_MESSAGES });
-      if (batch.size === 0) continue;
-
-      for (const m of batch.values()) {
-        allMessages.push({
-          timestamp: m.createdAt.toISOString(),
-          ts: m.createdTimestamp,
-          channel: channelName,
-          author: m.author.tag || m.author.username,
-          isBot: m.author.bot,
-          content: m.content.substring(0, 1500),
-        });
-      }
-    } catch (err) {
-      log.warn({ channelId, err: err.message }, "Failed to fetch recent messages for channel");
-    }
-  }
-
-  // Sort chronologically, take the most recent N across all channels
-  allMessages.sort((a, b) => a.ts - b.ts);
-  return allMessages.slice(-RECENT_CONTEXT_MAX_MESSAGES);
-}
-
-/**
- * Build tiered context: summaries (compressed background) + recent messages (immediate).
- * Respects RECENT_CONTEXT_MAX_CHARS to keep system prompt bounded.
- */
-async function fetchRecentHistory() {
-  const sections = [];
-  let totalChars = 0;
-
-  // Layer 1: Recent summaries (compressed, oldest first)
-  const summaries = loadRecentSummaries();
-  if (summaries.length > 0) {
-    const summaryBlock = [
-      "--- Recent session summaries (compressed history) ---",
-      ...summaries,
-      "--- End summaries ---",
+    const prompt = [
+      "Summarize this conversation buffer that is being rotated out.",
+      "",
+      "Create a structured summary with:",
+      "- **Topics discussed** — what subjects came up",
+      "- **Decisions made** — any conclusions or agreements",
+      "- **Action items** — tasks assigned or next steps identified",
+      "- **Key context** — important facts, debugging results, or technical details worth remembering",
+      "",
+      "Be thorough but concise. Preserve specific details like error messages, file paths, issue numbers, and names.",
+      "Note which channels and participants were involved.",
+      "Do NOT add commentary — just summarize what happened.",
+      "",
+      "```",
+      transcript,
+      "```",
     ].join("\n");
 
-    // Reserve at least 4000 chars for raw messages
-    const summaryBudget = RECENT_CONTEXT_MAX_CHARS - 4000;
-    if (summaryBlock.length <= summaryBudget) {
-      sections.push(summaryBlock);
-      totalChars += summaryBlock.length;
-    } else if (summaryBudget > 500) {
-      // Truncate from the oldest summaries
-      const truncated = summaryBlock.substring(summaryBlock.length - summaryBudget);
-      const firstNewline = truncated.indexOf("\n");
-      sections.push("--- Recent session summaries (truncated) ---\n" + truncated.substring(firstNewline + 1));
-      totalChars += summaryBudget;
-    }
-  }
+    const args = [
+      "--output-format", "stream-json",
+      "--verbose",
+      "--allow-dangerously-skip-permissions",
+      "--dangerously-skip-permissions",
+      "-p", prompt,
+      "--append-system-prompt", "You are a summarization assistant. Output only the summary, no preamble. Keep it under 2000 characters.",
+    ];
 
-  // Layer 2: Raw recent messages (sliding window)
-  const messages = await fetchRecentMessages();
-  if (messages.length > 0) {
-    const lines = messages.map((m) => {
-      const time = m.timestamp.replace("T", " ").replace(/\.\d+Z$/, "Z");
-      const botTag = m.isBot ? " (bot)" : "";
-      return `[${time}] #${m.channel} | ${m.author}${botTag}: ${m.content}`;
+    const cleanEnv = { ...process.env };
+    delete cleanEnv.CLAUDECODE;
+    delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
+    delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
+    delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
+
+    const child = spawn(CLAUDE_BIN, args, {
+      cwd: CLAUDE_CWD,
+      env: cleanEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 120000,
     });
 
-    let messageBlock = [
-      `--- Recent messages (last ${messages.length}) ---`,
-      ...lines,
-      "--- End recent messages ---",
-    ].join("\n");
+    let buf = "";
+    let result = "";
 
-    // Trim messages from the oldest if over budget
-    const remaining = RECENT_CONTEXT_MAX_CHARS - totalChars;
-    if (messageBlock.length > remaining && remaining > 500) {
-      // Drop oldest messages until it fits
-      while (lines.length > 5 && messageBlock.length > remaining) {
-        lines.shift();
-        messageBlock = [
-          `--- Recent messages (last ${lines.length}) ---`,
-          ...lines,
-          "--- End recent messages ---",
-        ].join("\n");
+    child.stdout.on("data", (data) => {
+      buf += data.toString();
+      const jsonLines = buf.split("\n");
+      buf = jsonLines.pop();
+
+      for (const line of jsonLines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+          if (event.type === "assistant" && event.message?.content) {
+            for (const block of event.message.content) {
+              if (block.type === "text") result += block.text;
+            }
+          }
+        } catch { /* skip */ }
       }
-    }
+    });
 
-    if (messageBlock.length <= RECENT_CONTEXT_MAX_CHARS - totalChars) {
-      sections.push(messageBlock);
-    }
-  }
+    child.on("close", (code) => {
+      if (buf.trim()) {
+        try {
+          const event = JSON.parse(buf);
+          if (event.type === "assistant" && event.message?.content) {
+            for (const block of event.message.content) {
+              if (block.type === "text") result += block.text;
+            }
+          }
+        } catch { /* ignore */ }
+      }
 
-  return sections.join("\n\n");
+      if (code !== 0) {
+        reject(new Error(`Claude exited with code ${code}`));
+        return;
+      }
+      resolve(result.trim());
+    });
+
+    child.on("error", (err) => reject(err));
+  });
 }
 
-// --- Background summarizer (opt-in via SUMMARIZE_INTERVAL_MS) ---
+// --- Background summarizer (hourly channel summaries to HISTORY_DIR) ---
+
 function loadCheckpoints() {
   try {
     return JSON.parse(readFileSync(CHECKPOINT_FILE, "utf8"));
@@ -651,6 +727,22 @@ function loadCheckpoints() {
 function saveCheckpoints(checkpoints) {
   mkdirSync(HISTORY_DIR, { recursive: true });
   writeFileSync(CHECKPOINT_FILE, JSON.stringify(checkpoints, null, 2));
+}
+
+function writeSummary(channelName, date, messageCount, summary) {
+  mkdirSync(HISTORY_DIR, { recursive: true });
+  const filename = `${date}-${channelName}.md`;
+  const filepath = join(HISTORY_DIR, filename);
+  const content = [
+    `# ${channelName} — ${date}`,
+    "",
+    `> ${messageCount} messages summarized`,
+    "",
+    summary,
+    "",
+  ].join("\n");
+  writeFileSync(filepath, content);
+  return filepath;
 }
 
 async function fetchMessagesSince(channel, afterId) {
@@ -735,15 +827,15 @@ function summarizeWithClaude(channelName, date, messages) {
       timeout: 120000,
     });
 
-    let buffer = "";
+    let buf = "";
     let result = "";
 
     child.stdout.on("data", (data) => {
-      buffer += data.toString();
-      const lines = buffer.split("\n");
-      buffer = lines.pop();
+      buf += data.toString();
+      const jsonLines = buf.split("\n");
+      buf = jsonLines.pop();
 
-      for (const line of lines) {
+      for (const line of jsonLines) {
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line);
@@ -757,9 +849,9 @@ function summarizeWithClaude(channelName, date, messages) {
     });
 
     child.on("close", (code) => {
-      if (buffer.trim()) {
+      if (buf.trim()) {
         try {
-          const event = JSON.parse(buffer);
+          const event = JSON.parse(buf);
           if (event.type === "assistant" && event.message?.content) {
             for (const block of event.message.content) {
               if (block.type === "text") result += block.text;
@@ -777,22 +869,6 @@ function summarizeWithClaude(channelName, date, messages) {
 
     child.on("error", (err) => reject(err));
   });
-}
-
-function writeSummary(channelName, date, messageCount, summary) {
-  mkdirSync(HISTORY_DIR, { recursive: true });
-  const filename = `${date}-${channelName}.md`;
-  const filepath = join(HISTORY_DIR, filename);
-  const content = [
-    `# ${channelName} — ${date}`,
-    "",
-    `> ${messageCount} messages summarized`,
-    "",
-    summary,
-    "",
-  ].join("\n");
-  writeFileSync(filepath, content);
-  return filepath;
 }
 
 let summarizing = false;
@@ -847,7 +923,6 @@ async function runSummarizer() {
 }
 
 if (SUMMARIZE_INTERVAL_MS > 0) {
-  // Run first cycle shortly after bot connects (give Discord client time to be ready)
   setTimeout(() => {
     runSummarizer();
     setInterval(runSummarizer, SUMMARIZE_INTERVAL_MS);
@@ -857,6 +932,12 @@ if (SUMMARIZE_INTERVAL_MS > 0) {
 
 // Graceful shutdown
 process.on("SIGINT", () => {
+  log.info("Shutting down...");
+  client.destroy();
+  process.exit(0);
+});
+
+process.on("SIGTERM", () => {
   log.info("Shutting down...");
   client.destroy();
   process.exit(0);
