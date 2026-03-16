@@ -28,6 +28,13 @@ function isRunning(pid) {
       return out.includes(String(pid));
     }
     process.kill(pid, 0);
+    // Verify it's actually our bot process, not a reused PID
+    try {
+      const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      if (!cmdline.includes("bot.js")) return false;
+    } catch {
+      // /proc not available (macOS) — trust the PID
+    }
     return true;
   } catch {
     return false;
