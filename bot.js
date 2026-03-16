@@ -55,6 +55,38 @@ if (!DISCORD_TOKEN) {
   process.exit(1);
 }
 
+// --- Duplicate instance guard ---
+// Prevent multiple bot instances from connecting to Discord simultaneously.
+// Checks .bot.pid — if another bot.js process is already running, exit.
+const PID_FILE = join(__dirname, ".bot.pid");
+(() => {
+  try {
+    const existingPid = parseInt(readFileSync(PID_FILE, "utf8").trim(), 10);
+    if (existingPid && existingPid !== process.pid) {
+      try {
+        process.kill(existingPid, 0); // throws if process doesn't exist
+        // Verify it's actually a bot.js process
+        try {
+          const cmdline = readFileSync(`/proc/${existingPid}/cmdline`, "utf8");
+          if (cmdline.includes("bot.js")) {
+            log.fatal({ existingPid }, "Another bot instance is already running. Exiting.");
+            process.exit(1);
+          }
+        } catch {
+          // /proc not available — trust the PID check
+          log.fatal({ existingPid }, "Another bot instance is already running. Exiting.");
+          process.exit(1);
+        }
+      } catch {
+        // Process doesn't exist — stale PID file, safe to continue
+      }
+    }
+  } catch {
+    // No PID file — safe to continue
+  }
+  writeFileSync(PID_FILE, String(process.pid));
+})();
+
 // Ensure directories exist
 mkdirSync(HISTORY_DIR, { recursive: true });
 mkdirSync(ATTACHMENTS_DIR, { recursive: true });
