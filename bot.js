@@ -300,6 +300,38 @@ client.on("messageCreate", async (msg) => {
     log.debug({ err: err.message }, "Failed to record message to buffer");
   }
 
+  // --- Stop command handling (before response filtering so it works in any channel) ---
+  // Only humans can issue stop commands
+  if (!msg.author.bot) {
+    const rawContent = msg.content.trim();
+    const stopPattern = /^(?:<@!?\d+>\s*)*(?:\/stop|stop)$/i;
+    const isStopCommand = stopPattern.test(rawContent);
+
+    if (isStopCommand) {
+      const mentionsThisBot = msg.mentions.has(client.user);
+      const mentionsAnyBot = rawContent.match(/<@!?\d+>/g);
+      const isBroadcast = !mentionsAnyBot; // plain "stop" or "/stop" with no mentions
+      const isTargeted = mentionsThisBot;   // "@ThisBot stop"
+
+      if (isBroadcast || isTargeted) {
+        const reqLog = log.child({ channel: msg.channel.id, user: msg.author.tag });
+        const child = activeProcesses.get(msg.channel.id);
+        if (child) {
+          child.kill("SIGTERM");
+          activeProcesses.delete(msg.channel.id);
+          reqLog.info({ broadcast: isBroadcast }, "Claude process killed by stop");
+          if (isTargeted) {
+            await msg.reply("Stopped.");
+          }
+          // Broadcast stop: kill silently (all bots kill, none reply to avoid spam)
+        }
+        return;
+      }
+      // Stop mentions a different bot — ignore
+      return;
+    }
+  }
+
   // --- Response filtering (only below this point) ---
   if (msg.author.bot && !ALLOWED_BOTS.includes(msg.author.id)) return;
 
@@ -334,20 +366,6 @@ client.on("messageCreate", async (msg) => {
   if (!prompt && hasAttachments) prompt = "What do you see in this attachment?";
 
   const reqLog = log.child({ channel: msg.channel.id, user: msg.author.tag, prompt: prompt.substring(0, 80) });
-
-  // Handle special commands
-  if (prompt === "/stop" || prompt === "stop") {
-    const child = activeProcesses.get(msg.channel.id);
-    if (child) {
-      child.kill("SIGTERM");
-      activeProcesses.delete(msg.channel.id);
-      reqLog.info("Claude process killed by /stop");
-      await msg.reply("Stopped. Claude process terminated.");
-    } else {
-      await msg.reply("Nothing running in this channel.");
-    }
-    return;
-  }
 
   if (prompt === "/status") {
     const bufSize = getBufferSize();
