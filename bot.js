@@ -1,6 +1,7 @@
 require("dotenv").config();
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
+const { WebSocketServer } = require("ws");
 const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync } = require("fs");
 const { join } = require("path");
 const { pipeline } = require("stream/promises");
@@ -90,6 +91,148 @@ const PID_FILE = join(__dirname, ".bot.pid");
 // Ensure directories exist
 mkdirSync(HISTORY_DIR, { recursive: true });
 mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+
+// --- WebSocket Bridge ---
+const WS_PORT = parseInt(process.env.WS_PORT, 10) || 9800;
+const connectedAgents = new Map(); // agentId → { ws, discordBotId, channels }
+
+const wss = new WebSocketServer({ port: WS_PORT, host: "127.0.0.1" });
+log.info({ port: WS_PORT }, "WebSocket bridge listening");
+
+wss.on("connection", (ws) => {
+  let agentId = null;
+  let heartbeatMisses = 0;
+
+  const heartbeat = setInterval(() => {
+    if (heartbeatMisses >= 3) {
+      log.warn({ agentId }, "Agent missed 3 heartbeats, disconnecting");
+      ws.terminate();
+      return;
+    }
+    heartbeatMisses++;
+    try { ws.send(JSON.stringify({ type: "ping" })); } catch { /* ignore */ }
+  }, 30000);
+
+  ws.on("message", async (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw); } catch { return; }
+
+    if (msg.type === "pong") {
+      heartbeatMisses = 0;
+      return;
+    }
+
+    if (msg.type === "handshake") {
+      agentId = msg.agentId;
+      connectedAgents.set(agentId, {
+        ws,
+        discordBotId: msg.discordBotId,
+        channels: msg.channels,
+      });
+      log.info({ agentId, channels: msg.channels }, "Agent connected");
+      ws.send(JSON.stringify({
+        type: "handshake_ack",
+        success: true,
+        connectedAgents: Array.from(connectedAgents.keys()),
+      }));
+      return;
+    }
+
+    if (!agentId) {
+      ws.send(JSON.stringify({ type: "error", message: "Handshake required" }));
+      return;
+    }
+
+    if (msg.type === "status") {
+      const agent = connectedAgents.get(agentId);
+      if (agent?.channels?.status) {
+        const channel = client.channels.cache.get(agent.channels.status);
+        if (channel) {
+          const prefix = msg.level === "error" ? "**[ERROR]**" : msg.level === "warn" ? "**[WARN]**" : "";
+          const text = prefix ? `${prefix} ${msg.text}` : msg.text;
+          for (const chunk of splitMessage(text)) {
+            try { await channel.send(chunk); } catch (err) {
+              log.error({ err: err.message, agentId }, "Failed to send status to Discord");
+            }
+          }
+        }
+      }
+      return;
+    }
+
+    if (msg.type === "response") {
+      const channel = client.channels.cache.get(msg.channelId);
+      if (channel) {
+        for (const chunk of splitMessage(msg.text)) {
+          try {
+            if (msg.replyTo) {
+              const original = await channel.messages.fetch(msg.replyTo).catch(() => null);
+              if (original) { await original.reply(chunk); continue; }
+            }
+            await channel.send(chunk);
+          } catch (err) {
+            log.error({ err: err.message, agentId }, "Failed to send response to Discord");
+          }
+        }
+      }
+      return;
+    }
+
+    if (msg.type === "typing") {
+      const channel = client.channels.cache.get(msg.channelId);
+      if (channel) {
+        try { await channel.sendTyping(); } catch { /* ignore */ }
+      }
+      return;
+    }
+  });
+
+  ws.on("close", () => {
+    clearInterval(heartbeat);
+    if (agentId) {
+      connectedAgents.delete(agentId);
+      log.info({ agentId }, "Agent disconnected");
+    }
+  });
+
+  ws.on("error", (err) => {
+    log.error({ err: err.message, agentId }, "WebSocket error");
+  });
+});
+
+/**
+ * Route a Discord message to connected agents.
+ * Returns true if at least one agent received it.
+ */
+function routeToAgents(discordMsg, prompt) {
+  let routed = false;
+  for (const [id, agent] of connectedAgents) {
+    const listenChannels = agent.channels?.listen || [];
+    if (listenChannels.includes(discordMsg.channel.id)) {
+      const payload = {
+        type: "command",
+        channelId: discordMsg.channel.id,
+        userId: discordMsg.author.id,
+        username: discordMsg.author.username,
+        text: prompt,
+        messageId: discordMsg.id,
+        attachments: discordMsg.attachments.map(a => ({
+          filename: a.name,
+          url: a.url,
+          contentType: a.contentType,
+        })),
+      };
+      try {
+        agent.ws.send(JSON.stringify(payload));
+        routed = true;
+        log.info({ agentId: id, channel: discordMsg.channel.id }, "Message routed to agent");
+      } catch (err) {
+        log.error({ err: err.message, agentId: id }, "Failed to route message to agent");
+      }
+    }
+  }
+  return routed;
+}
 
 // --- Conversation buffer ---
 
@@ -375,6 +518,12 @@ client.on("messageCreate", async (msg) => {
   if (!prompt && hasAttachments) prompt = "What do you see in this attachment?";
 
   const reqLog = log.child({ channel: msg.channel.id, user: msg.author.tag, prompt: prompt.substring(0, 80) });
+
+  // --- Bridge routing: if a connected agent is listening on this channel, route to it ---
+  if (routeToAgents(msg, prompt)) {
+    reqLog.info("Message routed to connected agent via WebSocket");
+    return;
+  }
 
   if (prompt === "/status") {
     const bufSize = getBufferSize();
