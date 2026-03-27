@@ -124,7 +124,65 @@ npm run logs       # tail last 20 lines of bot.log
 npm run logs 50    # tail last 50 lines
 ```
 
-The manager writes a `.bot.pid` file to track the running process. `npm start` will refuse to start a second instance. `npm stop` sends SIGINT for graceful shutdown (5s timeout, then force kill).
+The manager writes a PID file to track the running process. By default it uses `.bot.pid`, but when `BOT_NAME` is set it uses `.<BOT_NAME>.pid` instead — allowing multiple bots to run from the same directory. `npm start` will refuse to start a second instance. `npm stop` sends SIGINT for graceful shutdown (5s timeout, then force kill).
+
+### Running multiple bots from a single clone
+
+You can run multiple bot instances from the same clone by setting `BOT_NAME` per instance. Each bot gets its own PID file, Discord token, and project directory. Create an `ecosystem.config.js` with dotenv to keep secrets out of the file:
+
+```js
+require('dotenv').config();
+
+module.exports = {
+  apps: [
+    {
+      name: 'sales-bot',
+      script: 'bot.js',
+      env: {
+        BOT_NAME: 'sales-bot',
+        DISCORD_TOKEN: process.env.SALES_DISCORD_TOKEN,
+        CLAUDE_CWD: '/path/to/project/sales-bot',
+        MONITOR_CHANNELS: '123456789',
+        SUMMARIZE_INTERVAL_MS: '3600000',
+        BOT_HISTORY_DIR: '/path/to/project/sales-bot/.bot-history',
+        WS_PORT: '9801',
+        NODE_ENV: 'production',
+      }
+    },
+    {
+      name: 'support-bot',
+      script: 'bot.js',
+      env: {
+        BOT_NAME: 'support-bot',
+        DISCORD_TOKEN: process.env.SUPPORT_DISCORD_TOKEN,
+        CLAUDE_CWD: '/path/to/project/support-bot',
+        MONITOR_CHANNELS: '987654321',
+        SUMMARIZE_INTERVAL_MS: '3600000',
+        BOT_HISTORY_DIR: '/path/to/project/support-bot/.bot-history',
+        WS_PORT: '9802',
+        NODE_ENV: 'production',
+      }
+    },
+  ]
+};
+```
+
+Add the tokens to `.env`:
+
+```env
+SALES_DISCORD_TOKEN=your-sales-bot-token
+SUPPORT_DISCORD_TOKEN=your-support-bot-token
+```
+
+Then start all bots at once:
+
+```bash
+npm install -g pm2
+pm2 start ecosystem.config.js
+pm2 save        # persist across reboots
+```
+
+Each bot gets its own `CLAUDE_CWD` pointing to a subdirectory with its own `CLAUDE.md`, `.mcp.json`, and context files. The parent repo's `CLAUDE.md` is inherited automatically (Claude CLI walks up the directory tree).
 
 ### Running as a system service
 
@@ -134,7 +192,8 @@ For auto-restart on crashes or reboots, use a system service manager instead of 
 
 ```bash
 npm install -g pm2
-pm2 start bot.js --name discord-bot
+pm2 start bot.js --name discord-bot   # single bot
+pm2 start ecosystem.config.js         # multi-bot (see above)
 pm2 save        # persist across reboots
 pm2 logs        # tail logs
 pm2 restart discord-bot  # restart after config changes
@@ -256,7 +315,9 @@ All personalization lives in three gitignored files — the bot code itself is g
 | Variable | Default | Description |
 |---|---|---|
 | `DISCORD_TOKEN` | (required) | Discord bot token |
+| `BOT_NAME` | `bot` | Unique name for this instance. Used for the PID file (`.{BOT_NAME}.pid`). Required when running multiple bots from the same directory. |
 | `CLAUDE_CWD` | current directory | **Your project repo** — where `CLAUDE.md`, `.mcp.json`, and `.claude/commands/` live |
+| `MCP_CONFIG` | (none) | Path to a `.mcp.json` file to pass to Claude CLI via `--mcp-config`. Use when the MCP config isn't in `CLAUDE_CWD`. |
 | `ALLOWED_USERS` | (all users) | Comma-separated Discord user IDs to restrict access |
 | `MONITOR_CHANNELS` | (none) | Channels where bot responds without @mention |
 | `ALLOWED_BOTS` | (none) | Bot user IDs allowed to interact (enables bot-to-bot communication) |
