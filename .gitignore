@@ -8,3 +8,4 @@ CLAUDE.md
 .bot-sessions.json
 .bot-history/
 *.pid
+ecosystem.config.js
