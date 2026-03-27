@@ -791,6 +791,20 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
       }
 
       // Attach any files Claude created (CSV, PDF, etc.)
+      // Also scan response text for file paths not caught by Write tool tracking
+      // (e.g., files created via Bash/Python scripts)
+      const FILE_EXTENSIONS = /\.(csv|pdf|xlsx|json|png|jpg|html|txt|md)$/i;
+      const pathMatches = fullResponse.match(/(?:^|[\s`'"])(\/?(?:[\w.-]+\/)*[\w.-]+\.\w{2,4})(?:[\s`'"]|$)/gm) || [];
+      for (const match of pathMatches) {
+        const cleaned = match.trim().replace(/^[`'"]+|[`'"]+$/g, "");
+        if (!FILE_EXTENSIONS.test(cleaned)) continue;
+        // Resolve relative to CLAUDE_CWD
+        const resolved = cleaned.startsWith("/") ? cleaned : join(CLAUDE_CWD, cleaned);
+        if (existsSync(resolved) && !writtenFiles.includes(resolved)) {
+          writtenFiles.push(resolved);
+        }
+      }
+
       if (writtenFiles.length > 0) {
         const attachable = writtenFiles.filter(f => existsSync(f));
         if (attachable.length > 0) {
