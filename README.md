@@ -128,7 +128,13 @@ The manager writes a PID file to track the running process. By default it uses `
 
 ### Running multiple bots from a single clone
 
-You can run multiple bot instances from the same clone by setting `BOT_NAME` per instance. Each bot gets its own PID file, Discord token, and project directory. Create an `ecosystem.config.js` with dotenv to keep secrets out of the file:
+You can run multiple bot instances from the same clone by setting `BOT_NAME` per instance. Each bot gets its own PID file, Discord token, and project directory. Copy the example and customize:
+
+```bash
+cp ecosystem.config.example.js ecosystem.config.js
+```
+
+The example shows two bots — add or remove entries as needed. Tokens go in `.env`, not in the config file:
 
 ```js
 require('dotenv').config();
