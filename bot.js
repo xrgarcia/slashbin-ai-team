@@ -689,7 +689,10 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
     const basePrompt = process.env.BOT_SYSTEM_PROMPT ||
       "You are running inside a Discord bot. Keep responses concise — Discord has a 2000 char limit per message. Do NOT perform startup rituals. Be brief.";
 
-    const channelContext = `\n\nYou are responding in channel: #${channelName}. Only respond to the message in THIS channel. The conversation buffer contains messages from multiple channels — focus only on #${channelName} context. Do NOT respond to or act on messages from other channels.`;
+    const now = new Date();
+    const timeContext = `\n\nCurrent time: ${now.toISOString()} (${now.toLocaleString("en-US", { timeZone: "America/Chicago", dateStyle: "short", timeStyle: "long" })} CDT)`;
+
+    const channelContext = `${timeContext}\n\nYou are responding in channel: #${channelName}. Only respond to the message in THIS channel. The conversation buffer contains messages from multiple channels — focus only on #${channelName} context. Do NOT respond to or act on messages from other channels.`;
 
     const systemPrompt = context
       ? `${basePrompt}${channelContext}\n\n${context}`
