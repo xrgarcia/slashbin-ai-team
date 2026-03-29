@@ -44,7 +44,7 @@ const HISTORY_DIR = process.env.BOT_HISTORY_DIR
 const CHECKPOINT_FILE = join(HISTORY_DIR, ".checkpoints.json");
 
 // --- Conversation buffer config ---
-const BUFFER_FILE = join(__dirname, ".conversation-buffer.txt");
+const BUFFER_FILE = join(__dirname, `.${BOT_NAME}-conversation-buffer.txt`);
 const BUFFER_MAX_BYTES = parseInt(process.env.BUFFER_MAX_BYTES, 10) || 32 * 1024;
 const BUFFER_TRUNCATE_RESPONSE = parseInt(process.env.BUFFER_TRUNCATE_RESPONSE, 10) || 500;
 const ATTACHMENTS_DIR = process.env.BOT_ATTACHMENTS_DIR
