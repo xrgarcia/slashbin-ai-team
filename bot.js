@@ -1237,6 +1237,44 @@ function saveSchedules(schedules) {
   writeFileSync(SCHEDULES_FILE, JSON.stringify(schedules, null, 2) + "\n");
 }
 
+const JOB_HISTORY_FILE = join(HISTORY_DIR, "job-history.jsonl");
+
+function recordJobExecution(job, startTime, durationMs, success, error) {
+  const record = {
+    id: job.id,
+    cron: job.cron,
+    scheduledFor: startTime.toISOString(),
+    firedAt: new Date().toISOString(),
+    durationMs,
+    success,
+    ...(error ? { error } : {}),
+  };
+  try {
+    appendFileSync(JOB_HISTORY_FILE, JSON.stringify(record) + "\n");
+  } catch { /* ignore */ }
+}
+
+function describeCron(cron) {
+  const [min, hour, day, month, dow] = cron.split(/\s+/);
+  const parts = [];
+  if (min !== "*" && hour !== "*") {
+    const h = parseInt(hour, 10);
+    const m = parseInt(min, 10);
+    const ampm = h >= 12 ? "PM" : "AM";
+    const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+    parts.push(`${h12}:${String(m).padStart(2, "0")} ${ampm}`);
+  }
+  if (day !== "*" && month !== "*") {
+    parts.push(`on ${month}/${day}`);
+  }
+  if (dow !== "*") {
+    const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const dayNames = dow.split(",").map(d => days[parseInt(d, 10)] || d);
+    parts.push(dayNames.join(","));
+  }
+  return parts.join(" ") || cron;
+}
+
 function cronMatchesTime(cron, date) {
   // Parse "M H D MO DOW" cron format — check if a given time matches
   const [cronMin, cronHour, cronDay, cronMonth, cronDow] = cron.split(/\s+/);
@@ -1276,7 +1314,12 @@ async function runScheduledJobs() {
   if (!schedules.length) return;
 
   const now = new Date();
+  const sLog = log.child({ component: "scheduler" });
   let changed = false;
+
+  // Second Way: log what we found on every cycle
+  const pending = schedules.filter(j => !j._remove);
+  sLog.debug({ jobs: pending.length, ids: pending.map(j => j.id) }, "Scheduler check");
 
   for (const job of schedules) {
     // Check if job should run (current minute or missed in last 5 minutes)
@@ -1285,7 +1328,7 @@ async function runScheduledJobs() {
       if (job.expires && new Date(job.expires) < now) {
         job._remove = true;
         changed = true;
-        log.info({ id: job.id, expires: job.expires }, "Scheduled job expired, removing");
+        sLog.info({ id: job.id, expires: job.expires, cron: describeCron(job.cron) }, "Scheduled job expired without firing, removing");
       }
       continue;
     }
@@ -1297,13 +1340,13 @@ async function runScheduledJobs() {
 
     const channel = client.channels.cache.get(job.channel);
     if (!channel) {
-      log.warn({ id: job.id, channel: job.channel }, "Scheduled job channel not found");
+      sLog.warn({ id: job.id, channel: job.channel }, "Scheduled job channel not found");
       continue;
     }
 
-    log.info({ id: job.id, prompt: job.prompt.substring(0, 80) }, "Running scheduled job");
+    // First Way: validate before executing
+    sLog.info({ id: job.id, cron: job.cron, humanTime: describeCron(job.cron), prompt: job.prompt.substring(0, 80) }, "Firing scheduled job");
 
-    // Create a send function that posts to the channel directly
     const jobLog = log.child({ component: "scheduler", jobId: job.id });
     const sendToChannel = async (content) => {
       try {
@@ -1319,12 +1362,26 @@ async function runScheduledJobs() {
       }
     };
 
+    // Third Way: record execution for learning
+    const startTime = new Date();
     try {
       const channelName = channel.name || job.channel;
       await runClaude(job.prompt, job.channel, jobLog, sendToChannel, [], channelName);
+      const durationMs = Date.now() - startTime.getTime();
+      sLog.info({ id: job.id, durationMs }, "Scheduled job completed successfully");
+      recordJobExecution(job, startTime, durationMs, true);
     } catch (err) {
-      jobLog.error({ err: err.message }, "Scheduled job failed");
+      const durationMs = Date.now() - startTime.getTime();
+      sLog.error({ id: job.id, err: err.message, durationMs }, "Scheduled job failed");
+      recordJobExecution(job, startTime, durationMs, false, err.message);
       await sendToChannel(`Scheduled job "${job.id}" failed: ${err.message}`);
+    }
+
+    // Expire one-time jobs after successful execution
+    if (job.expires) {
+      job._remove = true;
+      changed = true;
+      sLog.info({ id: job.id }, "One-time job completed, removing");
     }
   }
 
@@ -1333,9 +1390,27 @@ async function runScheduledJobs() {
   }
 }
 
+// First Way: validate jobs on load — log what's scheduled so misconfigurations are visible immediately
+function validateSchedulesOnStartup() {
+  const schedules = loadSchedules();
+  if (!schedules.length) {
+    log.info({ file: SCHEDULES_FILE }, "Job scheduler enabled (no jobs)");
+    return;
+  }
+  for (const job of schedules) {
+    const fields = (job.cron || "").split(/\s+/);
+    if (fields.length !== 5) {
+      log.warn({ id: job.id, cron: job.cron }, "Invalid cron format — expected 5 fields");
+      continue;
+    }
+    log.info({ id: job.id, fires: describeCron(job.cron), expires: job.expires || "never", prompt: job.prompt.substring(0, 60) }, "Scheduled job loaded");
+  }
+  log.info({ file: SCHEDULES_FILE, count: schedules.length }, "Job scheduler enabled");
+}
+validateSchedulesOnStartup();
+
 // Start scheduler check loop
 setInterval(runScheduledJobs, SCHEDULE_CHECK_MS);
-log.info({ file: SCHEDULES_FILE }, "Job scheduler enabled");
 
 // Graceful shutdown
 process.on("SIGINT", () => {
