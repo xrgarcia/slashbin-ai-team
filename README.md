@@ -1,38 +1,47 @@
-# slashbin-discord-bot
+# slashbin-ai-team
 
-A Discord bot that wraps [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI, giving you a conversational AI assistant in Discord with full access to your codebase, MCP servers, and tools.
+Build AI employees for your business on Discord. Give each one a role, connect it to your tools, and let them work together.
 
-Built for product owner workflows but works for any team that wants Claude Code in Discord.
+Built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI. Each bot gets full access to your codebase, MCP servers, and tools — not a chatbot wrapper, but a real AI teammate that can read code, query databases, create issues, and ship work.
 
-## What it does
+## Who this is for
 
-- Spawns Claude Code CLI sessions per Discord channel
-- Streams intermediate progress messages (not just the final answer)
-- Resumes conversations within the same channel (30-min session window)
-- Structured logging with [pino](https://github.com/pinojs/pino)
-- Connects to any MCP servers you configure (Stripe, Postgres, Railway, etc.)
-- Respects Discord's 2000-char limit with smart message splitting
+- **Vibe coders** — your AI builds the pipeline, you never touch webhook plumbing
+- **Developers** — replace boilerplate with AI employees that handle ops, reviews, and coordination
+- **Small business owners & solopreneurs** — run a team of AI employees without hiring, from product owner to SRE
 
-## Prerequisites
+## What you can build
 
-- **Node.js** 18+
-- **Claude Code CLI** installed and authenticated ([install guide](https://docs.anthropic.com/en/docs/claude-code/getting-started))
+- A **Product Owner** that manages your backlog, writes issues, and talks to customers
+- An **Engineering Manager** that decomposes epics, reviews PRs, and coordinates deploys
+- An **SRE bot** that monitors services, picks up approved issues, and ships fixes
+- A **Support agent** that answers questions using your docs and database
+- Any role you can describe in a `CLAUDE.md` file
 
-## Getting started
+Each bot is defined by its context — a `CLAUDE.md` that describes who it is, what it knows, and what it can do. Change the context, change the employee.
 
-### Step 1: Create a Discord bot (5 minutes)
+## Key features
+
+- **One codebase, many employees** — run multiple bot instances from a single install, each with its own role, tools, and Discord channels
+- **Real tool access** — connect Stripe, Postgres, Railway, GitHub, or any MCP server. Bots don't just talk — they act.
+- **Bot-to-bot coordination** — AI employees can @mention each other and collaborate, with built-in loop prevention so they don't spiral
+- **Conversation memory** — sessions persist across restarts. Background summarization compresses chat history into searchable daily summaries, giving bots cross-session awareness.
+- **Image understanding** — attach screenshots, diagrams, or UI mockups and the bot analyzes them
+- **Stream progress** — see what the bot is doing as it works, not just the final answer
+- **Works with your codebase** — bots run from your project directory with full read/write access to code, docs, and config
+
+## Quick start
+
+### 1. Create a Discord bot
 
 1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
-2. Click **New Application** → name it whatever you want (e.g. "My AI Assistant")
-3. Go to **Bot** tab → click **Reset Token** → copy the token
-4. Under **Privileged Gateway Intents**, enable:
-   - **Message Content Intent** (required to read messages)
-5. Go to **OAuth2** tab → **URL Generator**:
-   - Scopes: `bot`
-   - Bot Permissions: `Send Messages`, `Read Message History`
-6. Copy the generated URL → open it → invite the bot to your Discord server
+2. Click **New Application** → name it (e.g., "Product Owner")
+3. Go to **Bot** tab → **Reset Token** → copy the token
+4. Enable **Message Content Intent** under Privileged Gateway Intents
+5. Go to **OAuth2 → URL Generator** → select `bot` scope → permissions: `Send Messages`, `Read Message History`
+6. Open the generated URL → invite the bot to your server
 
-### Step 2: Clone and install
+### 2. Clone and install
 
 ```bash
 git clone https://github.com/xrgarcia/slashbin-discord-bot.git
@@ -40,101 +49,77 @@ cd slashbin-discord-bot
 npm install
 ```
 
-### Step 3: Configure
+### 3. Configure
 
 ```bash
 cp .env.example .env
 ```
 
-At minimum, edit `.env` and add your Discord token:
+Edit `.env`:
 
 ```env
 DISCORD_TOKEN=your-discord-bot-token-here
-```
-
-### Step 4: Set up your project directory
-
-The bot is designed to run from your **project directory** — the repo that has your `CLAUDE.md`, `.mcp.json`, and Claude Code skills (`.claude/commands/`). This is how the bot gets its personality, context, and capabilities.
-
-```bash
-# Set CLAUDE_CWD in .env to your project repo
 CLAUDE_CWD=/path/to/your/project-repo
 ```
 
-In your project repo, make sure you have:
-- **`CLAUDE.md`** — the bot's brain. Defines what it knows, what it can do, and how it behaves.
-- **`.mcp.json`** (optional) — MCP servers for databases, APIs, and external tools.
-- **`.claude/commands/`** (optional) — Claude Code skills the bot can invoke.
+`CLAUDE_CWD` is your **project directory** — the repo with your `CLAUDE.md`, `.mcp.json`, and Claude Code skills. This is how the bot gets its personality and capabilities.
 
-> **Why not run from the bot directory?** The bot code is generic — it's just the Discord ↔ Claude bridge. All the intelligence comes from your project's `CLAUDE.md`, MCP servers, and skills. Running from the project directory gives Claude full access to your codebase, context, and tools.
+### 4. Define your AI employee
 
-#### Writing your CLAUDE.md
-
-The `CLAUDE.md` is the bot's brain — it controls what Claude knows, how it behaves, and what it can do. The Discord bot needs a **lightweight** version compared to what you'd use in a terminal/IDE session. Claude loads the full `CLAUDE.md` on every message, so keep it lean.
-
-Start from the example and customize:
+The `CLAUDE.md` in your project directory is the bot's brain. It controls what the bot knows, how it behaves, and what it can do.
 
 ```bash
 cp CLAUDE.md.example CLAUDE.md
 ```
 
-**Key sections to include:**
+**What to include:**
 
 | Section | Purpose | Example |
 |---|---|---|
-| **Role** | Who the bot is and who it works for | "You are a product assistant for Acme Corp" |
-| **Quick lookups** | What the bot can query directly | "Query Postgres via MCP, check Stripe billing" |
-| **Context files** | Files to read on demand (not on every message) | "Read `docs/roadmap.md` only when asked about roadmap" |
-| **Actions** | What the bot is allowed to do | "Create GitHub issues, commit and push" |
-| **Terminology** | Domain-specific terms | "Golden Model = canonical output schema" |
-| **Repos** | Where to file issues and find code | "acme/backend — main API server" |
+| **Role** | Who the bot is | "You are a product owner for Acme Corp" |
+| **Quick lookups** | What it can query | "Query Postgres via MCP, check Stripe billing" |
+| **Actions** | What it's allowed to do | "Create GitHub issues, commit and push" |
+| **Terminology** | Domain terms | "Golden Model = canonical output schema" |
+| **Repos** | Where to find code and file issues | "acme/backend — main API server" |
 
-**Guidelines:**
+Keep it under 100 lines. Claude loads the full `CLAUDE.md` on every message — lean context means faster responses.
 
-- **Keep it under 100 lines.** If Claude has to read 500 lines of context on every Discord message, it wastes tokens and slows responses.
-- **Load context on demand.** Don't paste your entire architecture doc into `CLAUDE.md`. Instead, list the file paths and tell Claude to read them only when relevant.
-- **Skip startup rituals.** Tell Claude not to read files or run commands unless the question requires it.
-- **Be brief.** Remind Claude that Discord has a 2000-char limit and to keep responses concise.
-
-If you don't have a separate project repo, the bot will use its own directory. Copy the example files to get started:
-
-```bash
-cp CLAUDE.md.example CLAUDE.md
-cp .mcp.json.example .mcp.json    # optional
-```
-
-### Step 5: Run
+### 5. Run
 
 ```bash
 npm start
 ```
 
-That's it. The bot is online.
+Your AI employee is online.
 
-## Managing the bot
+## Usage
 
-The built-in process manager handles start, stop, and restart with PID file tracking. Works on Linux, macOS, and Windows.
+- **DM the bot** — it responds to all direct messages
+- **@mention in a channel** — `@ProductOwner what's the status of open issues?`
+- **Monitored channels** — set `MONITOR_CHANNELS` in `.env` for always-on response (no @mention needed)
+- `/new` — clear the session, start fresh
+- `/stop` — kill the running Claude process
 
-```bash
-npm start          # start bot in background
-npm stop           # graceful shutdown
-npm restart        # stop + start
-npm run status     # show PID, uptime, recent logs
-npm run logs       # tail last 20 lines of bot.log
-npm run logs 50    # tail last 50 lines
-```
+### Sessions
 
-The manager writes a PID file to track the running process. By default it uses `.bot.pid`, but when `BOT_NAME` is set it uses `.<BOT_NAME>.pid` instead — allowing multiple bots to run from the same directory. `npm start` will refuse to start a second instance. `npm stop` sends SIGINT for graceful shutdown (5s timeout, then force kill).
+Each channel gets its own conversation. Messages continue with full context until you type `/new`. Sessions survive bot restarts, idle time, and reboots.
 
-### Running multiple bots from a single clone
+### Context tiers
 
-You can run multiple bot instances from the same clone by setting `BOT_NAME` per instance. Each bot gets its own PID file, Discord token, and project directory. Copy the example and customize:
+Every session gets two layers of memory:
+
+1. **Recent summaries** — compressed daily summaries from the last 48 hours
+2. **Recent messages** — last 30 raw messages from monitored channels
+
+This gives bots awareness across sessions and channels without raw message bloat.
+
+## Running multiple AI employees
+
+Run a whole team from a single install. Each bot gets its own Discord token, project directory, and role.
 
 ```bash
 cp ecosystem.config.example.js ecosystem.config.js
 ```
-
-The example shows two bots — add or remove entries as needed. Tokens go in `.env`, not in the config file:
 
 ```js
 require('dotenv').config();
@@ -142,29 +127,29 @@ require('dotenv').config();
 module.exports = {
   apps: [
     {
-      name: 'sales-bot',
+      name: 'product-owner',
       script: 'bot.js',
       env: {
-        BOT_NAME: 'sales-bot',
-        DISCORD_TOKEN: process.env.SALES_DISCORD_TOKEN,
-        CLAUDE_CWD: '/path/to/project/sales-bot',
+        BOT_NAME: 'product-owner',
+        DISCORD_TOKEN: process.env.PO_DISCORD_TOKEN,
+        CLAUDE_CWD: '/path/to/product-owner-repo',
         MONITOR_CHANNELS: '123456789',
         SUMMARIZE_INTERVAL_MS: '3600000',
-        BOT_HISTORY_DIR: '/path/to/project/sales-bot/.bot-history',
+        BOT_HISTORY_DIR: '/path/to/product-owner-repo/.bot-history',
         WS_PORT: '9801',
         NODE_ENV: 'production',
       }
     },
     {
-      name: 'support-bot',
+      name: 'engineering-manager',
       script: 'bot.js',
       env: {
-        BOT_NAME: 'support-bot',
-        DISCORD_TOKEN: process.env.SUPPORT_DISCORD_TOKEN,
-        CLAUDE_CWD: '/path/to/project/support-bot',
+        BOT_NAME: 'engineering-manager',
+        DISCORD_TOKEN: process.env.EM_DISCORD_TOKEN,
+        CLAUDE_CWD: '/path/to/engineering-manager-repo',
         MONITOR_CHANNELS: '987654321',
         SUMMARIZE_INTERVAL_MS: '3600000',
-        BOT_HISTORY_DIR: '/path/to/project/support-bot/.bot-history',
+        BOT_HISTORY_DIR: '/path/to/engineering-manager-repo/.bot-history',
         WS_PORT: '9802',
         NODE_ENV: 'production',
       }
@@ -173,210 +158,31 @@ module.exports = {
 };
 ```
 
-Add the tokens to `.env`:
-
-```env
-SALES_DISCORD_TOKEN=your-sales-bot-token
-SUPPORT_DISCORD_TOKEN=your-support-bot-token
-```
-
-Then start all bots at once:
-
 ```bash
 npm install -g pm2
 pm2 start ecosystem.config.js
-pm2 save        # persist across reboots
+pm2 save
 ```
 
-Each bot gets its own `CLAUDE_CWD` pointing to a subdirectory with its own `CLAUDE.md`, `.mcp.json`, and context files. The parent repo's `CLAUDE.md` is inherited automatically (Claude CLI walks up the directory tree).
+### Bot-to-bot coordination
 
-### Running as a system service
+AI employees can talk to each other. A Product Owner bot can @mention the Engineering Manager to hand off work. An SRE bot can escalate to the Product Owner when something breaks.
 
-For auto-restart on crashes or reboots, use a system service manager instead of the built-in manager.
-
-**With pm2:**
-
-```bash
-npm install -g pm2
-pm2 start bot.js --name discord-bot   # single bot
-pm2 start ecosystem.config.js         # multi-bot (see above)
-pm2 save        # persist across reboots
-pm2 logs        # tail logs
-pm2 restart discord-bot  # restart after config changes
-```
-
-**With systemd** (Linux):
-
-```ini
-# /etc/systemd/system/discord-bot.service
-[Unit]
-Description=Claude Code Discord Bot
-After=network.target
-
-[Service]
-Type=simple
-User=your-user
-WorkingDir=/path/to/slashbin-discord-bot
-ExecStart=/usr/bin/node bot.js
-Restart=always
-RestartSec=10
-Environment=NODE_ENV=production
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl enable discord-bot
-sudo systemctl start discord-bot
-journalctl -u discord-bot -f  # tail logs
-```
-
-> **Note:** When using pm2 or systemd, don't mix with `npm start/stop` — use one or the other.
-
-## How to use
-
-- **DM the bot** — it responds to all direct messages
-- **Mention in a server** — `@YourBot what's the status of open issues?`
-- **Monitored channels** — set `MONITOR_CHANNELS` in `.env` to have the bot respond to all messages in specific channels (no @mention needed)
-- `/new` — clears the session, starts fresh
-- `/stop` (or just `stop`) — immediately kills the running Claude process in the channel
-- `/status` — shows current session info and whether Claude is running
-### How sessions work
-
-Each Discord channel gets its own Claude Code session. Messages in the same channel continue the conversation with full context — sessions persist until you type `/new`. Claude Code stores sessions on disk, and the bot persists the channel-to-session mapping to `.bot-sessions.json`, so conversations survive bot restarts, idle time, and even reboots.
-
-### Tiered context loading
-
-On every Claude spawn, the bot injects two layers of context into the system prompt:
-
-1. **Recent summaries** — compressed daily summaries from `.bot-history/` (last 48h). These provide cross-session awareness without raw message bloat.
-2. **Recent messages** — the last 30 raw messages from monitored channels. This is the immediate conversational context.
+**Both bots must whitelist each other:**
 
 ```env
-RECENT_CONTEXT_MAX_MESSAGES=30   # Sliding window size (default: 30)
-RECENT_CONTEXT_MAX_CHARS=12000   # Total context budget in chars (default: 12000)
-SUMMARY_LOOKBACK_HOURS=48        # How far back to load summaries (default: 48h)
-RECENT_CONTEXT_CHANNELS=...      # Channels to load (defaults to MONITOR_CHANNELS)
+# Product Owner's .env — allow Engineering Manager to talk to it
+ALLOWED_BOTS=<em-bot-user-id>
+
+# Engineering Manager's .env — allow Product Owner to talk to it
+ALLOWED_BOTS=<po-bot-user-id>
 ```
 
-The total injected context is capped at `RECENT_CONTEXT_MAX_CHARS` (default 12K). Summaries get 8K budget, raw messages get 4K. Oldest content is trimmed first when over budget.
+**Loop prevention** is built in. Bots automatically stop after `MAX_BOT_EXCHANGES` consecutive exchanges (default: 2). Any human message resets the counter — you're always the circuit breaker.
 
-This works alongside session resume — the session provides Claude's internal conversation state, while tiered context provides cross-channel and cross-session awareness.
+## Connecting tools (MCP servers)
 
-### Image support
-
-The bot can see images posted in Discord. Attach an image to your message and the bot will pass it to Claude for analysis. This works with PNG, JPG, GIF, WebP, and BMP files.
-
-- **Image + text** — attach an image and include a message (e.g., "What's wrong with this UI?")
-- **Image only** — attach an image with no text and the bot will ask Claude to describe it
-- Images are downloaded to a temp directory, referenced in the prompt text, and cleaned up after
-
-### Chat history summarization
-
-The summarizer compresses Discord chat history into searchable daily summaries stored in `.bot-history/`.
-
-**Built-in background summarizer (recommended)**
-
-Set `SUMMARIZE_INTERVAL_MS` in `.env` to enable automatic summarization:
-
-```env
-# Summarize every hour — complements recent context loading
-SUMMARIZE_INTERVAL_MS=3600000
-```
-
-The bot runs the first cycle 10 seconds after startup, then repeats on the interval. Summaries are automatically loaded into every Claude session's context (last 48h). Together with the sliding message window, this creates a two-tier memory:
-- **Recent**: last 30 raw messages injected into every Claude session
-- **Background**: daily summaries from `.bot-history/` provide compressed cross-session awareness
-
-**Standalone script**
-
-For manual runs or external scheduling:
-
-```bash
-npm run summarize          # summarize new messages since last run
-npm run summarize:dry      # preview what would be summarized (no changes)
-```
-
-Both options use the same logic:
-1. Fetch all messages since the last checkpoint (per channel)
-2. Group by date, summarize each day with Claude
-3. Save as `.bot-history/2026-03-11-engineering.md`
-4. Track per-channel checkpoint so messages are never re-processed
-
-By default, the summarizer processes the same channels listed in `MONITOR_CHANNELS`. Set `SUMMARIZE_CHANNELS` in `.env` to override.
-
-## Configuration
-
-All personalization lives in three gitignored files — the bot code itself is generic:
-
-| File | Purpose |
-|---|---|
-| `.env` | Secrets and access control |
-| `CLAUDE.md` | System prompt — what the bot knows, how it behaves |
-| `.mcp.json` | MCP servers — databases, APIs, external tools (optional) |
-
-### Environment variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `DISCORD_TOKEN` | (required) | Discord bot token |
-| `BOT_NAME` | `bot` | Unique name for this instance. Used for the PID file (`.{BOT_NAME}.pid`). Required when running multiple bots from the same directory. |
-| `CLAUDE_CWD` | current directory | **Your project repo** — where `CLAUDE.md`, `.mcp.json`, and `.claude/commands/` live |
-| `MCP_CONFIG` | (none) | Path to a `.mcp.json` file to pass to Claude CLI via `--mcp-config`. Use when the MCP config isn't in `CLAUDE_CWD`. |
-| `ALLOWED_USERS` | (all users) | Comma-separated Discord user IDs to restrict access |
-| `MONITOR_CHANNELS` | (none) | Channels where bot responds without @mention |
-| `ALLOWED_BOTS` | (none) | Bot user IDs allowed to interact (enables bot-to-bot communication) |
-| `MAX_BOT_EXCHANGES` | `2` | Max back-and-forth with another bot before stopping (prevents loops) |
-| `BOT_SYSTEM_PROMPT` | (built-in) | Override the system prompt appended to every Claude session |
-| `SESSION_TIMEOUT_MS` | `1800000` | Session inactivity timeout (ms). Default: 30 minutes |
-| `CLAUDE_TIMEOUT_MS` | `3600000` | Max time per Claude session (ms). Default: 1 hour |
-| `CLAUDE_MODEL` | (CLI default) | Claude model for interactive sessions (e.g., `claude-opus-4-6`, `claude-sonnet-4-6`) |
-| `SUMMARIZE_MODEL` | `CLAUDE_MODEL` | Claude model for summarization. Falls back to `CLAUDE_MODEL`, then CLI default. Use a cheaper model to save tokens. |
-| `CLAUDE_BIN` | `claude` | Path to Claude Code binary |
-| `RECENT_CONTEXT_MAX_MESSAGES` | `30` | Max recent messages per channel (sliding window) |
-| `RECENT_CONTEXT_MAX_CHARS` | `12000` | Total context budget in characters |
-| `BOT_HISTORY_DIR` | `.bot-history` | Directory for chat summaries. Absolute or relative to bot root. |
-| `SUMMARY_LOOKBACK_HOURS` | `48` | How far back to load summaries from history dir |
-| `RECENT_CONTEXT_CHANNELS` | `MONITOR_CHANNELS` | Channels to load recent context from |
-| `SUMMARIZE_INTERVAL_MS` | `0` (disabled) | Enable background summarization. Set to interval in ms (e.g., `3600000` = hourly) |
-| `SUMMARIZE_CHANNELS` | `MONITOR_CHANNELS` | Channels to summarize (defaults to monitored channels) |
-| `SUMMARIZE_BATCH_SIZE` | `200` | Max messages per channel per summarization run |
-| `LOG_LEVEL` | `info` | Pino log level: `debug`, `info`, `warn`, `error` |
-| `NODE_ENV` | (none) | Set to `production` to disable pretty logging |
-
-**Finding Discord IDs:** Enable Developer Mode in Discord (Settings > Advanced > Developer Mode), then right-click users/channels to copy their IDs.
-
-### Bot-to-bot communication
-
-By default, Discord bots ignore messages from other bots. If you're running multiple bot instances (e.g., a Product Owner bot and an SRE bot) that need to talk to each other, **both bots must whitelist the other**.
-
-Each bot needs the other bot's **user ID** (not client ID) in its `ALLOWED_BOTS`:
-
-```env
-# Bot A's .env — allow Bot B to talk to it
-ALLOWED_BOTS=<bot-b-user-id>
-
-# Bot B's .env — allow Bot A to talk to it
-ALLOWED_BOTS=<bot-a-user-id>
-```
-
-To find a bot's user ID: right-click the bot's name in Discord (with Developer Mode enabled) → **Copy User ID**. You can also find it on the bot's OAuth2 authorize URL — the `client_id` parameter is the same as the user ID.
-
-**Without this, @mentions between bots will be silently ignored.** This is the most common issue when setting up multi-bot workflows. If a bot responds to humans but not to another bot, `ALLOWED_BOTS` is the fix.
-
-#### Loop prevention
-
-When two bots can talk to each other, they can get into an infinite loop — each responding to the other's last message. The bot automatically stops after `MAX_BOT_EXCHANGES` consecutive bot-to-bot exchanges in the same channel (default: 2). Any human message in that channel resets the counter.
-
-```env
-# Allow up to 3 back-and-forth exchanges before stopping (default: 2)
-MAX_BOT_EXCHANGES=3
-```
-
-### MCP servers
-
-Edit `.mcp.json` to connect databases, APIs, and other tools:
+Give your AI employees access to real systems via `.mcp.json`:
 
 ```json
 {
@@ -393,13 +199,88 @@ Edit `.mcp.json` to connect databases, APIs, and other tools:
 }
 ```
 
-> **Note:** Claude waits for all MCP servers to connect before responding. If a server hangs (e.g., unreachable database), the bot will appear stuck. Test servers individually first.
+Any MCP server works — Stripe, Postgres, Railway, GitHub, Slack, custom APIs. The bot connects them all before responding.
 
-### Customization
+## Managing bots
 
-- **Change what Claude knows** — edit `CLAUDE.md` with your product context, terminology, and behavioral rules
-- **Add file access** — use `--add-dir` in the spawn args (in `bot.js`) to give Claude read/write access to additional directories
-- **Change the model** — set `CLAUDE_MODEL` in `.env` (e.g., `claude-opus-4-6`). Set `SUMMARIZE_MODEL` separately if you want a cheaper model for summaries. Defaults to whatever your Claude Code CLI is configured to use
+```bash
+npm start          # start in background
+npm stop           # graceful shutdown
+npm restart        # stop + start
+npm run status     # PID, uptime, recent logs
+npm run logs       # tail last 20 lines
+npm run logs 50    # tail last 50 lines
+```
+
+For production, use **pm2** or **systemd** for auto-restart on crashes and reboots.
+
+<details>
+<summary>systemd example (Linux)</summary>
+
+```ini
+# /etc/systemd/system/ai-employee.service
+[Unit]
+Description=AI Employee (Discord)
+After=network.target
+
+[Service]
+Type=simple
+User=your-user
+WorkingDir=/path/to/slashbin-discord-bot
+ExecStart=/usr/bin/node bot.js
+Restart=always
+RestartSec=10
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable ai-employee
+sudo systemctl start ai-employee
+journalctl -u ai-employee -f
+```
+
+</details>
+
+## Chat history & summarization
+
+The built-in summarizer compresses Discord chat history into searchable daily markdown files. Enable it in `.env`:
+
+```env
+SUMMARIZE_INTERVAL_MS=3600000   # summarize every hour
+```
+
+Summaries are automatically injected into every Claude session (last 48h), giving bots long-term memory across conversations. You can also run it manually:
+
+```bash
+npm run summarize          # summarize new messages
+npm run summarize:dry      # preview (no changes)
+```
+
+## Configuration reference
+
+| Variable | Default | Description |
+|---|---|---|
+| `DISCORD_TOKEN` | (required) | Discord bot token |
+| `BOT_NAME` | `bot` | Instance name (used for PID file, required for multi-bot) |
+| `CLAUDE_CWD` | current dir | Project repo with `CLAUDE.md`, `.mcp.json`, skills |
+| `MCP_CONFIG` | (none) | Path to `.mcp.json` if not in `CLAUDE_CWD` |
+| `ALLOWED_USERS` | (all) | Restrict access to specific Discord user IDs |
+| `MONITOR_CHANNELS` | (none) | Channels where bot responds without @mention |
+| `ALLOWED_BOTS` | (none) | Bot user IDs allowed to interact |
+| `MAX_BOT_EXCHANGES` | `2` | Max bot-to-bot exchanges before stopping |
+| `BOT_SYSTEM_PROMPT` | (built-in) | Override the system prompt |
+| `SESSION_TIMEOUT_MS` | `1800000` | Session inactivity timeout (30 min) |
+| `CLAUDE_TIMEOUT_MS` | `3600000` | Max time per session (1 hour) |
+| `CLAUDE_MODEL` | (CLI default) | Claude model (e.g., `claude-opus-4-6`) |
+| `SUMMARIZE_MODEL` | `CLAUDE_MODEL` | Model for summarization (use cheaper model) |
+| `RECENT_CONTEXT_MAX_MESSAGES` | `30` | Sliding window size |
+| `RECENT_CONTEXT_MAX_CHARS` | `12000` | Total context budget |
+| `SUMMARY_LOOKBACK_HOURS` | `48` | Summary history window |
+| `SUMMARIZE_INTERVAL_MS` | `0` | Background summarization interval |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
 ## Architecture
 
@@ -411,55 +292,26 @@ Discord message
   → session ID saved for conversation continuity
 ```
 
-Key design decisions:
-- **CLI spawn, not SDK** — uses Claude Code CLI directly, getting all built-in tools (Bash, Read, Edit, Grep, etc.) and MCP server support for free
-- **stdin: "ignore"** — critical fix; without this, Claude hangs waiting for interactive consent
-- **Stream processing** — text is sent to Discord as it arrives (before tool calls), so users see progress during long research tasks
-- **Send queue** — messages are serialized to avoid Discord rejecting overlapping replies
+- **CLI spawn, not SDK** — uses Claude Code CLI directly, inheriting all built-in tools (Bash, Read, Edit, Grep) and MCP support
+- **stdin: "ignore"** — prevents Claude from hanging waiting for interactive consent
+- **Stream processing** — users see progress as the bot works, not just the final answer
+- **Send queue** — messages are serialized to avoid Discord rate limits
 
 ## Troubleshooting
 
-### Bot sends a message but it's empty or gets no response
+| Problem | Cause | Fix |
+|---|---|---|
+| Bot sends empty messages | Claude hanging on stdin | Ensure `stdio: ["ignore", "pipe", "pipe"]` in spawn options |
+| Bot ignores @mentions from another bot | Bot-to-bot not configured | Add the other bot's user ID to `ALLOWED_BOTS` in both bots |
+| Bot appears stuck | MCP server unreachable | Remove `.mcp.json`, test, add servers back one at a time |
+| Error code 143 | Timeout (SIGTERM) | Increase `CLAUDE_TIMEOUT_MS` or check for hanging MCP servers |
+| "Claude exited with code 1" | CLI not authenticated | Run `claude auth` in your terminal |
+| Bot doesn't see messages | Missing intent | Enable **Message Content Intent** in Discord Developer Portal |
 
-Claude is hanging. The most common cause is `stdin` — Claude's CLI expects an interactive terminal and blocks waiting for consent. The bot sets `stdio: ["ignore", "pipe", "pipe"]` to prevent this. If you've modified the spawn options, make sure stdin is set to `"ignore"`.
+## Prerequisites
 
-### Bot ignores @mentions from another bot
-
-This is expected by default — bots ignore all other bots. To enable bot-to-bot communication, add the other bot's user ID to `ALLOWED_BOTS` in `.env`. **Both bots must whitelist each other.** See [Bot-to-bot communication](#bot-to-bot-communication) above.
-
-### Bot appears stuck after receiving a message
-
-Check if an MCP server is unreachable. Claude waits for **all** MCP servers to connect before it starts processing. One hanging server blocks everything.
-
-To diagnose, remove `.mcp.json` temporarily and test. Add servers back one at a time.
-
-### Error code 143
-
-Claude was killed by a timeout (`SIGTERM`). The default timeout is 1 hour (`CLAUDE_TIMEOUT_MS=3600000`). If your tasks need more time, increase it in `.env`. If the task should have been fast, check for hanging MCP servers (see above).
-
-### Claude hangs when spawned from inside another Claude session
-
-The bot strips Claude-specific environment variables (`CLAUDECODE`, `CLAUDE_AGENT_SDK_VERSION`, etc.) before spawning. If you're running the bot from within a Claude Code terminal and it still hangs, check that the `cleanEnv` block in `bot.js` is removing all `CLAUDE_*` vars.
-
-### Discord rejects messages (no error, message just doesn't appear)
-
-Discord has a 2000 character limit per message. The bot splits long responses automatically, but if you see missing messages, check the logs for send errors:
-
-```bash
-grep "Failed to send" bot.log
-```
-
-### Bot responds but doesn't see my messages
-
-Make sure **Message Content Intent** is enabled in the [Discord Developer Portal](https://discord.com/developers/applications) under your bot's **Privileged Gateway Intents**. Without it, the bot receives empty message bodies.
-
-### "Claude exited with code 1"
-
-Usually means Claude CLI isn't authenticated. Run `claude` manually in your terminal to check. You may need to run `claude auth` first.
-
-### Logs show "Non-JSON line from Claude"
-
-This is usually harmless — Claude CLI sometimes outputs non-JSON warnings to stdout (e.g., deprecation notices). The bot skips these lines. If you see many of them, set `LOG_LEVEL=debug` to investigate.
+- **Node.js** 18+
+- **Claude Code CLI** installed and authenticated ([install guide](https://docs.anthropic.com/en/docs/claude-code/getting-started))
 
 ## License
 
