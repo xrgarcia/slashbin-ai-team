@@ -9,3 +9,9 @@ CLAUDE.md
 .bot-history/
 *.pid
 ecosystem.config.js
+.conversation-buffer.txt
+.*-conversation-buffer.txt
+bot-history/
+bots/
+attachments/
+summarize.log
