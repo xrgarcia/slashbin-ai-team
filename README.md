@@ -164,6 +164,14 @@ pm2 start ecosystem.config.js
 pm2 save
 ```
 
+**Using Doppler for secrets?** Replace `require('dotenv').config()` with `doppler run`:
+
+```bash
+doppler run --project my-project --config prd -- pm2 start ecosystem.config.js
+```
+
+Tokens are injected via `process.env` — no `.env` file needed. Set up as a systemd service for auto-start on reboot.
+
 ### Bot-to-bot coordination
 
 AI employees can talk to each other. A Product Owner bot can @mention the Engineering Manager to hand off work. An SRE bot can escalate to the Product Owner when something breaks.
