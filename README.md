@@ -277,6 +277,7 @@ npm run summarize:dry      # preview (no changes)
 | `MCP_CONFIG` | (none) | Path to `.mcp.json` if not in `CLAUDE_CWD` |
 | `ALLOWED_USERS` | (all) | Restrict access to specific Discord user IDs |
 | `MONITOR_CHANNELS` | (none) | Channels where bot responds without @mention |
+| `ALLOWED_CHANNELS` | (none) | Channels where bot can respond (DMs always allowed) |
 | `ALLOWED_BOTS` | (none) | Bot user IDs allowed to interact |
 | `MAX_BOT_EXCHANGES` | `2` | Max bot-to-bot exchanges before stopping |
 | `BOT_SYSTEM_PROMPT` | (built-in) | Override the system prompt |
@@ -284,8 +285,10 @@ npm run summarize:dry      # preview (no changes)
 | `CLAUDE_TIMEOUT_MS` | `3600000` | Max time per session (1 hour) |
 | `CLAUDE_MODEL` | (CLI default) | Claude model (e.g., `claude-opus-4-6`) |
 | `SUMMARIZE_MODEL` | `CLAUDE_MODEL` | Model for summarization (use cheaper model) |
+| `RECENT_CONTEXT_CHANNELS` | (none) | Channels to pull recent messages from for session context |
 | `RECENT_CONTEXT_MAX_MESSAGES` | `30` | Sliding window size |
 | `RECENT_CONTEXT_MAX_CHARS` | `12000` | Total context budget |
+| `SUMMARIZE_CHANNELS` | (none) | Channels to summarize on interval |
 | `SUMMARY_LOOKBACK_HOURS` | `48` | Summary history window |
 | `SUMMARIZE_INTERVAL_MS` | `0` | Background summarization interval |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
