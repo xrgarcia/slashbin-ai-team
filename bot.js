@@ -728,7 +728,7 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
     }
 
     // Always fresh session — no --resume
-    args.push("-p", finalPrompt);
+    args.push("-p", "--", finalPrompt);
     reqLog.info({ images: imagePaths.length }, "Starting fresh Claude session");
 
     // Build a clean env without Claude nesting vars
@@ -953,8 +953,8 @@ function summarizeBufferLines(lines) {
       "--verbose",
       "--allow-dangerously-skip-permissions",
       "--dangerously-skip-permissions",
-      "-p", prompt,
       "--append-system-prompt", "You are a summarization assistant. Output only the summary, no preamble. Keep it under 2000 characters.",
+      "-p", "--", prompt,
     ];
 
     const cleanEnv = { ...process.env };
@@ -1110,8 +1110,8 @@ function summarizeWithClaude(channelName, date, messages) {
       "--verbose",
       "--allow-dangerously-skip-permissions",
       "--dangerously-skip-permissions",
-      "-p", prompt,
       "--append-system-prompt", "You are a summarization assistant. Output only the summary, no preamble. Keep it under 2000 characters.",
+      "-p", "--", prompt,
     ];
 
     const cleanEnv = { ...process.env };
