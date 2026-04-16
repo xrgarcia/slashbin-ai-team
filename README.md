@@ -1,5 +1,7 @@
 # slashbin-ai-team
 
+*The AI engineering team powering [www.slashbin.io](https://www.slashbin.io). Product Owner, Engineering Manager, SRE — coordinating autonomously to ship software.*
+
 Build AI employees for your business on Discord. Give each one a role, connect it to your tools, and let them work together.
 
 Built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI. Each bot gets full access to your codebase, MCP servers, and tools — not a chatbot wrapper, but a real AI teammate that can read code, query databases, create issues, and ship work.
