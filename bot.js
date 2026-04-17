@@ -411,8 +411,35 @@ const MAX_CONCURRENT_CLAUDE = parseInt(process.env.MAX_CONCURRENT_CLAUDE, 10) ||
 const botExchanges = new Map();
 
 // --- Session continuity: track Claude session IDs per channel for --resume ---
-const channelSessions = new Map(); // channelId → { sessionId, lastActivity }
+const SESSION_FILE = join(__dirname, `.${BOT_NAME}-sessions.json`);
 const SESSION_TIMEOUT_MS = parseInt(process.env.SESSION_TIMEOUT_MS, 10) || 30 * 60 * 1000;
+
+function loadSessions() {
+  try {
+    const data = JSON.parse(readFileSync(SESSION_FILE, "utf8"));
+    const map = new Map();
+    for (const [channelId, entry] of Object.entries(data)) {
+      if (Date.now() - entry.lastActivity < SESSION_TIMEOUT_MS) {
+        map.set(channelId, entry);
+      }
+    }
+    log.info({ loaded: map.size }, "Restored sessions from disk");
+    return map;
+  } catch {
+    return new Map();
+  }
+}
+
+function saveSessions() {
+  try {
+    const obj = Object.fromEntries(channelSessions);
+    writeFileSync(SESSION_FILE, JSON.stringify(obj, null, 2));
+  } catch (err) {
+    log.warn({ err: err.message }, "Failed to persist sessions");
+  }
+}
+
+const channelSessions = loadSessions();
 
 // Prune stale botExchanges every 10 minutes
 setInterval(() => {
@@ -723,8 +750,6 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
 }
 
 function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channelName, resumeSessionId) {
-  const context = buildContextPrompt();
-
   return new Promise((resolve, reject) => {
     const basePrompt = process.env.BOT_SYSTEM_PROMPT ||
       "You are running inside a Discord bot. Keep responses concise — Discord has a 2000 char limit per message. Do NOT perform startup rituals. Be brief.";
@@ -734,16 +759,24 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channel
 
     const channelContext = `${timeContext}\n\nYou are responding in channel: #${channelName}. Only respond to the message in THIS channel. The conversation buffer contains messages from multiple channels — focus only on #${channelName} context. Do NOT respond to or act on messages from other channels.`;
 
-    const systemPrompt = context
-      ? `${basePrompt}${channelContext}\n\n${context}`
-      : `${basePrompt}${channelContext}`;
+    let systemPrompt;
+    if (resumeSessionId) {
+      // Resumed sessions already have the full context — only inject time and channel focus
+      systemPrompt = `${basePrompt}${channelContext}`;
+      reqLog.info("Resume mode: skipping buffer/summary re-injection");
+    } else {
+      const context = buildContextPrompt();
+      systemPrompt = context
+        ? `${basePrompt}${channelContext}\n\n${context}`
+        : `${basePrompt}${channelContext}`;
+    }
 
     const args = [
       "--output-format", "stream-json",
       "--allow-dangerously-skip-permissions",
       "--dangerously-skip-permissions",
       "--verbose",
-      "--max-turns", "30",
+      "--max-turns", "50",
       ...(process.env.CLAUDE_MODEL ? ["--model", process.env.CLAUDE_MODEL] : []),
       ...(process.env.MCP_CONFIG ? ["--mcp-config", process.env.MCP_CONFIG] : []),
       "--append-system-prompt", systemPrompt,
@@ -861,6 +894,17 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channel
         }
       }
 
+      // Persist session for resume — even on intentional kill (new message arriving)
+      // so the next message can resume the conversation
+      if (state.sessionId) {
+        channelSessions.set(channelId, {
+          sessionId: state.sessionId,
+          lastActivity: Date.now(),
+        });
+        saveSessions();
+        reqLog.info({ sessionId: state.sessionId, code }, "Session stored for resume");
+      }
+
       if (code !== 0) {
         if (child._intentionalKill) {
           reqLog.info({ code, elapsed }, "Claude process intentionally killed");
@@ -870,15 +914,6 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channel
         reqLog.error({ code, elapsed }, "Claude exited with non-zero code");
         reject(new Error(`Claude exited with code ${code} after ${Math.round(elapsed / 1000)}s`));
         return;
-      }
-
-      // Store session ID for future resume (only on success)
-      if (state.sessionId) {
-        channelSessions.set(channelId, {
-          sessionId: state.sessionId,
-          lastActivity: Date.now(),
-        });
-        reqLog.info({ sessionId: state.sessionId }, "Session stored for resume");
       }
 
       reqLog.info({ elapsed }, "Claude completed");
