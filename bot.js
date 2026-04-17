@@ -410,6 +410,10 @@ const MAX_CONCURRENT_CLAUDE = parseInt(process.env.MAX_CONCURRENT_CLAUDE, 10) ||
 // --- Bot-to-bot exchange tracking ---
 const botExchanges = new Map();
 
+// --- Session continuity: track Claude session IDs per channel for --resume ---
+const channelSessions = new Map(); // channelId → { sessionId, lastActivity }
+const SESSION_TIMEOUT_MS = parseInt(process.env.SESSION_TIMEOUT_MS, 10) || 30 * 60 * 1000;
+
 // Prune stale botExchanges every 10 minutes
 setInterval(() => {
   if (botExchanges.size > 0) {
@@ -458,10 +462,18 @@ client.on("messageCreate", async (msg) => {
     log.debug({ err: err.message }, "Failed to record message to buffer");
   }
 
-  // --- Stop command handling (before response filtering so it works in any channel) ---
-  // Only humans can issue stop commands
+  // --- Stop and /fresh command handling (before response filtering so it works in any channel) ---
+  // Only humans can issue these commands
   if (!msg.author.bot) {
     const rawContent = msg.content.trim();
+
+    // /fresh — clear session for this channel so next message starts a new Claude session
+    if (/^(?:<@!?\d+>\s*)*\/fresh$/i.test(rawContent)) {
+      channelSessions.delete(msg.channel.id);
+      await msg.reply("Session cleared. Next message starts fresh.");
+      return;
+    }
+
     const stopPattern = /^(?:<@!?\d+>\s*)*(?:\/stop|stop)$/i;
     const isStopCommand = stopPattern.test(rawContent);
 
@@ -473,6 +485,7 @@ client.on("messageCreate", async (msg) => {
 
       if (isBroadcast || isTargeted) {
         const reqLog = log.child({ channel: msg.channel.id, user: msg.author.tag });
+        channelSessions.delete(msg.channel.id);
         const child = activeProcesses.get(msg.channel.id);
         if (child) {
           child.kill("SIGTERM");
@@ -481,7 +494,6 @@ client.on("messageCreate", async (msg) => {
           if (isTargeted) {
             await msg.reply("Stopped.");
           }
-          // Broadcast stop: kill silently (all bots kill, none reply to avoid spam)
         }
         return;
       }
@@ -691,9 +703,26 @@ function buildContextPrompt() {
   return sections.join("\n\n");
 }
 
-// --- Claude invocation (fresh session per message) ---
+// --- Claude invocation with session continuity ---
 
 async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = [], channelName = "unknown") {
+  const existingSession = channelSessions.get(channelId);
+  const canResume = existingSession &&
+    (Date.now() - existingSession.lastActivity) < SESSION_TIMEOUT_MS;
+
+  if (canResume) {
+    try {
+      return await spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channelName, existingSession.sessionId);
+    } catch (err) {
+      channelSessions.delete(channelId);
+      reqLog.warn({ err: err.message, sessionId: existingSession.sessionId }, "Session resume failed, starting fresh");
+    }
+  }
+
+  return spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channelName, null);
+}
+
+function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channelName, resumeSessionId) {
   const context = buildContextPrompt();
 
   return new Promise((resolve, reject) => {
@@ -727,9 +756,13 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
       finalPrompt = `${imageRefs}\n\n${prompt}`;
     }
 
-    // Always fresh session — no --resume
-    args.push("-p", "--", finalPrompt);
-    reqLog.info({ images: imagePaths.length }, "Starting fresh Claude session");
+    if (resumeSessionId) {
+      args.push("--resume", resumeSessionId, "-p", "--", finalPrompt);
+      reqLog.info({ sessionId: resumeSessionId }, "Resuming Claude session");
+    } else {
+      args.push("-p", "--", finalPrompt);
+      reqLog.info({ images: imagePaths.length }, "Starting fresh Claude session");
+    }
 
     // Build a clean env without Claude nesting vars
     const cleanEnv = { ...process.env };
@@ -750,8 +783,15 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
 
     let jsonBuffer = "";
     let turnText = "";
-    let fullResponse = ""; // Accumulate full response for buffer recording
-    const writtenFiles = []; // Track files Claude creates for Discord attachment
+    let fullResponse = "";
+    const writtenFiles = [];
+    const state = {
+      getTurnText: () => turnText,
+      setTurnText: (t) => { turnText = t; },
+      appendResponse: (t) => { fullResponse += t; },
+      writtenFiles,
+      sessionId: null,
+    };
 
     child.stdout.on("data", (data) => {
       jsonBuffer += data.toString();
@@ -763,12 +803,7 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line);
-          handleStreamEvent(event, reqLog, sendMessage, {
-            getTurnText: () => turnText,
-            setTurnText: (t) => { turnText = t; },
-            appendResponse: (t) => { fullResponse += t; },
-            writtenFiles,
-          });
+          handleStreamEvent(event, reqLog, sendMessage, state);
         } catch {
           reqLog.warn({ raw: line.substring(0, 200) }, "Non-JSON line from Claude");
         }
@@ -786,12 +821,7 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
       if (jsonBuffer.trim()) {
         try {
           const event = JSON.parse(jsonBuffer);
-          handleStreamEvent(event, reqLog, sendMessage, {
-            getTurnText: () => turnText,
-            setTurnText: (t) => { turnText = t; },
-            appendResponse: (t) => { fullResponse += t; },
-            writtenFiles,
-          });
+          handleStreamEvent(event, reqLog, sendMessage, state);
         } catch {
           // ignore
         }
@@ -812,8 +842,6 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
       for (const match of pathMatches) {
         const cleaned = match.trim().replace(/^[`'"]+|[`'"]+$/g, "");
         if (!FILE_EXTENSIONS.test(cleaned)) continue;
-        // Try multiple base directories — Claude may reference paths relative to
-        // CLAUDE_CWD, its parent (repo root), or as absolute paths
         const candidates = cleaned.startsWith("/")
           ? [cleaned]
           : [join(CLAUDE_CWD, cleaned), join(CLAUDE_CWD, "..", cleaned), cleaned];
@@ -844,6 +872,15 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
         return;
       }
 
+      // Store session ID for future resume (only on success)
+      if (state.sessionId) {
+        channelSessions.set(channelId, {
+          sessionId: state.sessionId,
+          lastActivity: Date.now(),
+        });
+        reqLog.info({ sessionId: state.sessionId }, "Session stored for resume");
+      }
+
       reqLog.info({ elapsed }, "Claude completed");
       resolve(fullResponse);
     });
@@ -859,6 +896,7 @@ function handleStreamEvent(event, reqLog, sendMessage, state) {
   switch (event.type) {
     case "system":
       reqLog.info({ sessionId: event.session_id }, "Claude session started");
+      if (event.session_id) state.sessionId = event.session_id;
       break;
 
     case "assistant":
