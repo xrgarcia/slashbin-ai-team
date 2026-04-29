@@ -1,7 +1,8 @@
 node_modules/
 .env
 .mcp.json
-.claude/
+.claude/*
+!.claude/skills/
 CLAUDE.md
 *.log
 .bot.pid
