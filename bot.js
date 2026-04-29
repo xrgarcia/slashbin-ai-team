@@ -45,6 +45,10 @@ const HISTORY_DIR = process.env.BOT_HISTORY_DIR
   ? (process.env.BOT_HISTORY_DIR.startsWith("/") ? process.env.BOT_HISTORY_DIR : join(__dirname, process.env.BOT_HISTORY_DIR))
   : join(__dirname, ".bot-history");
 const CHECKPOINT_FILE = join(HISTORY_DIR, ".checkpoints.json");
+const REACTION_HANDLER_ENABLED = process.env.REACTION_HANDLER_ENABLED === "true";
+const REACTION_TRIGGER_EMOJI = process.env.REACTION_TRIGGER_EMOJI || "👍";
+const REACTION_ACK_EMOJI = process.env.REACTION_ACK_EMOJI || "✅";
+const REACTION_FAIL_EMOJI = process.env.REACTION_FAIL_EMOJI || "❌";
 
 // --- Bot identity (must be before buffer/PID config) ---
 const BOT_NAME = process.env.BOT_NAME || "bot";
@@ -456,8 +460,10 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.DirectMessageReactions,
   ],
-  partials: [Partials.Channel],
+  partials: [Partials.Channel, Partials.Message, Partials.Reaction],
 });
 
 // --- WebSocket crash resilience ---
@@ -632,6 +638,101 @@ client.on("messageCreate", async (msg) => {
     }
   }
 });
+
+// --- Reaction-trigger handler ---
+if (REACTION_HANDLER_ENABLED && ALLOWED_USER_IDS.length === 0) {
+  log.fatal(
+    "REACTION_HANDLER_ENABLED=true requires ALLOWED_USERS to be non-empty. " +
+    "Refusing to register the reaction handler. Bot will continue running for messages."
+  );
+}
+
+const reactionInFlight = new Set();
+
+if (REACTION_HANDLER_ENABLED && ALLOWED_USER_IDS.length > 0) {
+  client.on("messageReactionAdd", async (reaction, user) => {
+    try {
+      if (reaction.partial) await reaction.fetch();
+      if (reaction.message.partial) await reaction.message.fetch();
+    } catch (err) {
+      log.warn({ err: err.message }, "Failed to fetch partial reaction/message");
+      return;
+    }
+
+    if (user.id === client.user?.id) return;
+    if (user.bot) return;
+
+    if (reaction.message.author?.id !== client.user?.id) return;
+
+    if (reaction.emoji.name !== REACTION_TRIGGER_EMOJI) return;
+
+    if (!ALLOWED_USER_IDS.includes(user.id)) {
+      log.debug({ user: user.tag }, "Reaction ignored — user not in ALLOWED_USERS");
+      return;
+    }
+
+    if (reactionInFlight.has(reaction.message.id)) {
+      log.debug({ messageId: reaction.message.id }, "Reaction trigger already in flight — ignoring duplicate");
+      return;
+    }
+    reactionInFlight.add(reaction.message.id);
+
+    const reqLog = log.child({
+      channel: reaction.message.channel.id,
+      reactor: user.tag,
+      messageId: reaction.message.id,
+      emoji: reaction.emoji.name,
+    });
+
+    const channelName = reaction.message.channel.name || "DM";
+    const contextLine = [
+      "[reaction_trigger]",
+      `emoji: ${reaction.emoji.name}`,
+      `reactor: ${user.tag}#${user.id}`,
+      `message_id: ${reaction.message.id}`,
+      `channel_id: ${reaction.message.channel.id}`,
+      `reacted_content: ${reaction.message.content || "(no text content)"}`,
+    ].join("\n");
+
+    const sendQueue = createSendQueue(reaction.message, reqLog);
+
+    try {
+      reqLog.info("Reaction trigger — invoking Claude");
+      const responseText = await runClaude(
+        contextLine,
+        reaction.message.channel.id,
+        reqLog,
+        sendQueue.enqueue,
+        [],
+        channelName
+      );
+      await sendQueue.flush();
+      recordBotResponse(channelName, responseText);
+
+      try {
+        await reaction.message.react(REACTION_ACK_EMOJI);
+      } catch (err) {
+        reqLog.warn({ err: err.message }, "Failed to add ack reaction");
+      }
+    } catch (err) {
+      await sendQueue.flush();
+      reqLog.error({ err }, "Reaction-triggered Claude invocation failed");
+      try {
+        await reaction.message.react(REACTION_FAIL_EMOJI);
+        await reaction.message.reply(`Reaction trigger failed: ${err.message}`);
+      } catch (replyErr) {
+        reqLog.warn({ err: replyErr.message }, "Failed to surface reaction failure");
+      }
+    } finally {
+      reactionInFlight.delete(reaction.message.id);
+    }
+  });
+
+  log.info(
+    { trigger: REACTION_TRIGGER_EMOJI, ack: REACTION_ACK_EMOJI, fail: REACTION_FAIL_EMOJI },
+    "Reaction-trigger handler enabled"
+  );
+}
 
 // --- Send queue: serializes Discord messages to avoid race conditions ---
 function createSendQueue(msg, reqLog) {
