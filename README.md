@@ -294,6 +294,45 @@ npm run summarize:dry      # preview (no changes)
 | `SUMMARY_LOOKBACK_HOURS` | `48` | Summary history window |
 | `SUMMARIZE_INTERVAL_MS` | `0` | Background summarization interval |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `REACTION_HANDLER_ENABLED` | `false` | Set `true` to enable emoji reaction triggers (requires `ALLOWED_USERS`) |
+| `REACTION_TRIGGER_EMOJI` | `👍` | Emoji that triggers Claude when reacted on a bot message |
+| `REACTION_ACK_EMOJI` | `✅` | Emoji the bot adds after a successful Claude invocation |
+| `REACTION_FAIL_EMOJI` | `❌` | Emoji the bot adds when Claude invocation fails |
+
+## Reaction-trigger handler
+
+Enable bots to respond to emoji reactions instead of typed messages. A single tap on a bot message invokes Claude with a labeled context line describing the reaction.
+
+**Hard requirement:** `ALLOWED_USERS` must be non-empty when `REACTION_HANDLER_ENABLED=true`. If `ALLOWED_USERS` is empty, the handler refuses to register and logs a fatal warning — the bot otherwise starts normally for messages.
+
+Enable per-bot in `ecosystem.config.js`:
+
+```js
+REACTION_HANDLER_ENABLED: 'true',
+ALLOWED_USERS: '<your-discord-user-id>',
+REACTION_TRIGGER_EMOJI: '👍',
+```
+
+When the trigger emoji is reacted on a bot message, Claude receives this context:
+
+```
+[reaction_trigger]
+emoji: 👍
+reactor: username#1234567890
+message_id: <id>
+channel_id: <id>
+reacted_content: <verbatim message text>
+```
+
+**Bot operator's responsibility:** Define in your `CLAUDE.md` what the trigger emoji means and which MCP tool to call. The harness is dumb transport — all semantic meaning lives in the bot's own context.
+
+**Behavior notes:**
+
+- The bot's own ack reaction (`✅`) does not retrigger — self-loop is prevented
+- Unauthorized users (not in `ALLOWED_USERS`) are silently ignored
+- Double-tapping the same message fires Claude only once; the second tap is dropped
+- Reactions on older messages after a bot restart still fire (Discord partials are resolved)
+- On failure: fail emoji is added AND a reply with the error summary is posted — no silent failure
 
 ## Architecture
 
