@@ -35,6 +35,10 @@ module.exports = {
         BOT_HISTORY_DIR: '/path/to/product-owner-repo/bot-history',
         CLAUDE_TIMEOUT_MS: '1200000',     // max time per Claude session (20 min)
         WS_PORT: '9801',                  // WebSocket bridge port (unique per bot)
+        REACTION_HANDLER_ENABLED: 'false', // set 'true' to opt this bot in (requires ALLOWED_USERS)
+        REACTION_TRIGGER_EMOJI: '👍',
+        REACTION_ACK_EMOJI: '✅',
+        REACTION_FAIL_EMOJI: '❌',
         NODE_ENV: 'production',
       }
     },
@@ -58,6 +62,10 @@ module.exports = {
         BOT_HISTORY_DIR: '/path/to/engineering-manager-repo/bot-history',
         CLAUDE_TIMEOUT_MS: '1200000',
         WS_PORT: '9802',
+        REACTION_HANDLER_ENABLED: 'false', // set 'true' to opt this bot in (requires ALLOWED_USERS)
+        REACTION_TRIGGER_EMOJI: '👍',
+        REACTION_ACK_EMOJI: '✅',
+        REACTION_FAIL_EMOJI: '❌',
         NODE_ENV: 'production',
       }
     },
