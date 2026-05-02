@@ -1,6 +1,8 @@
 # slashbin-ai-team
 
-*The AI engineering team powering [www.slashbin.io](https://www.slashbin.io). Product Owner, Engineering Manager, SRE — coordinating autonomously to ship software.*
+**The AI engineering team behind [slashbin.io](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-team) — the webhook ETL gateway for engineers and AI agents. [Try slashbin.io free →](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-team)**
+
+*Product Owner, Engineering Manager, SRE — coordinating autonomously to ship software.*
 
 Build AI employees for your business on Discord. Give each one a role, connect it to your tools, and let them work together.
 
