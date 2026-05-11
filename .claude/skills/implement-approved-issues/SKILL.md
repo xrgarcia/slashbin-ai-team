@@ -101,3 +101,6 @@ IMPORTANT: In PR descriptions, use "Related to #N" — NEVER use "Closes #N" or 
 - Branch: features. PR base: develop.
 - Only implement issues with the approved label — refuse without it.
 - If an issue references another repo or is meant for a different service → skip it.
+- **Never run `npm run start`** during a smoke test in this repo — it spawns live Discord bots.
+- **Never edit `ecosystem.config.js`** — it's gitignored on purpose; PM2 config is environment-specific.
+- **Do not commit anything inside `bots/`** — per-bot personas are local-only.
