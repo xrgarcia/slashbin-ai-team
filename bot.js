@@ -1595,6 +1595,12 @@ validateSchedulesOnStartup();
 // Start scheduler check loop
 setInterval(runScheduledJobs, SCHEDULE_CHECK_MS);
 
+// --- Process error handlers ---
+process.on("unhandledRejection", (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  log.error({ err: err.message, stack: err.stack }, "Unhandled promise rejection");
+});
+
 // Graceful shutdown
 process.on("SIGINT", () => {
   log.info("Shutting down...");
