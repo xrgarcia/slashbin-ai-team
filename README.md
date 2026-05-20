@@ -4,15 +4,31 @@
 
 *Product Owner, Engineering Manager, SRE — coordinating autonomously to ship software.*
 
-Build AI employees for your business on Discord. Give each one a role, connect it to your tools, and let them work together.
+**Build AI employees for your business on Discord. Give each one a role, connect it to your tools, and let them work together — across one product or across an entire portfolio.**
+
+- **Cost:** $0 marginal under your Claude Max plan. Each bot runs through the Claude Code CLI — no API charges, no SaaS subscription, no per-bot fees.
+- **Focused context:** Each bot's `CLAUDE.md` is its job description. A PO bot loads product context, an SRE bot loads ops context. Separated context produces sharper output than one generalist juggling every role in one window.
+- **Async parallelism:** While you DM the PO, the EM bot can be reviewing a PR and the SRE bot can be watching a deploy. Multiple bots = multiple things happening at once, not role-play.
 
 Built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI. Each bot gets full access to your codebase, MCP servers, and tools — not a chatbot wrapper, but a real AI teammate that can read code, query databases, create issues, and ship work.
 
 ## Who this is for
 
+Three patterns where an AI team beats a single generalist agent:
+
+**1. Consulting / agency operators** — one PO bot fields asks across multiple clients and routes work into per-client EM and SRE bots. Each client gets a dedicated `CLAUDE.md` and its own Discord channels. Strategy stays with you; coordination stays with the bots.
+
+**2. Multi-business operators** — you run several companies, each with its own PO/EM/SRE team. One Discord server, separated channels per business, separated context per bot. Bots from different businesses don't cross-talk unless you whitelist them.
+
+**3. Single business, many service owners** — role-based bots (PO, EM, SRE, Support) coordinating on one product. The PO writes issues, the EM decomposes and approves, the [Foreman](https://github.com/xrgarcia/slashbin-ai-foreman) implements, the EM bot reviews, you ship.
+
+**Also useful for:**
+
 - **Vibe coders** — your AI builds the pipeline, you never touch webhook plumbing
 - **Developers** — replace boilerplate with AI employees that handle ops, reviews, and coordination
 - **Small business owners & solopreneurs** — run a team of AI employees without hiring, from product owner to SRE
+
+> **Why separate bots if you're solo?** Each bot has a focused context window — a PO bot loaded with product context produces sharper product output than a generalist juggling product, ops, and code in one session. And bots run in parallel: while you're talking to one, the others are working. Async, not role-play.
 
 ## What you can build
 
