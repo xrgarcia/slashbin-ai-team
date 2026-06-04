@@ -57,6 +57,9 @@ const BOT_NAME = process.env.BOT_NAME || "bot";
 const BUFFER_FILE = join(__dirname, `.${BOT_NAME}-conversation-buffer.txt`);
 const BUFFER_MAX_BYTES = parseInt(process.env.BUFFER_MAX_BYTES, 10) || 32 * 1024;
 const BUFFER_TRUNCATE_RESPONSE = parseInt(process.env.BUFFER_TRUNCATE_RESPONSE, 10) || 500;
+
+// --- Shared user names file (read by harness, read/written by Claude) ---
+const USER_NAMES_FILE = join(__dirname, ".user-names.json");
 const ATTACHMENTS_DIR = process.env.BOT_ATTACHMENTS_DIR
   ? (process.env.BOT_ATTACHMENTS_DIR.startsWith("/") ? process.env.BOT_ATTACHMENTS_DIR : join(__dirname, process.env.BOT_ATTACHMENTS_DIR))
   : join(HISTORY_DIR, "attachments");
@@ -242,6 +245,16 @@ function routeToAgents(discordMsg, prompt) {
     }
   }
   return routed;
+}
+
+// --- User names (shared across all slashbin bots) ---
+function getUserFirstName(username) {
+  try {
+    const names = JSON.parse(readFileSync(USER_NAMES_FILE, "utf8"));
+    return names[username] || null;
+  } catch {
+    return null;
+  }
 }
 
 // --- Conversation buffer ---
@@ -574,6 +587,15 @@ client.on("messageCreate", async (msg) => {
   if (!prompt && !hasAttachments) return;
   if (!prompt && hasAttachments) prompt = "What do you see in this attachment?";
 
+  // Prepend author identity so the bot always knows who it's talking to.
+  // Names are stored in /Users/karl/Code/slashbin/.user-names.json, shared across all bots.
+  const authorUsername = msg.author.username || msg.author.tag;
+  const knownFirstName = getUserFirstName(authorUsername);
+  const authorLine = knownFirstName
+    ? `[From: ${authorUsername} | First name: ${knownFirstName}]`
+    : `[From: ${authorUsername} | UNKNOWN — no first name on file. In your reply, casually ask for their first name, then save it to ${USER_NAMES_FILE} using the Edit tool: add "${authorUsername}": "FirstName" to the JSON, preserving existing entries.]`;
+  prompt = `${authorLine}\n\n${prompt}`;
+
   const reqLog = log.child({ channel: msg.channel.id, user: msg.author.tag, prompt: prompt.substring(0, 80) });
 
   // --- Bridge routing: if a connected agent is listening on this channel, route to it ---
@@ -853,7 +875,7 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = []
 function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channelName, resumeSessionId) {
   return new Promise((resolve, reject) => {
     const basePrompt = process.env.BOT_SYSTEM_PROMPT ||
-      "You are running inside a Discord bot. Keep responses concise — Discord has a 2000 char limit per message. Do NOT perform startup rituals. Be brief.";
+      "You are running inside a Discord bot. Keep responses concise — Discord has a 2000 char limit per message. Do NOT perform startup rituals. Be brief.\n\nADDRESSING USERS: Every incoming message is prefixed with [From: <username> | First name: <name>] or [From: <username> | UNKNOWN — ...]. Always address the user by their first name when it's known — never by their Discord username. When marked UNKNOWN, ask them in your reply: \"what is your first name? i'd rather address you as your first name than <username>...that makes me sound like a bot!\" (adapt the tone to fit your personality, but the ask must be explicit — use the words \"first name\"). Then save their answer by editing /Users/karl/Code/slashbin/.user-names.json: add their username as a key mapping to their FirstName, preserving all existing entries. Do NOT re-ask a name that is already known. Never strip or ignore the [From: ...] prefix — it is authoritative, not part of the user's message.";
 
     const now = new Date();
     const timeContext = `\n\nCurrent time: ${now.toISOString()} (${now.toLocaleString("en-US", { timeZone: "America/Chicago", dateStyle: "short", timeStyle: "long" })} CDT)`;
@@ -971,7 +993,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channel
       // Attach any files Claude created (CSV, PDF, etc.)
       // Also scan response text for file paths not caught by Write tool tracking
       // (e.g., files created via Bash/Python scripts)
-      const FILE_EXTENSIONS = /\.(csv|pdf|xlsx|png|jpg)$/i;
+      const FILE_EXTENSIONS = /\.(csv|pdf|xlsx|png|jpg|md|txt|html)$/i;
       const pathMatches = fullResponse.match(/(?:^|[\s`'"])(\/?(?:[\w.-]+\/)*[\w.-]+\.\w{2,4})(?:[\s`'"]|$)/gm) || [];
       for (const match of pathMatches) {
         const cleaned = match.trim().replace(/^[`'"]+|[`'"]+$/g, "");
@@ -1048,7 +1070,7 @@ function handleStreamEvent(event, reqLog, sendMessage, state) {
             // Only attach user-facing files (CSV, PDF, etc.), not config/internal files
             if (block.name === "Write" && block.input?.file_path) {
               const fp = block.input.file_path;
-              if (/\.(csv|pdf|xlsx|png|jpg)$/i.test(fp)) {
+              if (/\.(csv|pdf|xlsx|png|jpg|md|txt|html)$/i.test(fp)) {
                 state.writtenFiles.push(fp);
               }
             }
@@ -1492,84 +1514,92 @@ function shouldRunNow(cron, lastRunKey) {
   return false;
 }
 
+// Re-entrancy guard: setInterval invokes async fns without awaiting, so a
+// long-running job (>60s) would otherwise stack overlapping ticks.
+let schedulerRunning = false;
+
 async function runScheduledJobs() {
-  const schedules = loadSchedules();
-  if (!schedules.length) return;
+  if (schedulerRunning) return;
+  schedulerRunning = true;
 
-  const now = new Date();
-  const sLog = log.child({ component: "scheduler" });
-  let changed = false;
+  try {
+    const schedules = loadSchedules();
+    if (!schedules.length) return;
 
-  // Second Way: log what we found on every cycle
-  const pending = schedules.filter(j => !j._remove);
-  sLog.debug({ jobs: pending.length, ids: pending.map(j => j.id) }, "Scheduler check");
+    const now = new Date();
+    const sLog = log.child({ component: "scheduler" });
 
-  for (const job of schedules) {
-    // Check if job should run (current minute or missed in last 5 minutes)
-    if (!shouldRunNow(job.cron, job._lastRun)) {
-      // Only expire jobs that didn't need to run
-      if (job.expires && new Date(job.expires) < now) {
-        job._remove = true;
-        changed = true;
-        sLog.info({ id: job.id, expires: job.expires, cron: describeCron(job.cron) }, "Scheduled job expired without firing, removing");
-      }
-      continue;
-    }
+    // Second Way: log what we found on every cycle
+    const pending = schedules.filter(j => !j._remove);
+    sLog.debug({ jobs: pending.length, ids: pending.map(j => j.id) }, "Scheduler check");
 
-    // Mark as run for this minute to prevent duplicates
-    const nowKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${now.getHours()}-${now.getMinutes()}`;
-    job._lastRun = nowKey;
-    changed = true;
-
-    const channel = client.channels.cache.get(job.channel);
-    if (!channel) {
-      sLog.warn({ id: job.id, channel: job.channel }, "Scheduled job channel not found");
-      continue;
-    }
-
-    // First Way: validate before executing
-    sLog.info({ id: job.id, cron: job.cron, humanTime: describeCron(job.cron), prompt: job.prompt.substring(0, 80) }, "Firing scheduled job");
-
-    const jobLog = log.child({ component: "scheduler", jobId: job.id });
-    const sendToChannel = async (content) => {
-      try {
-        if (typeof content === "object" && content.files) {
-          await channel.send(content);
-        } else {
-          for (const chunk of splitMessage(content)) {
-            await channel.send(chunk);
-          }
+    for (const job of schedules) {
+      // Check if job should run (current minute or missed in last 5 minutes)
+      if (!shouldRunNow(job.cron, job._lastRun)) {
+        // Only expire jobs that didn't need to run
+        if (job.expires && new Date(job.expires) < now) {
+          job._remove = true;
+          saveSchedules(schedules.filter(j => !j._remove));
+          sLog.info({ id: job.id, expires: job.expires, cron: describeCron(job.cron) }, "Scheduled job expired without firing, removing");
         }
-      } catch (err) {
-        jobLog.error({ err: err.message }, "Failed to send scheduled message");
+        continue;
       }
-    };
 
-    // Third Way: record execution for learning
-    const startTime = new Date();
-    try {
-      const channelName = channel.name || job.channel;
-      await runClaude(job.prompt, job.channel, jobLog, sendToChannel, [], channelName);
-      const durationMs = Date.now() - startTime.getTime();
-      sLog.info({ id: job.id, durationMs }, "Scheduled job completed successfully");
-      recordJobExecution(job, startTime, durationMs, true);
-    } catch (err) {
-      const durationMs = Date.now() - startTime.getTime();
-      sLog.error({ id: job.id, err: err.message, durationMs }, "Scheduled job failed");
-      recordJobExecution(job, startTime, durationMs, false, err.message);
-      await sendToChannel(`Scheduled job "${job.id}" failed: ${err.message}`);
+      // Stamp _lastRun and persist to disk BEFORE the long-running job.
+      // Without persisting first, a job lasting >60s would be re-fired by the
+      // next tick because the file still shows the prior _lastRun.
+      const nowKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${now.getHours()}-${now.getMinutes()}`;
+      job._lastRun = nowKey;
+      saveSchedules(schedules.filter(j => !j._remove));
+
+      const channel = client.channels.cache.get(job.channel);
+      if (!channel) {
+        sLog.warn({ id: job.id, channel: job.channel }, "Scheduled job channel not found");
+        continue;
+      }
+
+      // First Way: validate before executing
+      sLog.info({ id: job.id, cron: job.cron, humanTime: describeCron(job.cron), prompt: job.prompt.substring(0, 80) }, "Firing scheduled job");
+
+      const jobLog = log.child({ component: "scheduler", jobId: job.id });
+      const sendToChannel = async (content) => {
+        try {
+          if (typeof content === "object" && content.files) {
+            await channel.send(content);
+          } else {
+            for (const chunk of splitMessage(content)) {
+              await channel.send(chunk);
+            }
+          }
+        } catch (err) {
+          jobLog.error({ err: err.message }, "Failed to send scheduled message");
+        }
+      };
+
+      // Third Way: record execution for learning
+      const startTime = new Date();
+      try {
+        const channelName = channel.name || job.channel;
+        await runClaude(job.prompt, job.channel, jobLog, sendToChannel, [], channelName);
+        const durationMs = Date.now() - startTime.getTime();
+        sLog.info({ id: job.id, durationMs }, "Scheduled job completed successfully");
+        recordJobExecution(job, startTime, durationMs, true);
+      } catch (err) {
+        const durationMs = Date.now() - startTime.getTime();
+        sLog.error({ id: job.id, err: err.message, durationMs }, "Scheduled job failed");
+        recordJobExecution(job, startTime, durationMs, false, err.message);
+        await sendToChannel(`Scheduled job "${job.id}" failed: ${err.message}`);
+      }
+
+      // Expire one-time jobs after successful execution
+      if (job.expires) {
+        job._remove = true;
+        saveSchedules(schedules.filter(j => !j._remove));
+        sLog.info({ id: job.id }, "One-time job completed, removing");
+      }
     }
-
-    // Expire one-time jobs after successful execution
-    if (job.expires) {
-      job._remove = true;
-      changed = true;
-      sLog.info({ id: job.id }, "One-time job completed, removing");
-    }
-  }
-
-  if (changed) {
-    saveSchedules(schedules.filter(j => !j._remove));
+  } finally {
+    schedulerRunning = false;
   }
 }
 
