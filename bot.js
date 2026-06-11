@@ -1545,18 +1545,18 @@ async function runScheduledJobs() {
         continue;
       }
 
+      const channel = client.channels.cache.get(job.channel);
+      if (!channel) {
+        sLog.warn({ id: job.id, channel: job.channel }, "Scheduled job channel not found — skipping without stamping _lastRun so it retries next tick");
+        continue;
+      }
+
       // Stamp _lastRun and persist to disk BEFORE the long-running job.
       // Without persisting first, a job lasting >60s would be re-fired by the
       // next tick because the file still shows the prior _lastRun.
       const nowKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${now.getHours()}-${now.getMinutes()}`;
       job._lastRun = nowKey;
       saveSchedules(schedules.filter(j => !j._remove));
-
-      const channel = client.channels.cache.get(job.channel);
-      if (!channel) {
-        sLog.warn({ id: job.id, channel: job.channel }, "Scheduled job channel not found");
-        continue;
-      }
 
       // First Way: validate before executing
       sLog.info({ id: job.id, cron: job.cron, humanTime: describeCron(job.cron), prompt: job.prompt.substring(0, 80) }, "Firing scheduled job");
