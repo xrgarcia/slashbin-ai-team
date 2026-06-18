@@ -926,6 +926,8 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channel
     delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
     delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
     delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
+    // Remove API key so claude uses the logged-in Max subscription instead of pay-per-use credits
+    delete cleanEnv.ANTHROPIC_API_KEY;
 
     const startTime = Date.now();
     const child = spawn(CLAUDE_BIN, args, {
@@ -1158,6 +1160,7 @@ function summarizeBufferLines(lines) {
     delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
     delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
     delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
+    delete cleanEnv.ANTHROPIC_API_KEY;
 
     const child = spawn(CLAUDE_BIN, args, {
       cwd: CLAUDE_CWD,
@@ -1315,6 +1318,7 @@ function summarizeWithClaude(channelName, date, messages) {
     delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
     delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
     delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
+    delete cleanEnv.ANTHROPIC_API_KEY;
 
     const child = spawn(CLAUDE_BIN, args, {
       cwd: CLAUDE_CWD,
