@@ -2,7 +2,7 @@ require("dotenv").config();
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
 const { WebSocketServer } = require("ws");
-const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync } = require("fs");
+const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync, readlinkSync } = require("fs");
 const { join } = require("path");
 const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
@@ -76,10 +76,19 @@ const PID_FILE = join(__dirname, `.${BOT_NAME}.pid`);
     if (existingPid && existingPid !== process.pid) {
       try {
         process.kill(existingPid, 0); // throws if process doesn't exist
-        // Verify it's actually a bot.js process
+        // Verify it's actually a bot.js MAIN process for THIS bot instance.
+        // process.kill + /proc/<id>/cmdline both answer for thread ids too
+        // (cmdline reports the whole thread group's command line), so after a
+        // reboot a stale pid can be reused by a worker THREAD of the other
+        // bot and pass the old check — permanently locking this bot out
+        // (2026-07-19: .em-bot.pid's stale 927 became a libuv thread of the
+        // po-bot). Require Tgid === pid (a real process, not a thread) and a
+        // matching cwd (this bot, not a sibling running the same bot.js).
         try {
           const cmdline = readFileSync(`/proc/${existingPid}/cmdline`, "utf8");
-          if (cmdline.includes("bot.js")) {
+          const tgid = Number(/^Tgid:\s*(\d+)/m.exec(readFileSync(`/proc/${existingPid}/status`, "utf8"))?.[1]);
+          const cwd = readlinkSync(`/proc/${existingPid}/cwd`);
+          if (cmdline.includes("bot.js") && tgid === existingPid && cwd === process.cwd()) {
             log.fatal({ existingPid }, "Another bot instance is already running. Exiting.");
             process.exit(1);
           }
