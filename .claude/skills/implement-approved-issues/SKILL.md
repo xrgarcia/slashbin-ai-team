@@ -50,6 +50,17 @@ For the selected issue:
 
 ## Phase 3: Implementation
 
+**Build within the owning abstraction.** Read this repo's `CLAUDE.md` "Architecture & Invariant Ownership" and the issue's `## Owning abstraction & invariant impact` section. Implement every change to that domain's state **through the owning abstraction named there** — do NOT add a second mechanism for an operation the owner already performs, do NOT mutate the domain's state outside its owner, and do NOT create a transition that holds only because the call sites happen to line up (an emergent invariant is a latent S1; review will REQUEST_CHANGES it). If the issue's spec cannot be implemented this way — the named owner doesn't exist, the issue says "no owner — establish it" but the change you'd have to make is larger/ambiguous than the issue describes, or honoring single-ownership contradicts the spec — **STOP and surface it**: comment on the issue describing the conflict and do NOT ship a call-site patch as a substitute. A patch that "works" by bypassing the owner is a failed implementation, not a shortcut.
+
+**Build to the established patterns — not to the nearest example in this repo.** The defaults below already run in production across multiple repos. Reach for them FIRST; this repo's own code is the *second* place to look, because a repo can be drifting. If the issue's `## Existing Patterns to Follow` names a different approach, follow the issue and say why in the PR body.
+
+- **Async / background work → a Redis queue + worker.** Claim with `BLMOVE <queue> <queue>:processing LEFT RIGHT 0`; on boot, re-queue anything stranded in `:processing` from a previous run; ack with `LREM` only AFTER the handler succeeds; retry via an `attempts` counter + backoff; dead-letter after max attempts; make the handler **idempotent** (delivery is at-least-once); use a `redis.duplicate()` for the blocking client. Start it in-process from `server/index.ts` — do not create a separate service. NEVER use `setTimeout`, a table-polling cron, or the request path to do deferred work. `setInterval` is only for recovery/reconciliation sweeps, never for primary event-driven work.
+- **A schema change → a GENERATED migration.** Run `drizzle-kit generate`, which writes both the `.sql` and its `migrations/meta/_journal.json` entry. A hand-written `.sql` with no journal entry is invisible to the migrator and will never run. Never use `drizzle-kit push` as a path to production.
+- **A backfill / cleanup / recovery → a DATA migration.** Hand-written SQL is correct here, but it must be listed explicitly in the `DATA_MIGRATIONS` array in `server/migrate.ts` and guarded by the `data_migrations` table. A file sitting in `migrations/` that is not in that array does not run.
+- **A new UI surface → the standard web stack.** React + Vite + TypeScript, Tailwind + shadcn/ui, wouter for routing, TanStack Query for server state, Express + Passport, Drizzle, Zod, Vitest.
+
+If a default genuinely cannot be followed for this issue, **STOP and comment on the issue** explaining the conflict — do not silently substitute a different mechanism.
+
 **Implement the single chosen issue.**
 
 1. Implement the changes described in the issue.
