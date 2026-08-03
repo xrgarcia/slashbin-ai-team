@@ -22,6 +22,7 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
 const CLAUDE_CWD = process.env.CLAUDE_CWD || process.cwd();
 const MAX_DISCORD_LENGTH = parseInt(process.env.MAX_DISCORD_LENGTH, 10) || 1900;
 const CLAUDE_TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS, 10) || 3600000;
+const CLAUDE_MAX_TURNS = parseInt(process.env.CLAUDE_MAX_TURNS, 10) || 100;
 const ALLOWED_USER_IDS = process.env.ALLOWED_USERS
   ? process.env.ALLOWED_USERS.split(",").filter(Boolean)
   : [];
@@ -886,7 +887,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channel
       "--allow-dangerously-skip-permissions",
       "--dangerously-skip-permissions",
       "--verbose",
-      "--max-turns", "50",
+      "--max-turns", String(CLAUDE_MAX_TURNS),
       ...(process.env.CLAUDE_MODEL ? ["--model", process.env.CLAUDE_MODEL] : []),
       ...(process.env.MCP_CONFIG ? ["--mcp-config", process.env.MCP_CONFIG] : []),
       "--append-system-prompt", systemPrompt,
@@ -934,6 +935,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channel
       appendResponse: (t) => { fullResponse += t; },
       writtenFiles,
       sessionId: null,
+      resultSubtype: null,
     };
 
     child.stdout.on("data", (data) => {
@@ -1021,7 +1023,18 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channel
           resolve(fullResponse);
           return;
         }
-        reqLog.error({ code, elapsed }, "Claude exited with non-zero code");
+        // Hitting the step cap is not a crash — the work up to that point already
+        // landed (PR reviews have merged and *then* tripped the cap). Say so plainly
+        // instead of reporting a bare exit code, which reads as total failure.
+        if (state.resultSubtype === "error_max_turns") {
+          reqLog.warn({ code, elapsed, maxTurns: CLAUDE_MAX_TURNS }, "Claude hit the max-turns cap");
+          sendMessage(
+            `⚠️ Hit the ${CLAUDE_MAX_TURNS}-step limit for one request. Everything above this line completed — but there may be more to do. Reply to continue where I left off.`
+          );
+          resolve(fullResponse);
+          return;
+        }
+        reqLog.error({ code, elapsed, subtype: state.resultSubtype }, "Claude exited with non-zero code");
         reject(new Error(`Claude exited with code ${code} after ${Math.round(elapsed / 1000)}s`));
         return;
       }
@@ -1068,8 +1081,10 @@ function handleStreamEvent(event, reqLog, sendMessage, state) {
       break;
 
     case "result":
+      // subtype tells a step-cap stop apart from a real crash — both exit non-zero
+      state.resultSubtype = event.subtype;
       reqLog.info(
-        { costUsd: event.cost_usd, durationMs: event.duration_ms, inputTokens: event.total_input_tokens, outputTokens: event.total_output_tokens },
+        { subtype: event.subtype, isError: event.is_error, numTurns: event.num_turns, costUsd: event.cost_usd, durationMs: event.duration_ms, inputTokens: event.total_input_tokens, outputTokens: event.total_output_tokens },
         "Claude result summary"
       );
       break;
