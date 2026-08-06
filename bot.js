@@ -984,6 +984,26 @@ function collectOutboxFiles(sinceMs) {
 
 // --- Claude invocation with session continuity ---
 
+/**
+ * Can a failed resume be retried on a fresh session?
+ *
+ * Only when the resumed process did NOTHING. Retrying re-runs the same prompt
+ * from scratch — and these prompts merge PRs, file issues, label tickets and
+ * send mail. A run that got as far as calling a tool may have already done the
+ * irreversible half of its work; running it again does it twice.
+ *
+ * The safe case is narrow and real: `--resume <id>` against a session the CLI
+ * can no longer find. Claude exits immediately, having emitted no session init,
+ * called no tool and written no text. Starting fresh there is correct.
+ *
+ * Anything else — session started, any tool call, any output — is reported to
+ * the user instead. A duplicated merge is far worse than an error message.
+ */
+function isSafeToRetryFresh(err) {
+  if (!err) return false;
+  return !err.sessionStarted && !err.toolCalls && !err.producedText;
+}
+
 async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {}, channelName = "unknown") {
   const existingSession = channelSessions.get(channelId);
   const canResume = existingSession &&
@@ -993,8 +1013,24 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {
     try {
       return await spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, existingSession.sessionId);
     } catch (err) {
+      if (!isSafeToRetryFresh(err)) {
+        // Keep the session. It exists and holds the conversation, so the user's
+        // NEXT message continues where the crash left off. If the session is
+        // genuinely unusable, the next resume fails with no work done and takes
+        // the safe-retry branch below — self-healing either way.
+        reqLog.error(
+          { err: err.message, sessionId: existingSession.sessionId, toolCalls: err.toolCalls, sessionStarted: err.sessionStarted },
+          "Resumed session failed after doing work — NOT retrying, would repeat side effects"
+        );
+        err.message = `${err.message}. It had already started working, so I did not retry — re-running would repeat anything it already did (merges, issues, messages). Check whether that work landed before asking again. If this keeps happening, send /fresh for a clean session.`;
+        throw err;
+      }
+
       channelSessions.delete(channelId);
-      reqLog.warn({ err: err.message, sessionId: existingSession.sessionId }, "Session resume failed, starting fresh");
+      reqLog.warn(
+        { err: err.message, sessionId: existingSession.sessionId },
+        "Resume never started — safe to retry on a fresh session"
+      );
     }
   }
 
@@ -1092,6 +1128,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       writtenFiles,
       sessionId: null,
       resultSubtype: null,
+      // Did this process actually DO anything? Decides whether a failed run can
+      // be safely retried — see isSafeToRetryFresh.
+      toolCalls: 0,
     };
 
     child.stdout.on("data", (data) => {
@@ -1218,8 +1257,17 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
           resolve(fullResponse);
           return;
         }
-        reqLog.error({ code, elapsed, subtype: state.resultSubtype }, "Claude exited with non-zero code");
-        reject(new Error(`Claude exited with code ${code} after ${Math.round(elapsed / 1000)}s`));
+        reqLog.error(
+          { code, elapsed, subtype: state.resultSubtype, toolCalls: state.toolCalls, sessionStarted: Boolean(state.sessionId) },
+          "Claude exited with non-zero code"
+        );
+        const failure = new Error(`Claude exited with code ${code} after ${Math.round(elapsed / 1000)}s`);
+        // Evidence for the caller: a run that started a session, called tools, or
+        // produced text may have already changed something in the world.
+        failure.sessionStarted = Boolean(state.sessionId);
+        failure.toolCalls = state.toolCalls;
+        failure.producedText = fullResponse.trim().length > 0;
+        reject(failure);
         return;
       }
 
@@ -1252,6 +1300,7 @@ function handleStreamEvent(event, reqLog, sendMessage, state) {
             // ("Let me check...") as a separate message before the actual answer.
             // Track files Claude creates for Discord attachment
             // Only attach user-facing files (CSV, PDF, etc.), not config/internal files
+            state.toolCalls++;
             if (block.name === "Write" && block.input?.file_path) {
               const fp = block.input.file_path;
               if (/\.(csv|pdf|xlsx|png|jpg)$/i.test(fp)) {

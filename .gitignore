@@ -7,7 +7,10 @@ CLAUDE.md
 *.log
 .bot.pid
 .bot-sessions.json
-.*-bot-sessions.json
+# Session state is named from BOT_NAME (.engineering-manager-sessions.json,
+# .product-owner-sessions.json). The old .*-bot-sessions.json pattern stopped
+# matching when the bots were renamed off the *-bot suffix.
+.*-sessions.json
 .bot-history/
 *.pid
 ecosystem.config.js
