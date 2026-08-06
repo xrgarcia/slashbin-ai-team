@@ -30,7 +30,7 @@ Each bot is defined by its context — a `CLAUDE.md` that describes who it is, w
 - **Real tool access** — connect Stripe, Postgres, Railway, GitHub, or any MCP server. Bots don't just talk — they act.
 - **Bot-to-bot coordination** — AI employees can @mention each other and collaborate, with built-in loop prevention so they don't spiral
 - **Conversation memory** — sessions persist across restarts. Background summarization compresses chat history into searchable daily summaries, giving bots cross-session awareness.
-- **Image understanding** — attach screenshots, diagrams, or UI mockups and the bot analyzes them
+- **Files in and out, any type** — attach anything (screenshots, logs, CSVs, PDFs, zips) and the bot opens it; bots hand files back the same way
 - **Stream progress** — see what the bot is doing as it works, not just the final answer
 - **Works with your codebase** — bots run from your project directory with full read/write access to code, docs, and config
 
@@ -295,6 +295,12 @@ npm run summarize:dry      # preview (no changes)
 | `SUMMARIZE_CHANNELS` | (none) | Channels to summarize on interval |
 | `SUMMARY_LOOKBACK_HOURS` | `48` | Summary history window |
 | `SUMMARIZE_INTERVAL_MS` | `0` | Background summarization interval |
+| `BOT_HISTORY_DIR` | `.bot-history` | Where summaries, attachments, outbox, and schedules live |
+| `BOT_ATTACHMENTS_DIR` | `<history>/attachments` | Where inbound files are saved |
+| `BOT_OUTBOX_DIR` | `<history>/outbox` | Files written here are sent to the user |
+| `MAX_ATTACHMENT_BYTES` | `26214400` | Largest inbound file to download (25MB) |
+| `ATTACHMENT_FETCH_TIMEOUT_MS` | `60000` | Timeout for downloading an attachment |
+| `MAX_OUTBOUND_BYTES` | `8388608` | Largest file to attach to a reply (8MB) |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `REACTION_HANDLER_ENABLED` | `false` | Set `true` to enable emoji reaction triggers (requires `ALLOWED_USERS`) |
 | `REACTION_TRIGGER_EMOJI` | `👍` | Emoji that triggers Claude when reacted on a bot message |
@@ -335,6 +341,29 @@ reacted_content: <verbatim message text>
 - Double-tapping the same message fires Claude only once; the second tap is dropped
 - Reactions on older messages after a bot restart still fire (Discord partials are resolved)
 - On failure: fail emoji is added AND a reply with the error summary is posted — no silent failure
+
+## Files
+
+Files move in both directions, and **any file type is supported** — text, images, PDFs, archives, binaries.
+
+### Sending files to a bot
+
+Attach a file to your Discord message, or **reply to a message that has one** and ask about it. The bot downloads the file, tells Claude its name, size, type, and local path, and Claude opens it. This works on continuing conversations as well as new ones.
+
+If a file can't be downloaded, the bot says so and names the reason. It will never claim nothing was attached when something was.
+
+### Getting files back from a bot
+
+Two routes, both type-agnostic:
+
+1. **Outbox** — anything the bot writes into its outbox directory while composing a reply is attached automatically. The outbox defaults to `<BOT_HISTORY_DIR>/outbox`.
+2. **Marker** — the bot emits `[[attach: /path/to/file]]` anywhere in its reply. The marker is stripped before the message reaches Discord.
+
+Both routes are explicit on purpose. A bot that merely *mentions* a path in prose does not attach it — otherwise every doc a bot cites would get uploaded to your channel.
+
+Files over the Discord size limit are reported in-channel with their path rather than silently failing to send.
+
+Bots are told about both routes automatically — you don't need to add anything to your `CLAUDE.md`.
 
 ## Architecture
 
