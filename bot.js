@@ -62,6 +62,17 @@ const ATTACHMENTS_DIR = process.env.BOT_ATTACHMENTS_DIR
   ? (process.env.BOT_ATTACHMENTS_DIR.startsWith("/") ? process.env.BOT_ATTACHMENTS_DIR : join(__dirname, process.env.BOT_ATTACHMENTS_DIR))
   : join(HISTORY_DIR, "attachments");
 
+// --- File transfer config ---
+// Inbound accepts ANY file type. Discord's own upload ceiling is 10MB (25MB
+// boosted, 500MB Nitro), so 25MB is a generous default for what can arrive.
+const MAX_ATTACHMENT_BYTES = parseInt(process.env.MAX_ATTACHMENT_BYTES, 10) || 25 * 1024 * 1024;
+const ATTACHMENT_FETCH_TIMEOUT_MS = parseInt(process.env.ATTACHMENT_FETCH_TIMEOUT_MS, 10) || 60000;
+// Outbound: anything written into the outbox is handed to the user, any type.
+const OUTBOX_DIR = process.env.BOT_OUTBOX_DIR
+  ? (process.env.BOT_OUTBOX_DIR.startsWith("/") ? process.env.BOT_OUTBOX_DIR : join(__dirname, process.env.BOT_OUTBOX_DIR))
+  : join(HISTORY_DIR, "outbox");
+const MAX_OUTBOUND_BYTES = parseInt(process.env.MAX_OUTBOUND_BYTES, 10) || 8 * 1024 * 1024;
+
 if (!DISCORD_TOKEN) {
   log.fatal("DISCORD_TOKEN environment variable is required");
   process.exit(1);
@@ -111,6 +122,7 @@ const PID_FILE = join(__dirname, `.${BOT_NAME}.pid`);
 // Ensure directories exist
 mkdirSync(HISTORY_DIR, { recursive: true });
 mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+mkdirSync(OUTBOX_DIR, { recursive: true });
 
 // --- WebSocket Bridge ---
 const WS_PORT = parseInt(process.env.WS_PORT, 10) || 9800;
@@ -329,37 +341,83 @@ async function rotateBuffer() {
 }
 
 function cleanOrphanedAttachments(bufferContent) {
+  // A file drops out of the buffer long before the conversation about it ends —
+  // the Claude session still holds its path and will Read it. Only reap files
+  // older than the window the summaries cover.
+  const minAgeMs = SUMMARY_LOOKBACK_HOURS * 3600000;
   try {
     const files = readdirSync(ATTACHMENTS_DIR);
     for (const file of files) {
       const filePath = join(ATTACHMENTS_DIR, file);
-      if (!bufferContent.includes(filePath)) {
-        try {
-          unlinkSync(filePath);
-          log.debug({ file }, "Cleaned orphaned attachment");
-        } catch { /* ignore */ }
-      }
+      if (bufferContent.includes(filePath)) continue;
+      try {
+        if (Date.now() - statSync(filePath).mtimeMs < minAgeMs) continue;
+        unlinkSync(filePath);
+        log.debug({ file }, "Cleaned orphaned attachment");
+      } catch { /* ignore */ }
     }
   } catch { /* ignore if dir doesn't exist */ }
+}
+
+/**
+ * Every attachment relevant to a message: its own, plus those on the message it
+ * replies to. Replying to a file and asking about it is how people actually use
+ * Discord — before this, that attachment was invisible.
+ */
+async function collectAttachments(msg) {
+  const items = [];
+  const seen = new Set();
+
+  for (const [, attachment] of msg.attachments) {
+    seen.add(attachment.id);
+    items.push({ attachment, messageId: msg.id, source: "message" });
+  }
+
+  if (msg.reference?.messageId) {
+    try {
+      const referenced = await msg.fetchReference();
+      for (const [, attachment] of referenced.attachments) {
+        if (seen.has(attachment.id)) continue;
+        seen.add(attachment.id);
+        items.push({ attachment, messageId: referenced.id, source: "reply" });
+      }
+    } catch (err) {
+      log.debug({ err: err.message }, "Could not fetch replied-to message for attachments");
+    }
+  }
+
+  return items;
 }
 
 async function recordMessage(msg) {
   const channelName = msg.channel.name || "DM";
   const author = msg.author.username || msg.author.tag;
-  let text = msg.content || "";
+  const text = msg.content || "";
 
-  // Download and record any attachments
+  // Download and record any attachments — ANY type, not just images
   const fileRefs = [];
-  for (const [, attachment] of msg.attachments) {
+  const failures = [];
+  for (const { attachment, messageId, source } of await collectAttachments(msg)) {
     try {
-      const savedPath = await downloadAttachmentPersistent(attachment, msg.id);
-      fileRefs.push({ name: attachment.name || "file", size: attachment.size || 0, path: savedPath });
+      const savedPath = await downloadAttachmentPersistent(attachment, messageId);
+      fileRefs.push({
+        name: attachment.name || "file",
+        size: attachment.size || 0,
+        contentType: attachment.contentType || "",
+        path: savedPath,
+        source,
+      });
     } catch (err) {
-      log.debug({ name: attachment.name, err: err.message }, "Failed to download attachment for buffer");
+      // A dropped attachment used to vanish at debug level while the default log
+      // level is info — so the bot told the user "nothing came through" with no
+      // trace anywhere. Warn, and carry the failure into the prompt so the answer
+      // says what actually happened.
+      log.warn({ name: attachment.name, err: err.message }, "Failed to download attachment");
+      failures.push({ name: attachment.name || "file", reason: err.message });
     }
   }
 
-  if (!text && fileRefs.length === 0) return fileRefs;
+  if (!text && fileRefs.length === 0) return { fileRefs, failures };
 
   const line = formatBufferLine(channelName, author, text, fileRefs);
   appendToBuffer(line);
@@ -369,7 +427,7 @@ async function recordMessage(msg) {
     rotateBuffer().catch(err => log.warn({ err: err.message }, "Buffer rotation failed"));
   }
 
-  return fileRefs;
+  return { fileRefs, failures };
 }
 
 function recordBotResponse(channelName, responseText) {
@@ -387,34 +445,74 @@ function recordBotResponse(channelName, responseText) {
 }
 
 // --- Persistent attachment handling ---
-const ATTACHMENT_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf", ".txt", ".json", ".csv"]);
+// Every type is accepted. Classification only decides HOW a file is described to
+// Claude, never whether it is passed along.
+const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"];
+const TEXT_EXTENSIONS = [
+  ".txt", ".md", ".json", ".csv", ".tsv", ".log", ".yaml", ".yml", ".xml",
+  ".html", ".sql", ".diff", ".patch", ".ini", ".conf", ".sh", ".js", ".mjs",
+  ".ts", ".tsx", ".jsx", ".py", ".rb", ".go", ".rs", ".java", ".css",
+];
 
-function isDownloadableAttachment(attachment) {
-  const name = (attachment.name || "").toLowerCase();
-  const contentType = (attachment.contentType || "").toLowerCase();
-  const ext = name.substring(name.lastIndexOf("."));
-  return contentType.startsWith("image/") || ATTACHMENT_EXTENSIONS.has(ext);
+function isImageAttachment({ name = "", contentType = "" }) {
+  const n = (name || "").toLowerCase();
+  return (contentType || "").toLowerCase().startsWith("image/")
+    || IMAGE_EXTENSIONS.some(ext => n.endsWith(ext));
 }
 
-function isImageAttachment(attachment) {
-  const contentType = (attachment.contentType || "").toLowerCase();
-  const name = (attachment.name || "").toLowerCase();
-  return contentType.startsWith("image/") || [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"].some(ext => name.endsWith(ext));
+function isTextAttachment({ name = "", contentType = "" }) {
+  const n = (name || "").toLowerCase();
+  const ct = (contentType || "").toLowerCase();
+  return ct.startsWith("text/") || ct.includes("json") || ct.includes("xml")
+    || TEXT_EXTENSIONS.some(ext => n.endsWith(ext));
 }
 
 async function downloadAttachmentPersistent(attachment, messageId) {
   const { Readable } = require("stream");
-  const filename = `${messageId}-${attachment.name || "file"}`;
-  const savePath = join(ATTACHMENTS_DIR, filename);
+  // attachment.name is user-controlled — strip separators so it cannot escape
+  // ATTACHMENTS_DIR.
+  const safeName = (attachment.name || "file").replace(/[/\\]/g, "_");
+  const savePath = join(ATTACHMENTS_DIR, `${messageId}-${safeName}`);
 
   // Skip if already downloaded
   if (existsSync(savePath)) return savePath;
 
-  const res = await fetch(attachment.url);
-  if (!res.ok) throw new Error(`Failed to download: ${res.status}`);
+  if (attachment.size && attachment.size > MAX_ATTACHMENT_BYTES) {
+    throw new Error(`file is ${Math.round(attachment.size / 1048576)}MB, over the ${Math.round(MAX_ATTACHMENT_BYTES / 1048576)}MB limit`);
+  }
+
+  const res = await fetch(attachment.url, { signal: AbortSignal.timeout(ATTACHMENT_FETCH_TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`download failed with HTTP ${res.status}`);
   const nodeStream = Readable.fromWeb(res.body);
   await pipeline(nodeStream, createWriteStream(savePath));
   return savePath;
+}
+
+/**
+ * The lines that tell Claude what the user actually sent. This is the ONLY path
+ * by which an attachment reaches the model — it rides on the user prompt, so it
+ * survives session resume (the conversation buffer does not).
+ */
+function buildAttachmentPrompt(fileRefs = [], failures = []) {
+  const lines = [];
+
+  for (const f of fileRefs) {
+    const kb = Math.max(1, Math.round(f.size / 1024));
+    const via = f.source === "reply" ? " on the message this one replies to" : "";
+    if (isImageAttachment(f)) {
+      lines.push(`[Image attached by the user${via}: "${f.name}" (${kb}KB) — use the Read tool on "${f.path}" to view it]`);
+    } else if (isTextAttachment(f)) {
+      lines.push(`[File attached by the user${via}: "${f.name}" (${kb}KB, ${f.contentType || "text"}) — use the Read tool on "${f.path}" to read it]`);
+    } else {
+      lines.push(`[File attached by the user${via}: "${f.name}" (${kb}KB, ${f.contentType || "unknown type"}) — saved at "${f.path}". Open it with whatever tool suits its type; do not assume it is unreadable until you have tried]`);
+    }
+  }
+
+  for (const f of failures) {
+    lines.push(`[The user attached "${f.name}" but it FAILED to download: ${f.reason}. Tell them that plainly — do NOT tell them nothing was attached]`);
+  }
+
+  return lines;
 }
 
 // --- Active Claude process tracking ---
@@ -499,10 +597,13 @@ client.on("messageCreate", async (msg) => {
 
   // Record ALL messages to buffer before any response filtering
   let fileRefs = [];
+  let attachmentFailures = [];
   try {
-    fileRefs = await recordMessage(msg);
+    const recorded = await recordMessage(msg);
+    fileRefs = recorded.fileRefs;
+    attachmentFailures = recorded.failures;
   } catch (err) {
-    log.debug({ err: err.message }, "Failed to record message to buffer");
+    log.warn({ err: err.message }, "Failed to record message to buffer");
   }
 
   // --- Stop and /fresh command handling (before response filtering so it works in any channel) ---
@@ -580,9 +681,9 @@ client.on("messageCreate", async (msg) => {
     .replace(new RegExp(`<@!?${client.user.id}>`, "g"), "")
     .trim();
 
-  const hasAttachments = fileRefs.length > 0;
+  const hasAttachments = fileRefs.length > 0 || attachmentFailures.length > 0;
   if (!prompt && !hasAttachments) return;
-  if (!prompt && hasAttachments) prompt = "What do you see in this attachment?";
+  if (!prompt && hasAttachments) prompt = "The user sent the attachment(s) above with no message text. Open them and respond.";
 
   const reqLog = log.child({ channel: msg.channel.id, user: msg.author.tag, prompt: prompt.substring(0, 80) });
 
@@ -624,13 +725,8 @@ client.on("messageCreate", async (msg) => {
   const sendQueue = createSendQueue(msg, reqLog);
   const channelName = msg.channel.name || "DM";
 
-  // Collect image paths from attachments for Claude prompt
-  const imagePaths = fileRefs
-    .filter(f => isImageAttachment({ name: f.name, contentType: "" }))
-    .map(f => f.path);
-
   try {
-    const responseText = await runClaude(prompt, msg.channel.id, reqLog, sendQueue.enqueue, imagePaths, channelName);
+    const responseText = await runClaude(prompt, msg.channel.id, reqLog, sendQueue.enqueue, { fileRefs, attachmentFailures }, channelName);
     clearInterval(typing);
     await sendQueue.flush();
 
@@ -713,7 +809,7 @@ if (REACTION_HANDLER_ENABLED && ALLOWED_USER_IDS.length > 0) {
         reaction.message.channel.id,
         reqLog,
         sendQueue.enqueue,
-        [],
+        {},
         channelName
       );
       await sendQueue.flush();
@@ -841,26 +937,71 @@ function buildContextPrompt() {
   return sections.join("\n\n");
 }
 
+// --- Outbound files (bot → user, any type) ---
+// The harness is dumb transport: it does not guess which files the user wanted.
+// A bot hands a file over by writing it to the outbox, or by naming it with an
+// [[attach: <path>]] marker. Both carry any file type; neither can be triggered
+// by the bot merely mentioning a path in prose.
+const ATTACH_MARKER = /\[\[attach:\s*([^\]\n]+)\]\]/gi;
+
+function stripAttachMarkers(text) {
+  return text.replace(ATTACH_MARKER, "").replace(/\n{3,}/g, "\n\n");
+}
+
+function collectMarkedFiles(text) {
+  const paths = [];
+  for (const match of text.matchAll(ATTACH_MARKER)) {
+    const raw = match[1].trim().replace(/^[`'"]+|[`'"]+$/g, "");
+    if (!raw) continue;
+    paths.push(raw.startsWith("/") ? raw : join(CLAUDE_CWD, raw));
+  }
+  return paths;
+}
+
+// File mtimes do not share a clock with Date.now() — measured here, a file
+// written immediately after a Date.now() call stamps 1-5ms BEHIND it, and some
+// filesystems round to whole seconds. A strict >= silently drops the very file
+// the user asked for, so allow a tolerance.
+const OUTBOX_MTIME_TOLERANCE_MS = 2000;
+
+function collectOutboxFiles(sinceMs) {
+  const cutoff = sinceMs - OUTBOX_MTIME_TOLERANCE_MS;
+  try {
+    return readdirSync(OUTBOX_DIR)
+      .map(f => join(OUTBOX_DIR, f))
+      .filter(p => {
+        try {
+          const s = statSync(p);
+          return s.isFile() && s.mtimeMs >= cutoff;
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
 // --- Claude invocation with session continuity ---
 
-async function runClaude(prompt, channelId, reqLog, sendMessage, imagePaths = [], channelName = "unknown") {
+async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {}, channelName = "unknown") {
   const existingSession = channelSessions.get(channelId);
   const canResume = existingSession &&
     (Date.now() - existingSession.lastActivity) < SESSION_TIMEOUT_MS;
 
   if (canResume) {
     try {
-      return await spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channelName, existingSession.sessionId);
+      return await spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, existingSession.sessionId);
     } catch (err) {
       channelSessions.delete(channelId);
       reqLog.warn({ err: err.message, sessionId: existingSession.sessionId }, "Session resume failed, starting fresh");
     }
   }
 
-  return spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channelName, null);
+  return spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, null);
 }
 
-function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channelName, resumeSessionId) {
+function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, resumeSessionId) {
   return new Promise((resolve, reject) => {
     const basePrompt = process.env.BOT_SYSTEM_PROMPT ||
       "You are running inside a Discord bot. Keep responses concise — Discord has a 2000 char limit per message. Do NOT perform startup rituals. Be brief.";
@@ -870,16 +1011,27 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channel
 
     const channelContext = `${timeContext}\n\nYou are responding in channel: #${channelName}. Only respond to the message in THIS channel. The conversation buffer contains messages from multiple channels — focus only on #${channelName} context. Do NOT respond to or act on messages from other channels.`;
 
+    // Harness mechanics, not personality — appended even when BOT_SYSTEM_PROMPT
+    // overrides the base prompt, because these are the only ways files move.
+    const fileTransferContext = [
+      "",
+      "",
+      "--- Files ---",
+      "RECEIVING: files the user attaches are downloaded and named to you in the prompt as [File attached by the user: ...] or [Image attached by the user: ...], with a local path. Any file type can arrive. Open the path with Read (or Bash for binary formats) before answering — never tell the user nothing was attached when such a line is present.",
+      `SENDING: to hand a file back, either write it into the outbox at ${OUTBOX_DIR} (anything you create there during this reply is attached automatically, any type), or emit a marker [[attach: /absolute/path]] anywhere in your reply. The marker is stripped before the user sees the message. Do not paste large file contents into chat when you can attach the file.`,
+      "--- End files ---",
+    ].join("\n");
+
     let systemPrompt;
     if (resumeSessionId) {
       // Resumed sessions already have the full context — only inject time and channel focus
-      systemPrompt = `${basePrompt}${channelContext}`;
+      systemPrompt = `${basePrompt}${channelContext}${fileTransferContext}`;
       reqLog.info("Resume mode: skipping buffer/summary re-injection");
     } else {
       const context = buildContextPrompt();
       systemPrompt = context
-        ? `${basePrompt}${channelContext}\n\n${context}`
-        : `${basePrompt}${channelContext}`;
+        ? `${basePrompt}${channelContext}${fileTransferContext}\n\n${context}`
+        : `${basePrompt}${channelContext}${fileTransferContext}`;
     }
 
     const args = [
@@ -893,19 +1045,23 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channel
       "--append-system-prompt", systemPrompt,
     ];
 
-    // Build the final prompt with image/file paths prepended
-    let finalPrompt = prompt;
-    if (imagePaths.length > 0) {
-      const imageRefs = imagePaths.map(p => `[Image attached by user — use the Read tool on "${p}" to view it]`).join("\n");
-      finalPrompt = `${imageRefs}\n\n${prompt}`;
-    }
+    // Build the final prompt with every attachment named. This rides on the user
+    // prompt rather than the system prompt, so files reach Claude on resumed
+    // sessions too — the conversation buffer is skipped on resume.
+    const fileRefs = attachments?.fileRefs || [];
+    const attachmentFailures = attachments?.attachmentFailures || [];
+    const attachmentLines = buildAttachmentPrompt(fileRefs, attachmentFailures);
+    const finalPrompt = attachmentLines.length > 0
+      ? `${attachmentLines.join("\n")}\n\n${prompt}`
+      : prompt;
 
+    const attachmentLog = { attachments: fileRefs.length, failedAttachments: attachmentFailures.length };
     if (resumeSessionId) {
       args.push("--resume", resumeSessionId, "-p", "--", finalPrompt);
-      reqLog.info({ sessionId: resumeSessionId }, "Resuming Claude session");
+      reqLog.info({ sessionId: resumeSessionId, ...attachmentLog }, "Resuming Claude session");
     } else {
       args.push("-p", "--", finalPrompt);
-      reqLog.info({ images: imagePaths.length }, "Starting fresh Claude session");
+      reqLog.info(attachmentLog, "Starting fresh Claude session");
     }
 
     // Build a clean env without Claude nesting vars
@@ -972,16 +1128,29 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channel
         }
       }
 
-      // Send any remaining text from the last turn
+      // Send any remaining text from the last turn, minus the attach markers —
+      // those are instructions to the harness, not something the user should read.
       if (turnText.trim()) {
-        sendMessage(turnText);
         fullResponse += turnText;
+        const visible = stripAttachMarkers(turnText);
+        if (visible.trim()) sendMessage(visible);
         turnText = "";
       }
 
-      // Attach any files Claude created (CSV, PDF, etc.)
-      // Also scan response text for file paths not caught by Write tool tracking
-      // (e.g., files created via Bash/Python scripts)
+      // Hand back files, ANY type, by two explicit routes:
+      //   1. [[attach: <path>]] in the reply
+      //   2. anything written into the outbox during this run
+      for (const p of collectMarkedFiles(fullResponse)) {
+        if (existsSync(p) && !writtenFiles.includes(p)) writtenFiles.push(p);
+      }
+      for (const p of collectOutboxFiles(startTime)) {
+        if (!writtenFiles.includes(p)) writtenFiles.push(p);
+      }
+
+      // Legacy route, deliberately kept narrow: Claude often names a file it made
+      // via Bash/Python rather than the Write tool. Widening this extension list
+      // would start attaching every repo doc the bot merely mentions, so new file
+      // types go through the two routes above instead.
       const FILE_EXTENSIONS = /\.(csv|pdf|xlsx|png|jpg)$/i;
       const pathMatches = fullResponse.match(/(?:^|[\s`'"])(\/?(?:[\w.-]+\/)*[\w.-]+\.\w{2,4})(?:[\s`'"]|$)/gm) || [];
       for (const match of pathMatches) {
@@ -999,10 +1168,25 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, imagePaths, channel
       }
 
       if (writtenFiles.length > 0) {
-        const attachable = writtenFiles.filter(f => existsSync(f));
+        const attachable = [];
+        const tooBig = [];
+        // Claude can Write the same path twice in one reply — send it once.
+        for (const f of [...new Set(writtenFiles)]) {
+          let size;
+          try { size = statSync(f).size; } catch { continue; }
+          if (size > MAX_OUTBOUND_BYTES) tooBig.push({ path: f, size });
+          else attachable.push(f);
+        }
         if (attachable.length > 0) {
           sendMessage({ files: attachable.map(f => ({ attachment: f })) });
           reqLog.info({ files: attachable }, "Attaching files to Discord");
+        }
+        // Oversized files used to fail inside msg.reply and get logged where the
+        // user never sees it — they just got a reply with no file.
+        if (tooBig.length > 0) {
+          const listed = tooBig.map(t => `\`${t.path}\` (${Math.round(t.size / 1048576)}MB)`).join(", ");
+          sendMessage(`⚠️ Too large to attach here (Discord limit ${Math.round(MAX_OUTBOUND_BYTES / 1048576)}MB): ${listed}`);
+          reqLog.warn({ files: tooBig }, "Files too large to attach");
         }
       }
 
@@ -1573,7 +1757,7 @@ async function runScheduledJobs() {
     const startTime = new Date();
     try {
       const channelName = channel.name || job.channel;
-      await runClaude(job.prompt, job.channel, jobLog, sendToChannel, [], channelName);
+      await runClaude(job.prompt, job.channel, jobLog, sendToChannel, {}, channelName);
       const durationMs = Date.now() - startTime.getTime();
       sLog.info({ id: job.id, durationMs }, "Scheduled job completed successfully");
       recordJobExecution(job, startTime, durationMs, true);
