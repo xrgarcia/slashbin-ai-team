@@ -1749,84 +1749,100 @@ function shouldRunNow(cron, lastRunKey) {
   return false;
 }
 
+// Re-entrancy guard: setInterval fires this without awaiting, so a job running
+// longer than the check interval would otherwise stack overlapping ticks.
+let schedulerRunning = false;
+
 async function runScheduledJobs() {
-  const schedules = loadSchedules();
-  if (!schedules.length) return;
+  if (schedulerRunning) return;
+  schedulerRunning = true;
 
-  const now = new Date();
-  const sLog = log.child({ component: "scheduler" });
-  let changed = false;
+  try {
+    const schedules = loadSchedules();
+    if (!schedules.length) return;
 
-  // Second Way: log what we found on every cycle
-  const pending = schedules.filter(j => !j._remove);
-  sLog.debug({ jobs: pending.length, ids: pending.map(j => j.id) }, "Scheduler check");
+    const now = new Date();
+    const sLog = log.child({ component: "scheduler" });
 
-  for (const job of schedules) {
-    // Check if job should run (current minute or missed in last 5 minutes)
-    if (!shouldRunNow(job.cron, job._lastRun)) {
-      // Only expire jobs that didn't need to run
-      if (job.expires && new Date(job.expires) < now) {
-        job._remove = true;
-        changed = true;
-        sLog.info({ id: job.id, expires: job.expires, cron: describeCron(job.cron) }, "Scheduled job expired without firing, removing");
-      }
-      continue;
-    }
+    // Second Way: log what we found on every cycle
+    const pending = schedules.filter(j => !j._remove);
+    sLog.debug({ jobs: pending.length, ids: pending.map(j => j.id) }, "Scheduler check");
 
-    // Mark as run for this minute to prevent duplicates
-    const nowKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${now.getHours()}-${now.getMinutes()}`;
-    job._lastRun = nowKey;
-    changed = true;
-
-    const channel = client.channels.cache.get(job.channel);
-    if (!channel) {
-      sLog.warn({ id: job.id, channel: job.channel }, "Scheduled job channel not found");
-      continue;
-    }
-
-    // First Way: validate before executing
-    sLog.info({ id: job.id, cron: job.cron, humanTime: describeCron(job.cron), prompt: job.prompt.substring(0, 80) }, "Firing scheduled job");
-
-    const jobLog = log.child({ component: "scheduler", jobId: job.id });
-    const sendToChannel = async (content) => {
-      try {
-        if (typeof content === "object" && content.files) {
-          await channel.send(content);
-        } else {
-          for (const chunk of splitMessage(content)) {
-            await channel.send(chunk);
-          }
+    for (const job of schedules) {
+      // Check if job should run (current minute or missed in last 5 minutes)
+      if (!shouldRunNow(job.cron, job._lastRun)) {
+        // Only expire jobs that didn't need to run
+        if (job.expires && new Date(job.expires) < now) {
+          job._remove = true;
+          saveSchedules(schedules.filter(j => !j._remove));
+          sLog.info({ id: job.id, expires: job.expires, cron: describeCron(job.cron) }, "Scheduled job expired without firing, removing");
         }
-      } catch (err) {
-        jobLog.error({ err: err.message }, "Failed to send scheduled message");
+        continue;
       }
-    };
 
-    // Third Way: record execution for learning
-    const startTime = new Date();
-    try {
-      const channelName = channel.name || job.channel;
-      await runClaude(job.prompt, job.channel, jobLog, sendToChannel, {}, channelName);
-      const durationMs = Date.now() - startTime.getTime();
-      sLog.info({ id: job.id, durationMs }, "Scheduled job completed successfully");
-      recordJobExecution(job, startTime, durationMs, true);
-    } catch (err) {
-      const durationMs = Date.now() - startTime.getTime();
-      sLog.error({ id: job.id, err: err.message, durationMs }, "Scheduled job failed");
-      recordJobExecution(job, startTime, durationMs, false, err.message);
-      await sendToChannel(`Scheduled job "${job.id}" failed: ${err.message}`);
+      // Resolve the channel BEFORE stamping _lastRun. Stamping first marked a job
+      // "ran" even when it was skipped for a missing channel — and channels.cache
+      // is empty for a moment after a Discord reconnect, so a gateway blip at the
+      // scheduled minute silently burned the run for the day (jerky-em, 2026-06-11).
+      // Leaving it unstamped keeps it eligible for the 5-minute lookback.
+      const channel = client.channels.cache.get(job.channel);
+      if (!channel) {
+        sLog.warn(
+          { id: job.id, channel: job.channel },
+          "Scheduled job channel not found — not stamping _lastRun so it retries on the next tick"
+        );
+        continue;
+      }
+
+      // Stamp and PERSIST before the job runs. Without persisting, a job that
+      // outlasts the check interval is re-fired by the next tick, because the
+      // file on disk still shows the previous _lastRun.
+      const nowKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${now.getHours()}-${now.getMinutes()}`;
+      job._lastRun = nowKey;
+      saveSchedules(schedules.filter(j => !j._remove));
+
+      // First Way: validate before executing
+      sLog.info({ id: job.id, cron: job.cron, humanTime: describeCron(job.cron), prompt: job.prompt.substring(0, 80) }, "Firing scheduled job");
+
+      const jobLog = log.child({ component: "scheduler", jobId: job.id });
+      const sendToChannel = async (content) => {
+        try {
+          if (typeof content === "object" && content.files) {
+            await channel.send(content);
+          } else {
+            for (const chunk of splitMessage(content)) {
+              await channel.send(chunk);
+            }
+          }
+        } catch (err) {
+          jobLog.error({ err: err.message }, "Failed to send scheduled message");
+        }
+      };
+
+      // Third Way: record execution for learning
+      const startTime = new Date();
+      try {
+        const channelName = channel.name || job.channel;
+        await runClaude(job.prompt, job.channel, jobLog, sendToChannel, {}, channelName);
+        const durationMs = Date.now() - startTime.getTime();
+        sLog.info({ id: job.id, durationMs }, "Scheduled job completed successfully");
+        recordJobExecution(job, startTime, durationMs, true);
+      } catch (err) {
+        const durationMs = Date.now() - startTime.getTime();
+        sLog.error({ id: job.id, err: err.message, durationMs }, "Scheduled job failed");
+        recordJobExecution(job, startTime, durationMs, false, err.message);
+        await sendToChannel(`Scheduled job "${job.id}" failed: ${err.message}`);
+      }
+
+      // Expire one-time jobs after successful execution
+      if (job.expires) {
+        job._remove = true;
+        saveSchedules(schedules.filter(j => !j._remove));
+        sLog.info({ id: job.id }, "One-time job completed, removing");
+      }
     }
-
-    // Expire one-time jobs after successful execution
-    if (job.expires) {
-      job._remove = true;
-      changed = true;
-      sLog.info({ id: job.id }, "One-time job completed, removing");
-    }
-  }
-
-  if (changed) {
-    saveSchedules(schedules.filter(j => !j._remove));
+  } finally {
+    schedulerRunning = false;
   }
 }
 
