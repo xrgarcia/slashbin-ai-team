@@ -24,7 +24,13 @@ const { join } = require("path");
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
 const CLAUDE_CWD = process.env.CLAUDE_CWD || process.cwd();
-const HISTORY_DIR = join(__dirname, ".bot-history");
+// Must resolve identically to bot.js. This used to hardcode .bot-history/, so
+// on any bot that sets BOT_HISTORY_DIR (both of ours do) `npm run summarize`
+// wrote summaries and checkpoints into a directory the bot never reads —
+// the work looked successful and reached nothing.
+const HISTORY_DIR = process.env.BOT_HISTORY_DIR
+  ? (process.env.BOT_HISTORY_DIR.startsWith("/") ? process.env.BOT_HISTORY_DIR : join(__dirname, process.env.BOT_HISTORY_DIR))
+  : join(__dirname, ".bot-history");
 const CHECKPOINT_FILE = join(HISTORY_DIR, ".checkpoints.json");
 const SUMMARIZE_CHANNELS = process.env.SUMMARIZE_CHANNELS
   ? process.env.SUMMARIZE_CHANNELS.split(",").filter(Boolean)
