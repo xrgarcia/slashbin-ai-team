@@ -2,7 +2,7 @@ require("dotenv").config();
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
 const { WebSocketServer } = require("ws");
-const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync, readlinkSync } = require("fs");
+const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync, readlinkSync, renameSync } = require("fs");
 const { join } = require("path");
 const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
@@ -68,6 +68,23 @@ const SUMMARY_LOOKBACK_HOURS = parseInt(process.env.SUMMARY_LOOKBACK_HOURS, 10) 
 const HISTORY_DIR = process.env.BOT_HISTORY_DIR
   ? (process.env.BOT_HISTORY_DIR.startsWith("/") ? process.env.BOT_HISTORY_DIR : join(__dirname, process.env.BOT_HISTORY_DIR))
   : join(__dirname, ".bot-history");
+// --- State root ---
+// One place for everything a bot remembers. Summaries, attachments and the outbox
+// were already configurable; the conversation buffer and the session map were NOT
+// — they were pinned to the install directory. So the two artifacts recall needs
+// most were the two you could not move, they were stranded by a re-clone, and any
+// skill wanting them had to hardcode a path inside the harness. That is exactly
+// how the shipped /remember came to read three files that did not exist.
+//
+// Resolution order, stated once and true everywhere: specific setting -> state
+// root -> default. BOT_STATE_DIR defaults to BOT_HISTORY_DIR, so an existing
+// install resolves to byte-identical paths.
+const STATE_DIR = process.env.BOT_STATE_DIR
+  ? (process.env.BOT_STATE_DIR.startsWith("/")
+      ? process.env.BOT_STATE_DIR
+      : join(__dirname, process.env.BOT_STATE_DIR))
+  : HISTORY_DIR;
+
 const CHECKPOINT_FILE = join(HISTORY_DIR, ".checkpoints.json");
 // --- Tool exposure ---
 // Every Claude invocation used to pass --dangerously-skip-permissions
@@ -157,12 +174,24 @@ const REACTION_FAIL_EMOJI = process.env.REACTION_FAIL_EMOJI || "❌";
 const BOT_NAME = process.env.BOT_NAME || "bot";
 
 // --- Conversation buffer config ---
-const BUFFER_FILE = join(__dirname, `.${BOT_NAME}-conversation-buffer.txt`);
+const BUFFER_FILE = join(STATE_DIR, "buffer.txt");
+// Declared here with the other state paths rather than beside the scheduler:
+// spawnClaude publishes these to the child env, and a path declared further down
+// the file is a temporal-dead-zone error waiting for the first message.
+const SCHEDULES_FILE = join(HISTORY_DIR, "schedules.json");
+const JOB_HISTORY_FILE = join(HISTORY_DIR, "job-history.jsonl");
+
+// Files that used to live in the install directory, keyed by BOT_NAME. Moved on
+// first start rather than abandoned — a bot that silently forgets every session
+// after an upgrade is worse than one that refuses to start.
+const LEGACY_STATE = [
+  [join(__dirname, `.${BOT_NAME}-conversation-buffer.txt`), BUFFER_FILE],
+];
 const BUFFER_MAX_BYTES = parseInt(process.env.BUFFER_MAX_BYTES, 10) || 32 * 1024;
 const BUFFER_TRUNCATE_RESPONSE = parseInt(process.env.BUFFER_TRUNCATE_RESPONSE, 10) || 500;
 const ATTACHMENTS_DIR = process.env.BOT_ATTACHMENTS_DIR
   ? (process.env.BOT_ATTACHMENTS_DIR.startsWith("/") ? process.env.BOT_ATTACHMENTS_DIR : join(__dirname, process.env.BOT_ATTACHMENTS_DIR))
-  : join(HISTORY_DIR, "attachments");
+  : join(STATE_DIR, "attachments");
 
 // --- File transfer config ---
 // Inbound accepts ANY file type. Discord's own upload ceiling is 10MB (25MB
@@ -172,7 +201,7 @@ const ATTACHMENT_FETCH_TIMEOUT_MS = parseInt(process.env.ATTACHMENT_FETCH_TIMEOU
 // Outbound: anything written into the outbox is handed to the user, any type.
 const OUTBOX_DIR = process.env.BOT_OUTBOX_DIR
   ? (process.env.BOT_OUTBOX_DIR.startsWith("/") ? process.env.BOT_OUTBOX_DIR : join(__dirname, process.env.BOT_OUTBOX_DIR))
-  : join(HISTORY_DIR, "outbox");
+  : join(STATE_DIR, "outbox");
 const MAX_OUTBOUND_BYTES = parseInt(process.env.MAX_OUTBOUND_BYTES, 10) || 8 * 1024 * 1024;
 
 if (!DISCORD_TOKEN) {
@@ -701,7 +730,31 @@ const MAX_CONCURRENT_CLAUDE = parseInt(process.env.MAX_CONCURRENT_CLAUDE, 10) ||
 const botExchanges = new Map();
 
 // --- Session continuity: track Claude session IDs per channel for --resume ---
-const SESSION_FILE = join(__dirname, `.${BOT_NAME}-sessions.json`);
+const SESSION_FILE = join(STATE_DIR, "sessions.json");
+LEGACY_STATE.push([join(__dirname, `.${BOT_NAME}-sessions.json`), SESSION_FILE]);
+
+/**
+ * Move pre-2.1 state into the state root, once, loudly.
+ * Never overwrites: if the new file already exists the old one is left alone for
+ * a human to look at rather than silently discarded.
+ */
+function migrateLegacyState() {
+  mkdirSync(STATE_DIR, { recursive: true });
+  for (const [from, to] of LEGACY_STATE) {
+    if (from === to || !existsSync(from)) continue;
+    if (existsSync(to)) {
+      log.warn({ from, to }, "Legacy state file left in place — the new location already exists");
+      continue;
+    }
+    try {
+      renameSync(from, to);
+      log.info({ from, to }, "Migrated state file into the state root");
+    } catch (err) {
+      log.warn({ from, to, err: err.message }, "Could not migrate state file — continuing with the new location");
+    }
+  }
+}
+migrateLegacyState();
 const SESSION_TIMEOUT_MS = parseInt(process.env.SESSION_TIMEOUT_MS, 10) || 30 * 60 * 1000;
 
 function loadSessions() {
@@ -1431,6 +1484,21 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 
     // Build a clean env without Claude nesting vars
     const cleanEnv = { ...process.env };
+
+    // Publish the RESOLVED paths. This is what stops harness-owned skills from
+    // rotting: a skill that reads $BOT_BUFFER_FILE cannot go stale, while one
+    // that names `.po-bot-conversation-buffer.txt` breaks the moment a bot is
+    // renamed — which is exactly what happened to the shipped /remember, whose
+    // three hardcoded paths were ALL dead by the time anyone checked.
+    cleanEnv.BOT_STATE_DIR = STATE_DIR;
+    cleanEnv.BOT_SUMMARIES_DIR = HISTORY_DIR;
+    cleanEnv.BOT_ATTACHMENTS_DIR = ATTACHMENTS_DIR;
+    cleanEnv.BOT_OUTBOX_DIR = runOutbox;
+    cleanEnv.BOT_BUFFER_FILE = BUFFER_FILE;
+    cleanEnv.BOT_SESSIONS_FILE = SESSION_FILE;
+    cleanEnv.BOT_JOB_HISTORY_FILE = JOB_HISTORY_FILE;
+    cleanEnv.BOT_CHANNEL_ID = String(channelId);
+
     delete cleanEnv.CLAUDECODE;
     delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
     delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
@@ -2046,7 +2114,6 @@ if (SUMMARIZE_INTERVAL_MS > 0) {
 }
 
 // --- Scheduled jobs ---
-const SCHEDULES_FILE = join(HISTORY_DIR, "schedules.json");
 const SCHEDULE_CHECK_MS = envInt("BOT_SCHEDULE_CHECK_MS", 60_000, { min: 1000 }); // scheduler tick
 
 function loadSchedules() {
@@ -2061,7 +2128,6 @@ function saveSchedules(schedules) {
   writeFileSync(SCHEDULES_FILE, JSON.stringify(schedules, null, 2) + "\n");
 }
 
-const JOB_HISTORY_FILE = join(HISTORY_DIR, "job-history.jsonl");
 
 function recordJobExecution(job, startTime, durationMs, success, error) {
   const record = {
