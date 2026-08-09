@@ -74,7 +74,31 @@ const OUTBOX_DIR = process.env.BOT_OUTBOX_DIR
 const MAX_OUTBOUND_BYTES = parseInt(process.env.MAX_OUTBOUND_BYTES, 10) || 8 * 1024 * 1024;
 
 if (!DISCORD_TOKEN) {
-  log.fatal("DISCORD_TOKEN environment variable is required");
+  log.fatal("DISCORD_TOKEN environment variable is required — see docs/INSTALL.md");
+  process.exit(1);
+}
+
+// A bot pointed at a directory that does not exist used to start happily and then
+// fail on the first message with a spawn error naming neither the variable nor the
+// path. Fail here instead, while someone is still watching the terminal.
+if (!existsSync(CLAUDE_CWD)) {
+  log.fatal(
+    { CLAUDE_CWD },
+    "CLAUDE_CWD does not exist. Set it to YOUR project directory — the repo holding the CLAUDE.md that gives this bot its role. It is not this repo."
+  );
+  process.exit(1);
+}
+if (!statSync(CLAUDE_CWD).isDirectory()) {
+  log.fatal({ CLAUDE_CWD }, "CLAUDE_CWD is not a directory");
+  process.exit(1);
+}
+
+// Opt-in strict mode. Default stays permissive so "invite the bot and talk to it"
+// remains the five-minute first run; operators who want the guarantee set this.
+if (process.env.BOT_REQUIRE_ALLOWLIST === "true" && ALLOWED_USER_IDS.length === 0) {
+  log.fatal(
+    "BOT_REQUIRE_ALLOWLIST=true but ALLOWED_USERS is empty — refusing to start open to every Discord user. Set ALLOWED_USERS to a comma-separated list of user IDs."
+  );
   process.exit(1);
 }
 
@@ -118,6 +142,21 @@ const PID_FILE = join(__dirname, `.${BOT_NAME}.pid`);
   }
   writeFileSync(PID_FILE, String(process.pid));
 })();
+
+// --- Readiness marker ---
+// "A process exists" is not "the bot works": a failed Discord login leaves the
+// process alive (the WS server and scheduler keep the event loop busy), so PID
+// checks reported a permanently deaf bot as healthy. This file is written only
+// once Discord says ready, and removed on the way out, so `status` can tell
+// connected apart from merely running.
+const READY_FILE = join(__dirname, `.${BOT_NAME}.ready`);
+function markReady() {
+  try { writeFileSync(READY_FILE, String(Date.now())); } catch { /* non-fatal */ }
+}
+function clearReady() {
+  try { unlinkSync(READY_FILE); } catch { /* already gone */ }
+}
+clearReady();
 
 // Ensure directories exist
 mkdirSync(HISTORY_DIR, { recursive: true });
@@ -584,7 +623,13 @@ client.on("shardError", (err) => {
 });
 
 client.once("ready", () => {
+  markReady();
   log.info({ tag: client.user.tag, cwd: CLAUDE_CWD }, "Bot online");
+  if (ALLOWED_USER_IDS.length === 0) {
+    log.warn(
+      "ALLOWED_USERS is not set — EVERY Discord user who can DM this bot or post in a monitored channel can drive it. Set ALLOWED_USERS to your user ID, or BOT_REQUIRE_ALLOWLIST=true to refuse to start without it."
+    );
+  }
   log.info(
     { allowedUsers: ALLOWED_USER_IDS.length || "all", monitoredChannels: MONITOR_CHANNELS },
     "Access config"
@@ -1877,14 +1922,28 @@ process.on("unhandledRejection", (reason) => {
 // Graceful shutdown
 process.on("SIGINT", () => {
   log.info("Shutting down...");
+  clearReady();
   client.destroy();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
   log.info("Shutting down...");
+  clearReady();
   client.destroy();
   process.exit(0);
 });
 
-client.login(DISCORD_TOKEN);
+// A rejected login MUST be fatal. Left uncaught it fell through to the
+// unhandledRejection handler, which only logs — and the process stayed alive
+// forever because the WS server and scheduler keep the event loop busy. The
+// result was a bot that reported "started" and "running" while being
+// permanently deaf, which is the worst failure mode we can hand a new user.
+client.login(DISCORD_TOKEN).catch((err) => {
+  clearReady();
+  const hint = /token/i.test(err.message)
+    ? "Check DISCORD_TOKEN — it is missing, malformed, or has been reset in the Discord Developer Portal."
+    : "Check network access to Discord, then the token.";
+  log.fatal({ err: err.message }, `Discord login failed. ${hint}`);
+  process.exit(1);
+});
