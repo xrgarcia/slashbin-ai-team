@@ -52,7 +52,7 @@ const EXEMPT = new Set([
 // documenting them as settings would invite people to set values the harness
 // overwrites on every run. Asserted separately below.
 const PUBLISHED = ["BOT_SUMMARIES_DIR", "BOT_BUFFER_FILE", "BOT_SESSIONS_FILE",
-                   "BOT_JOB_HISTORY_FILE", "BOT_CHANNEL_ID"];
+                   "BOT_JOB_HISTORY_FILE", "BOT_SCHEDULES_FILE", "BOT_CHANNEL_ID"];
 for (const v of PUBLISHED) EXEMPT.add(v);
 
 let pass = 0, fail = 0;

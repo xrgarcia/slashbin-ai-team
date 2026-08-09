@@ -4,6 +4,37 @@ Newest first. Each entry says whether you have to do anything, and exactly what.
 
 ---
 
+## 2.0.0 → 2.1.0
+
+### Scheduled jobs now fire in `BOT_TIMEZONE`, not the host's zone — CHECK YOURS
+
+**Action required only if `BOT_TIMEZONE` differs from your server's timezone.**
+
+Cron was evaluated with host-local time. A bot configured `BOT_TIMEZONE=Europe/London`
+running `0 7 * * *` on a Chicago host fired at **7am Chicago — 1pm London**.
+
+It now fires at 7am in the configured zone. If you wrote your existing crons
+against the host clock, they will move. To keep a job on its old schedule, pin it:
+
+```json
+{ "id": "standup", "cron": "0 7 * * *", "tz": "America/Chicago", ... }
+```
+
+Jobs created from now on record their zone automatically.
+
+**If your host and `BOT_TIMEZONE` are the same, nothing changes.**
+
+### New: create scheduled jobs from chat
+
+Ask — *"every weekday at 7am, post the standup"*. Previously `schedules.json` had
+to be hand-written on the host, and the bot was never told the file existed.
+
+Note the scheduler accepts `*` and comma lists only. `1,2,3,4,5`, never `1-5` —
+a range parses as its first number, so "weekdays" would have meant Mondays. The
+tooling now rejects a range rather than accepting it.
+
+---
+
 ## 1.x → 2.0.0
 
 **Action required: one line.** Everything else in this release is additive.

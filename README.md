@@ -281,6 +281,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 |---|---|---|
 | `BOT_SCHEDULE_CHECK_MS` | `60000` | How often schedules are evaluated |
 | `BOT_SCHEDULE_LOOKBACK_MINUTES` | `5` | How far back a missed run is recovered |
+| `BOT_MAX_SCHEDULED_JOBS` | `25` | Cap on jobs per bot |
 
 ### WebSocket bridge
 | Variable | Default | Description |
@@ -336,7 +337,9 @@ Create `<BOT_HISTORY_DIR>/schedules.json`:
 ]
 ```
 
-Five-field cron, evaluated in the host's local time. A run missed in the last few minutes — a restart, a gateway blip — is recovered rather than skipped. Add `"expires": "2026-12-31T00:00:00Z"` for a one-shot. Every run is appended to `job-history.jsonl`.
+**Just ask** — *"every weekday at 7am, post the standup"*. The bot creates, lists and removes jobs through `/slashbin-harness:schedule`; it reads the schedule back and tells you the next fire time.
+
+Five-field cron, evaluated in **`BOT_TIMEZONE`** — so 7am means 7am where you are, not where the server is. Ranges and steps are NOT supported: write `1,2,3,4,5`, never `1-5`, which would silently mean Monday only. The tooling rejects a range rather than accepting it. A run missed in the last few minutes — a restart, a gateway blip — is recovered rather than skipped. Add `"expires": "2026-12-31T00:00:00Z"` for a one-shot. Every run is appended to `job-history.jsonl`.
 
 ## Reaction triggers
 
