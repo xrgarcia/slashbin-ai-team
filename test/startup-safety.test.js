@@ -1,0 +1,386 @@
+/**
+ * A bot that cannot reach Discord must DIE, not linger.
+ *
+ * `client.login()` was called as a bare un-awaited promise. When it rejected the
+ * only thing that caught it was the global `unhandledRejection` handler, which
+ * logs and returns — and the process then stayed alive indefinitely, because the
+ * WebSocket server and the scheduler's setInterval keep the event loop busy.
+ *
+ * The result, reproduced on a clean clone 2026-08-09: `npm start` printed
+ * "Bot started", `npm run status` printed "Bot is running", and the bot was
+ * permanently deaf. That is the worst state to hand a new user, and under PM2 it
+ * means a bot on a revoked token reports `online` forever.
+ *
+ * These assertions run against the source text — bot.js cannot be require()d
+ * because importing it logs a live bot into Discord.
+ */
+const { readFileSync } = require("fs");
+const { join } = require("path");
+const assert = require("assert");
+
+const REPO = join(__dirname, "..");
+const bot = readFileSync(join(REPO, "bot.js"), "utf8");
+const manager = readFileSync(join(REPO, "bot-manager.mjs"), "utf8");
+
+let pass = 0, fail = 0;
+function check(label, fn) {
+  try { fn(); console.log(`  ok   ${label}`); pass++; }
+  catch (e) { console.log(`  FAIL ${label}\n       ${e.message}`); fail++; }
+}
+
+console.log("\nStartup safety — a failed login must be fatal");
+
+check("client.login has a rejection handler attached", () => {
+  const m = /client\.login\([^)]*\)\s*\.catch\(/.test(bot);
+  assert.ok(m, "client.login() is un-awaited with no .catch — a rejected login would leave a zombie");
+});
+
+check("the login rejection handler exits non-zero", () => {
+  const start = bot.indexOf("client.login(");
+  assert.ok(start > -1, "client.login not found");
+  const tail = bot.slice(start);
+  assert.ok(/process\.exit\(\s*[1-9]/.test(tail), "login failure must exit non-zero, not just log");
+});
+
+check("unhandledRejection is not the only guard on login", () => {
+  // The handler may exist — it should just never be what catches a login failure.
+  const loginIdx = bot.indexOf("client.login(");
+  const catchIdx = bot.indexOf(".catch(", loginIdx);
+  assert.ok(catchIdx > -1 && catchIdx - loginIdx < 200, "no .catch near client.login");
+});
+
+console.log("\nStartup validation — fail while someone is watching");
+
+check("CLAUDE_CWD is validated at startup", () => {
+  assert.ok(/existsSync\(CLAUDE_CWD\)/.test(bot), "CLAUDE_CWD is never checked for existence");
+  assert.ok(/isDirectory\(\)/.test(bot), "CLAUDE_CWD is never checked to be a directory");
+});
+
+check("an empty ALLOWED_USERS produces a visible warning", () => {
+  assert.ok(/ALLOWED_USER_IDS\.length === 0/.test(bot), "no empty-allowlist check");
+  assert.ok(/log\.warn\(/.test(bot), "the empty-allowlist case must warn, not stay silent");
+});
+
+check("BOT_REQUIRE_ALLOWLIST can refuse to start open", () => {
+  assert.ok(/BOT_REQUIRE_ALLOWLIST/.test(bot), "no strict-allowlist opt-in");
+});
+
+check("ALLOWED_USERS gates humans only — it must not veto an allowlisted bot", () => {
+  // Securing a bot by setting ALLOWED_USERS used to silently kill bot-to-bot
+  // coordination: a peer already whitelisted in ALLOWED_BOTS was then dropped
+  // for not also appearing in ALLOWED_USERS.
+  const m = /if \(!msg\.author\.bot && ALLOWED_USER_IDS\.length > 0/.test(bot);
+  assert.ok(m, "the ALLOWED_USERS check must be scoped to non-bot authors");
+});
+
+console.log("\nState root — a bot's memory lives in one movable place");
+
+check("BOT_STATE_DIR exists and defaults to BOT_HISTORY_DIR", () => {
+  assert.ok(/const STATE_DIR = process\.env\.BOT_STATE_DIR/.test(bot), "no state root");
+  assert.ok(/: HISTORY_DIR;/.test(bot),
+    "the default must be BOT_HISTORY_DIR, so an existing install resolves to identical paths");
+});
+
+check("the buffer and sessions live under the state root, not the install dir", () => {
+  // These were pinned to __dirname, so the two artifacts recall needs most were
+  // the two you could not move — and a re-clone stranded them.
+  assert.ok(/const BUFFER_FILE = join\(STATE_DIR, "buffer\.txt"\)/.test(bot),
+    "buffer still pinned to the install directory");
+  assert.ok(/const SESSION_FILE = join\(STATE_DIR, "sessions\.json"\)/.test(bot),
+    "sessions still pinned to the install directory");
+});
+
+check("legacy state is migrated, never silently discarded", () => {
+  const fn = /function migrateLegacyState\(\)[\s\S]*?\n}/.exec(bot);
+  assert.ok(fn, "no migration — an upgrade would strand the buffer and sessions");
+  assert.ok(/renameSync/.test(fn[0]), "migration must move the file");
+  assert.ok(/existsSync\(to\)/.test(fn[0]),
+    "must not overwrite an existing destination — leave it for a human instead");
+  assert.ok(/log\.info|log\.warn/.test(fn[0]), "a silent migration is indistinguishable from data loss");
+});
+
+check("resolved paths are published to skills, so nothing has to hardcode one", () => {
+  for (const v of ["BOT_STATE_DIR", "BOT_SUMMARIES_DIR", "BOT_BUFFER_FILE", "BOT_SESSIONS_FILE", "BOT_OUTBOX_DIR"]) {
+    assert.ok(new RegExp(`cleanEnv\\.${v} =`).test(bot), `${v} is not exported to the child`);
+  }
+});
+
+console.log("\nReserved commands — a swallowed command must not be invisible");
+
+check("the reserved list is declared once, not scattered as literals", () => {
+  // It was three separate literals in the message handler, so the warning, the
+  // injected context and the docs could each drift from the behaviour.
+  assert.ok(/const RESERVED_COMMANDS = \["fresh", "status", \.\.\.STOP_WORDS\]/.test(bot),
+    "no single reserved list");
+});
+
+check("the bot is TOLD which commands the harness owns", () => {
+  // Precedent: the harness already injects a Files block explaining transport it
+  // owns. Without this the bot cannot answer "what commands can I use here" —
+  // /fresh and /stop are intercepted before it ever sees them.
+  assert.ok(/Commands handled by the harness/.test(bot), "no command context injected");
+  assert.ok(/RESERVED_COMMANDS\.map/.test(bot), "the injected list must come from the same constant");
+});
+
+check("a colliding bot command warns at startup", () => {
+  assert.ok(/function shadowedCommands\(\)/.test(bot), "nothing detects collisions");
+  assert.ok(/can NEVER run/.test(bot), "the warning must say the command cannot run, not merely that it exists");
+});
+
+check("collision detection looks where Claude Code actually looks", () => {
+  const fn = /function shadowedCommands\(\)[\s\S]*?\n}/.exec(bot)[0];
+  assert.ok(/\.claude", "commands"/.test(fn), "must check .claude/commands");
+  assert.ok(/\.claude", "skills"/.test(fn), "must check .claude/skills");
+  assert.ok(/CLAUDE_CWD/.test(fn), "must look in the BOT's project, not the harness");
+});
+
+check("a bot cannot override the harness stop command", () => {
+  // /stop must always be able to kill a runaway request. That is a safety
+  // control and cannot be delegated to the thing it may need to stop.
+  const idx = bot.indexOf("const isStopCommand");
+  assert.ok(idx > -1, "stop handling not found");
+  assert.ok(bot.indexOf("routeToAgents") > idx || /return;/.test(bot.slice(idx, idx + 2000)),
+    "stop must be handled by the harness before anything can intercept it");
+});
+
+console.log("\nSummarization coverage — recall can only find what got written");
+
+check("DMs and ad-hoc channels are summarized, not just monitored ones", () => {
+  // SUMMARIZE_CHANNELS defaults to MONITOR_CHANNELS, and a DM can never appear
+  // in that list — so a conversation held entirely in a DM produced NO summary.
+  assert.ok(/function channelsToSummarize\(\)/.test(bot), "no widened channel set");
+  assert.ok(/for \(const channelId of channelsToSummarize\(\)\)/.test(bot),
+    "the summarizer still iterates only the configured list");
+});
+
+check("the bot records where it has actually spoken", () => {
+  assert.ok(/recordSeenChannel\(msg\.channel\.id\)/.test(bot),
+    "nothing records the channel, so 'where it talked' can never be known");
+});
+
+check("seen channels survive a restart", () => {
+  // channelSessions expires after SESSION_TIMEOUT_MS, so yesterday's DM would be
+  // invisible after a restart if that were the only source.
+  const fn = /function recordSeenChannel\([\s\S]*?\n}/.exec(bot);
+  assert.ok(fn, "recordSeenChannel not found");
+  assert.ok(/writeFileSync\(SEEN_CHANNELS_FILE/.test(fn[0]), "seen channels are not persisted");
+  assert.ok(/join\(STATE_DIR, "seen-channels\.json"\)/.test(bot),
+    "the record must live under the state root with the rest of the bot's memory");
+});
+
+check("SUMMARIZE_SEEN_CHANNELS=false reproduces the old behaviour", () => {
+  assert.ok(/SUMMARIZE_SEEN_CHANNELS !== "false"/.test(bot), "no opt-out");
+});
+
+check("a DM summary is named for who it is with, not a channel id", () => {
+  assert.ok(/channel\.recipient\?\.username/.test(bot),
+    "dm-<channelId> means nothing to a human reading the directory later");
+});
+
+console.log("\nFiles — collisions must be impossible, not unlikely");
+
+check("attachments are keyed on the ATTACHMENT id, not the message id", () => {
+  // A message can carry several files and nothing requires their names to differ.
+  // Keyed on messageId, two `report.csv` on one message produced the same path,
+  // and the existsSync short-circuit handed back the FIRST file for the second.
+  assert.ok(/join\(ATTACHMENTS_DIR, `\$\{attachment\.id\}-/.test(bot),
+    "attachment path must be keyed on attachment.id");
+  assert.ok(!/join\(ATTACHMENTS_DIR, `\$\{messageId\}-/.test(bot),
+    "still keyed on messageId — two same-named files on one message collide");
+});
+
+check("a user-supplied filename cannot escape the attachments directory", () => {
+  assert.ok(/replace\(\/\[\/\\\\\]\/g, "_"\)/.test(bot),
+    "path separators must be stripped from the Discord-supplied name");
+});
+
+check("the outbox is scoped per channel", () => {
+  assert.ok(/function channelOutbox\(/.test(bot), "no per-channel outbox");
+  assert.ok(/collectOutboxFiles\(startTime, runOutbox\)/.test(bot),
+    "collection must read this channel's outbox, not the shared root");
+});
+
+check("the shared outbox is only swept when nothing else is running", () => {
+  // Sweeping it during a concurrent run is the leak: mtime cannot tell whose
+  // file it is, so the other channel's document gets attached here.
+  assert.ok(/activeProcesses\.size === 0/.test(bot),
+    "the shared-root fallback must be guarded on no other run being in flight");
+});
+
+check("there is exactly ONE summarization implementation", () => {
+  // It lived in four places across two files: two prompt-and-spawn copies in
+  // bot.js, one in summarize.js, and writeSummary separately in both. Every
+  // change had to be made two or three times — BOT_PERMISSION_MODE needed three
+  // identical edits, SUMMARIZE_TIMEOUT_MS three, and the writeSummary overwrite
+  // bug had to be fixed twice because both copies carried it.
+  const core = readFileSync(join(REPO, "lib/summarize-core.js"), "utf8");
+  const sum = readFileSync(join(REPO, "summarize.js"), "utf8");
+
+  const promptCopies = [bot, sum, core].filter((f) => /Topics discussed/.test(f)).length;
+  assert.strictEqual(promptCopies, 1, "the summarization prompt exists in more than one file");
+
+  assert.ok(!/spawn\(CLAUDE_BIN/.test(sum), "summarize.js still spawns Claude itself");
+  // bot.js keeps exactly one spawn — the agent. Summarization is not it.
+  assert.strictEqual((bot.match(/spawn\(CLAUDE_BIN/g) || []).length, 1,
+    "bot.js should spawn Claude once (the agent); summarization goes through the module");
+
+  for (const f of [bot, sum]) {
+    assert.ok(!/function writeSummary\([^)]*\)\s*\{[\s\S]{0,200}writeFileSync/.test(f),
+      "a local writeSummary still writes files directly instead of delegating");
+  }
+});
+
+check("summaries APPEND — a day's history is never overwritten", () => {
+  const core = readFileSync(join(REPO, "lib/summarize-core.js"), "utf8");
+  const fn = /function writeSummary\([\s\S]*?\n}/.exec(core);
+  assert.ok(fn, "writeSummary not found in the module");
+  assert.ok(/existing \+ section/.test(fn[0]), "writeSummary still overwrites the day's file");
+  assert.ok(/readFileSync\(filepath/.test(fn[0]), "it must read what is already there before writing");
+});
+
+check("two channels sharing a name do not interleave", () => {
+  const core = readFileSync(join(REPO, "lib/summarize-core.js"), "utf8");
+  const fn = /function writeSummary\([\s\S]*?\n}/.exec(core)[0];
+  assert.ok(/channel: \$\{channelId\}/.test(fn), "the owning channel must be recorded in the file");
+  assert.ok(/-\$\{channelId\}\.md/.test(fn), "a different channel with the same name needs its own file");
+});
+
+check("a summary file records what KIND of summary it is", () => {
+  // Channel-day and buffer-rotation summaries land in the same directory and
+  // were distinguishable only by guessing from the filename.
+  const core = readFileSync(join(REPO, "lib/summarize-core.js"), "utf8");
+  assert.ok(/kind: \$\{kind\}/.test(core), "no kind recorded in the file");
+});
+
+console.log("\nStop — asking a bot to stop must not answer with an error");
+
+check("a user-initiated stop is marked as intentional", () => {
+  // Without the mark, the close handler treats a deliberate stop as a crash:
+  // it rejects with "Claude exited with code 143" and the caller replies
+  // `Error: ...`. Asking the bot to stop answered with an error message.
+  const stopBlock = /const stopPattern[\s\S]*?\/\/ Stop mentions a different bot/.exec(bot);
+  assert.ok(stopBlock, "stop handler not found");
+  assert.ok(/_intentionalKill = true/.test(stopBlock[0]),
+    "the stop path kills without marking the kill intentional");
+});
+
+check("stopping acknowledges regardless of how it was phrased", () => {
+  const stopBlock = /const stopPattern[\s\S]*?\/\/ Stop mentions a different bot/.exec(bot)[0];
+  assert.ok(/await msg\.reply\("Stopped\."\)/.test(stopBlock), "no acknowledgement");
+  // The reply must NOT be gated on the @mention form — the bare `stop` is the
+  // form people actually type, and it used to get nothing back but an error.
+  assert.ok(!/if \(isTargeted\) \{\s*await msg\.reply\("Stopped\."\)/.test(stopBlock),
+    "acknowledgement is still restricted to the @mention form");
+});
+
+check("a stop word with trailing text still stops a run in flight", () => {
+  // `stop x, y, z` used to fall through to Claude and SPAWN A NEW RUN.
+  assert.ok(/stopPrefix/.test(bot), "no prefix form — only an exact match is handled");
+  assert.ok(/activeProcesses\.has\(msg\.channel\.id\)/.test(bot),
+    "the prefix form must be conditioned on a run actually being in flight");
+});
+
+check("the prefix form cannot hijack a normal request when nothing is running", () => {
+  const m = /const isStopCommand = ([^;]+);/.exec(bot);
+  assert.ok(m, "isStopCommand not found");
+  assert.ok(/hasRun && stopPrefix/.test(m[1]),
+    "the loose form must require an in-flight run, or 'stop sending the digest' becomes a no-op");
+});
+
+console.log("\nTool exposure — the permission bypass must be a choice, not a constant");
+
+check("no invocation hardcodes the skip-permissions flags", () => {
+  // They may appear ONLY inside permissionArgs(), which gates them behind a mode.
+  const guarded = /function permissionArgs[\s\S]*?\n}/.exec(bot);
+  assert.ok(guarded, "permissionArgs() not found");
+  const outside = bot.replace(guarded[0], "");
+  // Match the QUOTED argv form: prose mentioning the flag is fine, passing it is not.
+  assert.ok(!/"--dangerously-skip-permissions"/.test(outside),
+    "a call site still passes the skip flags directly, bypassing the mode");
+});
+
+check("restricted is the default, bypass must be asked for", () => {
+  assert.ok(/BOT_PERMISSION_MODE \|\| "restricted"/.test(bot), "the default must be restricted");
+});
+
+check("restriction uses --tools, which is the flag that actually restricts", () => {
+  // Measured 2026-08-09: --allowedTools and --permission-mode plan restrict
+  // NOTHING in -p mode; only --tools changes the exposed tool set. Using
+  // --allowedTools here would be security theater.
+  assert.ok(/"--tools"/.test(bot), "must restrict via --tools");
+  assert.ok(!/"--allowedTools"/.test(bot), "--allowedTools does not restrict anything in -p mode");
+});
+
+check("summarizers never get write or execute tools when restricted", () => {
+  assert.ok(/SUMMARIZER_TOOLS/.test(bot), "no separate summarizer tool set");
+  assert.ok(/BOT_SUMMARIZER_TOOLS \|\| "Read"/.test(bot), "summarizer default should be read-only");
+});
+
+check("summarize.js resolves the mode the same way bot.js does", () => {
+  const sum = readFileSync(join(REPO, "summarize.js"), "utf8");
+  assert.ok(/BOT_PERMISSION_MODE/.test(sum), "summarize.js ignores the permission mode");
+  assert.ok(!/^\s*"--dangerously-skip-permissions",\s*$/m.test(sum.replace(/\?[\s\S]*?:/, "")),
+    "summarize.js still hardcodes the skip flags outside the mode check");
+});
+
+check("an unknown BOT_PERMISSION_MODE fails at startup", () => {
+  assert.ok(/\["bypass", "restricted"\]\.includes\(PERMISSION_MODE\)/.test(bot),
+    "an unrecognised mode must fail loudly, not silently pick one");
+});
+
+console.log("\nConfiguration — nothing host-specific frozen into the source");
+
+check("no hardcoded timezone or zone abbreviation remains", () => {
+  assert.ok(!/America\/Chicago/.test(bot), "the host's timezone is still hardcoded");
+  // The literal was appended on top of timeStyle:"long", which already emits the
+  // abbreviation — so the prompt read "10:01 AM CDT CDT" in summer and
+  // "6:00 AM CST CDT" in winter.
+  assert.ok(!/\}\)\} CDT\)/.test(bot), "a literal zone abbreviation is still appended");
+});
+
+check("BOT_TIMEZONE is configurable and validated", () => {
+  assert.ok(/BOT_TIMEZONE/.test(bot), "no BOT_TIMEZONE setting");
+  assert.ok(/resolvedOptions\(\)\.timeZone/.test(bot), "default should be the host zone, not a baked-in city");
+  assert.ok(/new Intl\.DateTimeFormat\("en-US", \{ timeZone: BOT_TIMEZONE \}\)/.test(bot),
+    "an invalid IANA name must fail at startup, not on every message");
+});
+
+check("numeric settings are parsed safely, not with the ||-default idiom", () => {
+  assert.ok(/function envInt\(/.test(bot), "no envInt helper");
+  // `parseInt(x,10) || DEFAULT` swallows 0/NaN/negatives; for an interval a 0 that
+  // slipped through would be a hot loop.
+  assert.ok(/Number\.isFinite\(n\)/.test(bot), "envInt must reject non-numbers explicitly");
+  assert.ok(/n < min/.test(bot), "envInt must clamp below a minimum");
+});
+
+check("the scheduler tick and WS bridge are configurable", () => {
+  assert.ok(/BOT_SCHEDULE_CHECK_MS/.test(bot), "scheduler tick still frozen");
+  assert.ok(/WS_HOST/.test(bot), "WS bind host still frozen");
+  assert.ok(/const WS_HOST = process\.env\.WS_HOST \|\| "127\.0\.0\.1"/.test(bot),
+    "the bridge must still default to loopback — it takes commands");
+});
+
+console.log("\nProcess manager — one checkout, many bots");
+
+check("manager scopes pid/log by BOT_NAME", () => {
+  assert.ok(/\.\$\{BOT_NAME\}\.pid/.test(manager), "PID file is not scoped by BOT_NAME");
+  assert.ok(/\$\{BOT_NAME\}\.log/.test(manager), "log file is not scoped by BOT_NAME");
+});
+
+check("manager loads .env so it agrees with bot.js on BOT_NAME", () => {
+  assert.ok(/dotenv\/config/.test(manager), "manager does not load .env — BOT_NAME set there would desync the two");
+});
+
+check("manager distinguishes connected from merely alive", () => {
+  assert.ok(/\.ready/.test(manager), "manager has no readiness signal, so status cannot tell deaf from healthy");
+});
+
+check("bot writes a readiness marker only once Discord is ready", () => {
+  assert.ok(/markReady\(\)/.test(bot), "no readiness marker written");
+  const readyIdx = bot.indexOf('client.once("ready"');
+  assert.ok(readyIdx > -1, "no ready handler");
+  assert.ok(bot.indexOf("markReady()", readyIdx) - readyIdx < 100, "markReady must be inside the ready handler");
+});
+
+console.log(`\n${pass} passed, ${fail} failed\n`);
+process.exit(fail ? 1 : 0);
