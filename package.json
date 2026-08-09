@@ -28,6 +28,8 @@
     "node": ">=18"
   },
   "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "doctor": "node scripts/doctor.mjs",
     "start": "node bot-manager.mjs start",
     "stop": "node bot-manager.mjs stop",
     "restart": "node bot-manager.mjs restart",
