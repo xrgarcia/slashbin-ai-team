@@ -5,7 +5,33 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] — unreleased
+## [2.1.0] — unreleased
+
+### Added
+
+- **Scheduled jobs can be created from chat.** "Every weekday at 7am, post the
+  standup" now works. The scheduler has always RUN jobs; nothing could create
+  one — `schedules.json` had to be hand-written on the host, and the bot was
+  never told the file existed. New `/slashbin-harness:schedule` skill handles
+  create, list, remove and run history. It reads a created job back and reports
+  the interpreted schedule and next fire time, because a cron accepted silently
+  is one nobody notices is wrong until it fails to fire.
+- `BOT_MAX_SCHEDULED_JOBS` caps jobs per bot.
+
+### Fixed
+
+- **Cron fired in the host's timezone, not `BOT_TIMEZONE`.** A bot configured for
+  London running `0 7 * * *` on a Chicago host fired at 7am Chicago. "Every
+  morning at 7am local" meant "7am wherever the server is". Jobs now record the
+  zone they were created under so a config move cannot silently reinterpret them.
+  See UPGRADING.
+- The scheduler's already-ran key is computed in the same zone as the match —
+  they could otherwise disagree across a DST boundary and double or drop a run.
+- A cron range (`1-5`) is now rejected rather than accepted. The matcher only
+  understands `*` and comma lists, so `1-5` parsed as `1` and a "weekdays" job
+  fired on Mondays alone.
+
+## [2.0.0] — 2026-08-09
 
 First release aimed at people who are not us. See [UPGRADING.md](UPGRADING.md) —
 the upgrade is one line.
