@@ -1,0 +1,76 @@
+name: Bug report
+description: Something the bot does wrong, or does not do at all
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The single most useful thing you can include is the
+        output of `npm run doctor` — it answers most first-round questions and it
+        never prints secrets.
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`npm run doctor` output"
+      description: Paste the whole thing. It prints no tokens.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: >
+        From `npm run logs`, or `~/.pm2/logs/<bot>-out.log` under PM2.
+        Please check for tokens before pasting.
+      render: text
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "Output of: node -v && claude --version && git rev-parse --short HEAD"
+      placeholder: "v20.11.0 / 2.1.226 / 1d95003"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: permission-mode
+    attributes:
+      label: BOT_PERMISSION_MODE
+      options:
+        - restricted (default)
+        - bypass
+        - not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: supervisor
+    attributes:
+      label: How are you running it?
+      options:
+        - npm start (built-in manager)
+        - PM2
+        - systemd
+        - Docker or other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before filing
+      options:
+        - label: Message Content Intent is enabled (`doctor` checks this)
+        - label: The bot shows as connected, not merely running (`npm run status`)
