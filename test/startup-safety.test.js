@@ -73,6 +73,47 @@ check("ALLOWED_USERS gates humans only — it must not veto an allowlisted bot",
   assert.ok(m, "the ALLOWED_USERS check must be scoped to non-bot authors");
 });
 
+console.log("\nTool exposure — the permission bypass must be a choice, not a constant");
+
+check("no invocation hardcodes the skip-permissions flags", () => {
+  // They may appear ONLY inside permissionArgs(), which gates them behind a mode.
+  const guarded = /function permissionArgs[\s\S]*?\n}/.exec(bot);
+  assert.ok(guarded, "permissionArgs() not found");
+  const outside = bot.replace(guarded[0], "");
+  // Match the QUOTED argv form: prose mentioning the flag is fine, passing it is not.
+  assert.ok(!/"--dangerously-skip-permissions"/.test(outside),
+    "a call site still passes the skip flags directly, bypassing the mode");
+});
+
+check("restricted is the default, bypass must be asked for", () => {
+  assert.ok(/BOT_PERMISSION_MODE \|\| "restricted"/.test(bot), "the default must be restricted");
+});
+
+check("restriction uses --tools, which is the flag that actually restricts", () => {
+  // Measured 2026-08-09: --allowedTools and --permission-mode plan restrict
+  // NOTHING in -p mode; only --tools changes the exposed tool set. Using
+  // --allowedTools here would be security theater.
+  assert.ok(/"--tools"/.test(bot), "must restrict via --tools");
+  assert.ok(!/"--allowedTools"/.test(bot), "--allowedTools does not restrict anything in -p mode");
+});
+
+check("summarizers never get write or execute tools when restricted", () => {
+  assert.ok(/SUMMARIZER_TOOLS/.test(bot), "no separate summarizer tool set");
+  assert.ok(/BOT_SUMMARIZER_TOOLS \|\| "Read"/.test(bot), "summarizer default should be read-only");
+});
+
+check("summarize.js resolves the mode the same way bot.js does", () => {
+  const sum = readFileSync(join(REPO, "summarize.js"), "utf8");
+  assert.ok(/BOT_PERMISSION_MODE/.test(sum), "summarize.js ignores the permission mode");
+  assert.ok(!/^\s*"--dangerously-skip-permissions",\s*$/m.test(sum.replace(/\?[\s\S]*?:/, "")),
+    "summarize.js still hardcodes the skip flags outside the mode check");
+});
+
+check("an unknown BOT_PERMISSION_MODE fails at startup", () => {
+  assert.ok(/\["bypass", "restricted"\]\.includes\(PERMISSION_MODE\)/.test(bot),
+    "an unrecognised mode must fail loudly, not silently pick one");
+});
+
 console.log("\nConfiguration — nothing host-specific frozen into the source");
 
 check("no hardcoded timezone or zone abbreviation remains", () => {

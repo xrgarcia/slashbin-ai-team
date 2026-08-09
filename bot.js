@@ -69,6 +69,38 @@ const HISTORY_DIR = process.env.BOT_HISTORY_DIR
   ? (process.env.BOT_HISTORY_DIR.startsWith("/") ? process.env.BOT_HISTORY_DIR : join(__dirname, process.env.BOT_HISTORY_DIR))
   : join(__dirname, ".bot-history");
 const CHECKPOINT_FILE = join(HISTORY_DIR, ".checkpoints.json");
+// --- Tool exposure ---
+// Every Claude invocation used to pass --dangerously-skip-permissions
+// unconditionally, with no way to change it. Combined with an empty ALLOWED_USERS
+// that meant any Discord user who could reach the bot got arbitrary code execution
+// on the host. That is a reasonable trade for a private deployment; it is not a
+// defensible default for a public project.
+//
+// MEASURED, not assumed (2026-08-09), because the obvious flags do not do what
+// their names suggest in -p mode:
+//   --allowedTools Read      -> restricts NOTHING. Bash still ran.
+//   --permission-mode plan   -> restricts NOTHING. Bash exposed and used.
+//   --tools Read,Grep        -> exposes EXACTLY those (plus connected MCP tools).
+// So --tools is the real control surface, and the one we use.
+const PERMISSION_MODE = process.env.BOT_PERMISSION_MODE || "restricted";
+const DEFAULT_ALLOWED_TOOLS = "Read,Glob,Grep,WebFetch,WebSearch,TodoWrite";
+const ALLOWED_TOOLS = process.env.BOT_ALLOWED_TOOLS || DEFAULT_ALLOWED_TOOLS;
+// Summarisation reads a transcript that is already in its prompt. It never needs
+// to write, edit or execute anything.
+const SUMMARIZER_TOOLS = process.env.BOT_SUMMARIZER_TOOLS || "Read";
+
+/**
+ * The permission flags for one invocation.
+ * `bypass` reproduces the historical behaviour byte-for-byte — that is the
+ * documented one-line upgrade for anyone already running this harness.
+ */
+function permissionArgs(kind = "session") {
+  if (PERMISSION_MODE === "bypass") {
+    return ["--allow-dangerously-skip-permissions", "--dangerously-skip-permissions"];
+  }
+  return ["--tools", kind === "summarizer" ? SUMMARIZER_TOOLS : ALLOWED_TOOLS];
+}
+
 // The clock the bot is told it lives in. Every session gets this in its prompt, so
 // a wrong zone makes the bot wrong about "today" — and about anything it schedules.
 // Defaults to the host's own zone rather than to whoever wrote the code.
@@ -120,6 +152,21 @@ if (!existsSync(CLAUDE_CWD)) {
 if (!statSync(CLAUDE_CWD).isDirectory()) {
   log.fatal({ CLAUDE_CWD }, "CLAUDE_CWD is not a directory");
   process.exit(1);
+}
+
+if (!["bypass", "restricted"].includes(PERMISSION_MODE)) {
+  log.fatal(
+    { BOT_PERMISSION_MODE: PERMISSION_MODE },
+    'BOT_PERMISSION_MODE must be "restricted" (default — expose only BOT_ALLOWED_TOOLS) or "bypass" (all tools, no permission checks)'
+  );
+  process.exit(1);
+}
+if (PERMISSION_MODE === "bypass") {
+  log.warn(
+    "BOT_PERMISSION_MODE=bypass — this bot runs with ALL tools and no permission checks. Anyone allowed to talk to it can run arbitrary commands on this host. Remove it to fall back to BOT_ALLOWED_TOOLS."
+  );
+} else {
+  log.info({ tools: ALLOWED_TOOLS }, "Tool exposure restricted — set BOT_PERMISSION_MODE=bypass for the previous unrestricted behaviour, or widen BOT_ALLOWED_TOOLS");
 }
 
 // Fail on a bad IANA name here rather than throwing on every message.
@@ -1177,8 +1224,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 
     const args = [
       "--output-format", "stream-json",
-      "--allow-dangerously-skip-permissions",
-      "--dangerously-skip-permissions",
+      ...permissionArgs("session"),
       "--verbose",
       "--max-turns", String(CLAUDE_MAX_TURNS),
       ...(process.env.CLAUDE_MODEL ? ["--model", process.env.CLAUDE_MODEL] : []),
@@ -1487,8 +1533,7 @@ function summarizeBufferLines(lines) {
     const args = [
       "--output-format", "stream-json",
       "--verbose",
-      "--allow-dangerously-skip-permissions",
-      "--dangerously-skip-permissions",
+      ...permissionArgs("summarizer"),
       "--append-system-prompt", "You are a summarization assistant. Output only the summary, no preamble. Keep it under 2000 characters.",
       "-p", "--", prompt,
     ];
@@ -1644,8 +1689,7 @@ function summarizeWithClaude(channelName, date, messages) {
     const args = [
       "--output-format", "stream-json",
       "--verbose",
-      "--allow-dangerously-skip-permissions",
-      "--dangerously-skip-permissions",
+      ...permissionArgs("summarizer"),
       "--append-system-prompt", "You are a summarization assistant. Output only the summary, no preamble. Keep it under 2000 characters.",
       "-p", "--", prompt,
     ];
