@@ -49,6 +49,17 @@ the upgrade is one line.
 
 ### Fixed
 
+- **Asking a bot to stop no longer answers with an error.** The stop path killed
+  the run without marking the kill intentional, so the close handler treated it as
+  a crash and replied `Error: Claude exited with code 143`. The bare `stop` form
+  never sent "Stopped." at all — that error was its only feedback. Stopping now
+  acknowledges whenever it actually stopped something, however it was phrased.
+- **`stop x, y, z` now stops.** The matcher required an exact `stop` / `/stop`, so
+  anything with trailing words fell through to Claude and *started a new run* — the
+  opposite of the intent, at the moment you least want it. A message opening with
+  `stop` / `halt` / `abort` / `cancel` now stops a run in flight. With nothing
+  running it is still an ordinary message, so "stop sending the Friday digest"
+  remains a request the bot thinks about rather than a silent no-op.
 - **A failed Discord login no longer leaves a zombie.** `client.login()` was an
   un-awaited promise whose rejection only reached the global handler, so the
   process stayed alive — the WebSocket server and scheduler keep the event loop
