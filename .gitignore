@@ -12,6 +12,7 @@ CLAUDE.md
 .*-sessions.json
 .bot-history/
 *.pid
+*.ready
 ecosystem.config.js
 .conversation-buffer.txt
 .*-conversation-buffer.txt
