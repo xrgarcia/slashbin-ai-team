@@ -16,6 +16,29 @@ const log = pino({
     : undefined,
 });
 
+/**
+ * Read a numeric setting from the environment.
+ *
+ * The idiom this replaces — `parseInt(process.env.X, 10) || DEFAULT` — silently
+ * swallows 0, NaN and negatives into the default, so a typo looks like a working
+ * config. Worse, for a value like a poll interval, a 0 that DID get through would
+ * be a hot loop. Clamp explicitly and say something when the input was garbage.
+ */
+function envInt(name, def, { min = 0 } = {}) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return def;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n)) {
+    log.warn({ [name]: raw, using: def }, `${name} is not a number — using the default`);
+    return def;
+  }
+  if (n < min) {
+    log.warn({ [name]: n, min, using: def }, `${name} is below the minimum — using the default`);
+    return def;
+  }
+  return n;
+}
+
 // --- Config ---
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
@@ -46,6 +69,12 @@ const HISTORY_DIR = process.env.BOT_HISTORY_DIR
   ? (process.env.BOT_HISTORY_DIR.startsWith("/") ? process.env.BOT_HISTORY_DIR : join(__dirname, process.env.BOT_HISTORY_DIR))
   : join(__dirname, ".bot-history");
 const CHECKPOINT_FILE = join(HISTORY_DIR, ".checkpoints.json");
+// The clock the bot is told it lives in. Every session gets this in its prompt, so
+// a wrong zone makes the bot wrong about "today" — and about anything it schedules.
+// Defaults to the host's own zone rather than to whoever wrote the code.
+const BOT_TIMEZONE = process.env.BOT_TIMEZONE
+  || Intl.DateTimeFormat().resolvedOptions().timeZone
+  || "UTC";
 const REACTION_HANDLER_ENABLED = process.env.REACTION_HANDLER_ENABLED === "true";
 const REACTION_TRIGGER_EMOJI = process.env.REACTION_TRIGGER_EMOJI || "👍";
 const REACTION_ACK_EMOJI = process.env.REACTION_ACK_EMOJI || "✅";
@@ -90,6 +119,17 @@ if (!existsSync(CLAUDE_CWD)) {
 }
 if (!statSync(CLAUDE_CWD).isDirectory()) {
   log.fatal({ CLAUDE_CWD }, "CLAUDE_CWD is not a directory");
+  process.exit(1);
+}
+
+// Fail on a bad IANA name here rather than throwing on every message.
+try {
+  new Intl.DateTimeFormat("en-US", { timeZone: BOT_TIMEZONE });
+} catch {
+  log.fatal(
+    { BOT_TIMEZONE },
+    'BOT_TIMEZONE is not a valid IANA timezone name (expected e.g. "Europe/London", "America/New_York", "UTC")'
+  );
   process.exit(1);
 }
 
@@ -164,10 +204,15 @@ mkdirSync(ATTACHMENTS_DIR, { recursive: true });
 mkdirSync(OUTBOX_DIR, { recursive: true });
 
 // --- WebSocket Bridge ---
-const WS_PORT = parseInt(process.env.WS_PORT, 10) || 9800;
+const WS_PORT = envInt("WS_PORT", 9800, { min: 1 });
+// Loopback by default: the bridge takes commands, so exposing it beyond this
+// host is an explicit decision, never an accident of configuration.
+const WS_HOST = process.env.WS_HOST || "127.0.0.1";
+const WS_HEARTBEAT_MS = envInt("WS_HEARTBEAT_MS", 30000, { min: 1000 });
+const WS_HEARTBEAT_MAX_MISSES = envInt("WS_HEARTBEAT_MAX_MISSES", 3, { min: 1 });
 const connectedAgents = new Map(); // agentId → { ws, discordBotId, channels }
 
-const wss = new WebSocketServer({ port: WS_PORT, host: "127.0.0.1" });
+const wss = new WebSocketServer({ port: WS_PORT, host: WS_HOST });
 log.info({ port: WS_PORT }, "WebSocket bridge listening");
 
 wss.on("connection", (ws) => {
@@ -175,14 +220,14 @@ wss.on("connection", (ws) => {
   let heartbeatMisses = 0;
 
   const heartbeat = setInterval(() => {
-    if (heartbeatMisses >= 3) {
+    if (heartbeatMisses >= WS_HEARTBEAT_MAX_MISSES) {
       log.warn({ agentId }, "Agent missed 3 heartbeats, disconnecting");
       ws.terminate();
       return;
     }
     heartbeatMisses++;
     try { ws.send(JSON.stringify({ type: "ping" })); } catch { /* ignore */ }
-  }, 30000);
+  }, WS_HEARTBEAT_MS);
 
   ws.on("message", async (raw) => {
     let msg;
@@ -349,7 +394,7 @@ async function rotateBuffer() {
     const content = readBuffer();
     const lines = content.split("\n").filter(Boolean);
     // Keep the newest 60%, summarize the oldest 40%
-    const cutIndex = Math.floor(lines.length * 0.4);
+    const cutIndex = Math.floor(lines.length * (envInt("BUFFER_ROTATE_PERCENT", 40, { min: 1 }) / 100));
     const oldLines = lines.slice(0, cutIndex);
     const keepLines = lines.slice(cutIndex);
 
@@ -598,7 +643,7 @@ setInterval(() => {
     log.debug({ entries: botExchanges.size }, "Pruning botExchanges");
     botExchanges.clear();
   }
-}, 600000);
+}, envInt("BOT_BOT_EXCHANGE_PRUNE_MS", 600000, { min: 1000 }));
 
 // --- Discord client ---
 const client = new Client({
@@ -1013,7 +1058,7 @@ function collectMarkedFiles(text) {
 // written immediately after a Date.now() call stamps 1-5ms BEHIND it, and some
 // filesystems round to whole seconds. A strict >= silently drops the very file
 // the user asked for, so allow a tolerance.
-const OUTBOX_MTIME_TOLERANCE_MS = 2000;
+const OUTBOX_MTIME_TOLERANCE_MS = envInt("BOT_OUTBOX_MTIME_TOLERANCE_MS", 2000, { min: 0 });
 
 function collectOutboxFiles(sinceMs) {
   const cutoff = sinceMs - OUTBOX_MTIME_TOLERANCE_MS;
@@ -1094,7 +1139,16 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "You are running inside a Discord bot. Keep responses concise — Discord has a 2000 char limit per message. Do NOT perform startup rituals. Be brief.";
 
     const now = new Date();
-    const timeContext = `\n\nCurrent time: ${now.toISOString()} (${now.toLocaleString("en-US", { timeZone: "America/Chicago", dateStyle: "short", timeStyle: "long" })} CDT)`;
+    // timeStyle:"long" already emits the correct zone abbreviation for the date —
+    // CDT in summer, CST in winter. The old code appended a literal " CDT" on top
+    // of it, so this line read "10:01 AM CDT CDT" all summer and "6:00 AM CST CDT"
+    // all winter. Let the formatter say it once, correctly.
+    const localTime = now.toLocaleString("en-US", {
+      timeZone: BOT_TIMEZONE,
+      dateStyle: "short",
+      timeStyle: "long",
+    });
+    const timeContext = `\n\nCurrent time: ${now.toISOString()} (${localTime})`;
 
     const channelContext = `${timeContext}\n\nYou are responding in channel: #${channelName}. Only respond to the message in THIS channel. The conversation buffer contains messages from multiple channels — focus only on #${channelName} context. Do NOT respond to or act on messages from other channels.`;
 
@@ -1714,7 +1768,7 @@ if (SUMMARIZE_INTERVAL_MS > 0) {
 
 // --- Scheduled jobs ---
 const SCHEDULES_FILE = join(HISTORY_DIR, "schedules.json");
-const SCHEDULE_CHECK_MS = 60_000; // check every minute
+const SCHEDULE_CHECK_MS = envInt("BOT_SCHEDULE_CHECK_MS", 60_000, { min: 1000 }); // scheduler tick
 
 function loadSchedules() {
   try {
@@ -1785,7 +1839,7 @@ function cronMatchesTime(cron, date) {
 function shouldRunNow(cron, lastRunKey) {
   // Check current minute AND the last few minutes (catch missed runs)
   const now = new Date();
-  const LOOKBACK_MINUTES = 5;
+  const LOOKBACK_MINUTES = envInt("BOT_SCHEDULE_LOOKBACK_MINUTES", 5, { min: 0 });
 
   for (let i = 0; i <= LOOKBACK_MINUTES; i++) {
     const checkTime = new Date(now.getTime() - i * 60_000);
