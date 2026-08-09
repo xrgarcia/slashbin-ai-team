@@ -137,8 +137,13 @@ function summarizeWithClaude(channelName, date, messages) {
     const args = [
       "--output-format", "stream-json",
       "--verbose",
-      "--allow-dangerously-skip-permissions",
-      "--dangerously-skip-permissions",
+      // Must resolve the same way bot.js does — see the "Tool exposure" block
+      // there for why --tools is the control surface and --allowedTools is not.
+      // Summarisation reads a transcript already present in its prompt, so it
+      // needs no write or execute tools in either mode.
+      ...(process.env.BOT_PERMISSION_MODE === "bypass"
+        ? ["--allow-dangerously-skip-permissions", "--dangerously-skip-permissions"]
+        : ["--tools", process.env.BOT_SUMMARIZER_TOOLS || "Read"]),
       ...(summarizeModel ? ["--model", summarizeModel] : []),
       "-p", prompt,
       "--append-system-prompt", "You are a summarization assistant. Output only the summary, no preamble. Keep it under 2000 characters.",
