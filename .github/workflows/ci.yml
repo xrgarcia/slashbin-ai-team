@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, features]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 18 is the documented floor (package.json engines); 20 is what most
+        # people will actually run.
+        node: [18, 20]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      # There is no build step — PM2 runs bot.js straight from the checkout.
+      # These two are the whole gate.
+      - name: Syntax check
+        run: |
+          node --check bot.js
+          node --check summarize.js
+
+      - name: Test
+        run: npm test
+
+  config-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      # The example config is what every new user copies. If it names a setting
+      # the code does not read, or stores a literal credential, that ships to
+      # everyone — so it is a gate, not a lint.
+      - name: Example config must be clean and current
+        run: |
+          node --input-type=module -e "
+            import { checkEcosystem } from './scripts/lib/checks.mjs';
+            const results = checkEcosystem('./ecosystem.config.example.js', '.');
+            let bad = 0;
+            for (const r of results) {
+              console.log(\`[\${r.status.toUpperCase()}] \${r.name}: \${r.detail}\`);
+              if (r.status === 'fail') bad++;
+            }
+            process.exit(bad ? 1 : 0);
+          "
