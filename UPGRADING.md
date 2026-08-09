@@ -64,7 +64,28 @@ BOT_TIMEZONE=America/Chicago
 Worth doing deliberately if you run scheduled jobs, since a bot's sense of "today"
 drives them.
 
-### 5. Multi-bot process management now works
+### 5. Scheduled jobs fire in `BOT_TIMEZONE`, not the host's zone
+
+**Action required only if `BOT_TIMEZONE` differs from your server's timezone, and
+you have existing jobs.**
+
+Cron was evaluated with host-local time, so a bot set to `Europe/London` running
+`0 7 * * *` on a Chicago host fired at **7am Chicago — 1pm London**. It now fires
+at 7am in the configured zone. To keep an existing job on its old schedule, pin it:
+
+```json
+{ "id": "standup", "cron": "0 7 * * *", "tz": "America/Chicago", ... }
+```
+
+Jobs created from now on record their zone automatically. If your host and
+`BOT_TIMEZONE` match, nothing changes.
+
+Also new: you can create jobs by asking — *"every weekday at 7am, post the
+standup"*. Note the scheduler accepts `*` and comma lists only; `1,2,3,4,5`, never
+`1-5`, which parsed as `1` and would have fired on Mondays alone. That is now
+rejected rather than accepted.
+
+### 6. Multi-bot process management now works
 
 `npm start` / `stop` / `status` / `logs` scope their pid and log files by
 `BOT_NAME`, so several bots can be managed from one checkout. Added `npm run list`.
@@ -74,7 +95,7 @@ identical to before. If you *had* set `BOT_NAME`, your bot previously wrote
 `.bot.pid` / `bot.log` and will now write `.<name>.pid` / `<name>.log`. Nothing to
 migrate; the old files are simply unused.
 
-### 6. `ALLOWED_USERS` empty now warns loudly
+### 7. `ALLOWED_USERS` empty now warns loudly
 
 An empty allowlist has always meant *every* Discord user who can reach the bot.
 That is unchanged — but it now says so on every start.
@@ -88,7 +109,7 @@ BOT_REQUIRE_ALLOWLIST=true
 
 `BOT_REQUIRE_ALLOWLIST=true` refuses to start rather than run open to everyone.
 
-### 7. `ALLOWED_USERS` no longer vetoes allowlisted bots
+### 8. `ALLOWED_USERS` no longer vetoes allowlisted bots
 
 Previously, setting `ALLOWED_USERS` silently broke bot-to-bot coordination: a peer
 already listed in `ALLOWED_BOTS` was then dropped for not also appearing in
@@ -97,13 +118,13 @@ already listed in `ALLOWED_BOTS` was then dropped for not also appearing in
 If you worked around this by putting bot IDs in `ALLOWED_USERS`, you can remove
 them. Leaving them does no harm.
 
-### 8. New: `npm run setup` and `npm run doctor`
+### 9. New: `npm run setup` and `npm run doctor`
 
 `setup` writes a validated `.env`. `doctor` checks an existing install and exits
 non-zero on failure — run it after upgrading, and paste it into any bug report.
 Neither prints secrets.
 
-### 9. Frozen constants are now settings
+### 10. Frozen constants are now settings
 
 `BOT_SCHEDULE_CHECK_MS`, `BOT_SCHEDULE_LOOKBACK_MINUTES`,
 `BOT_OUTBOX_MTIME_TOLERANCE_MS`, `BOT_BOT_EXCHANGE_PRUNE_MS`, `WS_HEARTBEAT_MS`,
@@ -116,7 +137,7 @@ Numeric settings are also parsed more strictly: a value that is not a number, or
 below the minimum, now falls back to the default **and says so in the log**.
 Previously `0`, a negative, or a typo was silently swallowed.
 
-### 10. Removed: our internal skills
+### 11. Removed: our internal skills
 
 `.claude/skills/implement-approved-issues` and `revise-pr-feedback` shipped in the
 package and encoded the maintainers' own delivery process. They were never loaded

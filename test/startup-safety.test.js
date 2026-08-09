@@ -105,6 +105,32 @@ check("resolved paths are published to skills, so nothing has to hardcode one", 
   }
 });
 
+console.log("\nScheduler — 7am must mean 7am where the user is");
+
+check("cron is evaluated in BOT_TIMEZONE, not the host zone", () => {
+  // Measured before the fix: a bot with BOT_TIMEZONE=Europe/London firing
+  // "0 7 * * *" on a Chicago host fired at 7am CHICAGO — 1pm London.
+  assert.ok(/function zonedParts\(/.test(bot), "no zone-aware clock for the scheduler");
+  const fn = /function cronMatchesTime\([\s\S]*?\n}/.exec(bot)[0];
+  assert.ok(/zonedParts\(date, tz\)/.test(fn), "cron still reads host-local fields");
+  assert.ok(!/date\.getHours\(\)/.test(fn), "date.getHours() is host-local — the bug");
+});
+
+check("the already-ran key uses the same zone as the match", () => {
+  // Otherwise the two disagree across a DST boundary and a run is doubled or lost.
+  assert.ok(/zonedParts\(checkTime, BOT_TIMEZONE\)/.test(bot), "lookback key is not zone-aware");
+});
+
+check("a job may pin its own timezone", () => {
+  assert.ok(/job\.tz \|\| BOT_TIMEZONE/.test(bot),
+    "a job created in one zone must keep firing in it after a config change");
+});
+
+check("the schedules path is published so a skill can create jobs", () => {
+  assert.ok(/cleanEnv\.BOT_SCHEDULES_FILE = SCHEDULES_FILE/.test(bot),
+    "without this a scheduling skill would have to hardcode the path");
+});
+
 console.log("\nReserved commands — a swallowed command must not be invisible");
 
 check("the reserved list is declared once, not scattered as literals", () => {

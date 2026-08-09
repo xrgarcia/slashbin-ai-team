@@ -1610,6 +1610,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     cleanEnv.BOT_BUFFER_FILE = BUFFER_FILE;
     cleanEnv.BOT_SESSIONS_FILE = SESSION_FILE;
     cleanEnv.BOT_JOB_HISTORY_FILE = JOB_HISTORY_FILE;
+    cleanEnv.BOT_SCHEDULES_FILE = SCHEDULES_FILE;
     cleanEnv.BOT_CHANNEL_ID = String(channelId);
 
     delete cleanEnv.CLAUDECODE;
@@ -2109,11 +2110,36 @@ function describeCron(cron) {
   return parts.join(" ") || cron;
 }
 
-function cronMatchesTime(cron, date) {
+const WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+/**
+ * Wall-clock fields for a moment, in a named timezone.
+ *
+ * The scheduler used date.getHours()/getDate()/getDay(), which are HOST-local.
+ * So a bot configured BOT_TIMEZONE=Europe/London firing "0 7 * * *" on a Chicago
+ * host fired at 7am Chicago — 1pm London. "Every morning at 7am local" meant
+ * "7am wherever the server happens to be", which is nobody's intent.
+ */
+function zonedParts(date, tz) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: tz, hour12: false,
+      month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", weekday: "short",
+    }).formatToParts(date).map((p) => [p.type, p.value])
+  );
+  return {
+    min: Number(parts.minute),
+    hour: Number(parts.hour) % 24,     // some engines render midnight as 24
+    day: Number(parts.day),
+    month: Number(parts.month),
+    dow: WEEKDAY_INDEX[parts.weekday],
+  };
+}
+
+function cronMatchesTime(cron, date, tz = BOT_TIMEZONE) {
   // Parse "M H D MO DOW" cron format — check if a given time matches
   const [cronMin, cronHour, cronDay, cronMonth, cronDow] = cron.split(/\s+/);
-  const min = date.getMinutes(), hour = date.getHours();
-  const day = date.getDate(), month = date.getMonth() + 1, dow = date.getDay();
+  const { min, hour, day, month, dow } = zonedParts(date, tz);
 
   function matches(field, value) {
     if (field === "*") return true;
@@ -2125,19 +2151,22 @@ function cronMatchesTime(cron, date) {
     && matches(cronDow, dow);
 }
 
-function shouldRunNow(cron, lastRunKey) {
+function shouldRunNow(cron, lastRunKey, tz = BOT_TIMEZONE) {
   // Check current minute AND the last few minutes (catch missed runs)
   const now = new Date();
   const LOOKBACK_MINUTES = envInt("BOT_SCHEDULE_LOOKBACK_MINUTES", 5, { min: 0 });
 
   for (let i = 0; i <= LOOKBACK_MINUTES; i++) {
     const checkTime = new Date(now.getTime() - i * 60_000);
-    const checkKey = `${checkTime.getFullYear()}-${checkTime.getMonth()}-${checkTime.getDate()}-${checkTime.getHours()}-${checkTime.getMinutes()}`;
+    // Keyed in the same zone the match is evaluated in, or the two disagree
+    // across a DST boundary and a run is either doubled or lost.
+    const k = zonedParts(checkTime, BOT_TIMEZONE);
+    const checkKey = `${k.month}-${k.day}-${k.hour}-${k.min}`;
 
     // Skip if already ran for this minute
     if (checkKey === lastRunKey) continue;
 
-    if (cronMatchesTime(cron, checkTime)) return true;
+    if (cronMatchesTime(cron, checkTime, tz)) return true;
   }
 
   return false;
@@ -2164,7 +2193,7 @@ async function runScheduledJobs() {
 
     for (const job of schedules) {
       // Check if job should run (current minute or missed in last 5 minutes)
-      if (!shouldRunNow(job.cron, job._lastRun)) {
+      if (!shouldRunNow(job.cron, job._lastRun, job.tz || BOT_TIMEZONE)) {
         // Only expire jobs that didn't need to run
         if (job.expires && new Date(job.expires) < now) {
           job._remove = true;
@@ -2191,7 +2220,8 @@ async function runScheduledJobs() {
       // Stamp and PERSIST before the job runs. Without persisting, a job that
       // outlasts the check interval is re-fired by the next tick, because the
       // file on disk still shows the previous _lastRun.
-      const nowKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${now.getHours()}-${now.getMinutes()}`;
+      const nk = zonedParts(now, BOT_TIMEZONE);
+      const nowKey = `${nk.month}-${nk.day}-${nk.hour}-${nk.min}`;
       job._lastRun = nowKey;
       saveSchedules(schedules.filter(j => !j._remove));
 
