@@ -136,6 +136,30 @@ export async function checkPortFree(port, label = "WS_PORT") {
  * A read-only or full volume surfaces today as a summarizer that quietly saves
  * nothing — the work looks successful and reaches no one.
  */
+/**
+ * A bot command the harness would swallow.
+ * The harness intercepts these before Claude sees the message, so a same-named
+ * command in the bot's own repo can never run — and the bot still lists it when
+ * asked what it can do, because from inside Claude that command is real.
+ */
+export function checkReservedCommands(claudeCwd, stopWords) {
+  const reserved = ["fresh", "status", ...(stopWords || "stop,halt,abort,cancel").split(",").map((w) => w.trim()).filter(Boolean)];
+  const hits = [];
+  for (const [dir, suffix] of [[join(claudeCwd, ".claude", "commands"), ".md"],
+                               [join(claudeCwd, ".claude", "skills"), ""]]) {
+    let entries = [];
+    try { entries = readdirSync(dir); } catch { continue; }
+    for (const e of entries) {
+      const name = suffix ? e.replace(/\.md$/, "") : e;
+      if (reserved.includes(name.toLowerCase())) hits.push(join(dir, e));
+    }
+  }
+  return hits.length
+    ? bad("Reserved commands", `${hits.length} of this bot's command(s) can never run: ${hits.join(", ")}`,
+        `The harness answers ${reserved.map((r) => "/" + r).join(", ")} before Claude sees the message. Rename yours — nothing errors today, it just silently never runs.`)
+    : ok("Reserved commands", `no collision with ${reserved.map((r) => "/" + r).join(", ")}`);
+}
+
 export function checkStateDir(stateDir, historyDir, harnessDir) {
   const root = resolve(stateDir || historyDir || join(harnessDir, ".bot-history"));
   try {

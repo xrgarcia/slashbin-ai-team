@@ -62,6 +62,14 @@ the upgrade is one line.
 
 ### Fixed
 
+- **A bot command sharing a name with a harness command is no longer invisible.**
+  The harness intercepts `/fresh`, `/status` and the stop words before Claude sees
+  the message, so a same-named command in a bot's own repo could never run — while
+  still appearing in that bot's list of what it can do, because from inside Claude
+  the command is real. Nothing errored, nothing logged. Found live: the PO bot
+  advertised a `/status` that had never once executed. Now warned at startup,
+  failed by `doctor`, and the reserved names are injected into every session so a
+  bot can finally answer "what commands can I use here" correctly.
 - **Asking a bot to stop no longer answers with an error.** The stop path killed
   the run without marking the kill intentional, so the close handler treated it as
   a crash and replied `Error: Claude exited with code 143`. The bare `stop` form

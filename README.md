@@ -120,6 +120,12 @@ In Discord:
 | `/stop` | Kill the running request in this channel |
 | `/status` | Buffer size, message count, attachments, whether a request is running |
 
+> **These names are reserved.** The harness answers them before your bot ever sees
+> the message, so a command of your own with one of these names — including any
+> `BOT_STOP_WORDS` — **can never run**. Nothing errors; it silently does nothing
+> while still appearing in the bot's own list of what it can do. `npm run doctor`
+> fails if it finds one, and the bot warns at startup.
+
 In your shell (add `-- --name <bot>` to target one instance):
 
 | Command | What it does |
