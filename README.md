@@ -228,6 +228,8 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `SUMMARIZE_CHANNELS` | `MONITOR_CHANNELS` | Channels to summarize |
 | `SUMMARIZE_BATCH_SIZE` | `200` | Messages fetched per channel per run |
 | `SUMMARY_LOOKBACK_HOURS` | `48` | How much summary history is injected |
+| `SUMMARIZE_TIMEOUT_MS` | `120000` | Wall clock for one summarization run |
+| `BOT_SUMMARIZER_START_DELAY_MS` | `10000` | Grace period after login before the first cycle |
 | `BUFFER_MAX_BYTES` | `32768` | Buffer size before rotation |
 | `BUFFER_ROTATE_PERCENT` | `40` | Oldest N% summarized away on rotation |
 | `BUFFER_TRUNCATE_RESPONSE` | `500` | Chars of each reply kept in the buffer |
@@ -239,6 +241,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `MAX_OUTBOUND_BYTES` | `8388608` | Largest file attached to a reply (8MB) |
 | `ATTACHMENT_FETCH_TIMEOUT_MS` | `60000` | Per-attachment download timeout |
 | `BOT_OUTBOX_MTIME_TOLERANCE_MS` | `2000` | Clock-skew slack when detecting new outbox files |
+| `BOT_ATTACH_EXTENSIONS` | `csv,pdf,xlsx,png,jpg` | Types the bot may hand back by *naming* a path, without the outbox or a marker. **Widen with care** — a broad list starts attaching every document a bot merely mentions |
 
 ### Reactions
 | Variable | Default | Description |
@@ -269,6 +272,26 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `NODE_ENV` | — | `production` disables pretty logging |
 | `MAX_DISCORD_LENGTH` | `1900` | Chars per message before splitting |
 | `BOT_BOT_EXCHANGE_PRUNE_MS` | `600000` | How often bot-exchange counters reset |
+| `BOT_TYPING_INTERVAL_MS` | `8000` | How often the typing indicator refreshes |
+| `BOT_STOP_WORDS` | `stop,halt,abort,cancel` | Words that halt a run in flight (see below) |
+| `BOT_START_CONFIRM_MS` | `2000` | How long `npm start` waits before judging the start |
+| `BOT_STOP_TIMEOUT_MS` | `5000` | Graceful-shutdown wait before `npm stop` force-kills |
+
+### Stopping a run
+
+Say any of `BOT_STOP_WORDS` to halt what a bot is doing. **Both forms work:**
+
+- **`stop` on its own** — halts the run in every bot in the channel. Only a bot that
+  actually had something running replies, so idle bots stay quiet.
+- **`stop x, y, z`** — a message that *opens* with a stop word also halts, but only
+  when a run is in flight. With nothing running it is an ordinary message, so
+  "stop sending the Friday digest" is still a request the bot thinks about.
+
+`@TheBot stop` targets one bot. Stopping also clears that channel's session, since
+a killed run leaves one mid-thought.
+
+These words are configurable because "stop" is a vocabulary choice, not a protocol
+constant — a non-English channel needs its own.
 
 ## Scheduled jobs
 

@@ -101,6 +101,26 @@ function permissionArgs(kind = "session") {
   return ["--tools", kind === "summarizer" ? SUMMARIZER_TOOLS : ALLOWED_TOOLS];
 }
 
+// How often the "typing…" indicator is refreshed while a request runs.
+const TYPING_INTERVAL_MS = envInt("BOT_TYPING_INTERVAL_MS", 8000, { min: 1000 });
+// Wall clock for ONE summarization run (three call sites, one setting).
+const SUMMARIZE_TIMEOUT_MS = envInt("SUMMARIZE_TIMEOUT_MS", 120000, { min: 5000 });
+// Grace period after login before the first summarizer cycle, so startup work settles.
+const SUMMARIZER_START_DELAY_MS = envInt("BOT_SUMMARIZER_START_DELAY_MS", 10000, { min: 0 });
+
+// Words that halt a run in flight. Configurable because "stop" is a vocabulary
+// choice, not a protocol constant — a non-English channel needs its own.
+const STOP_WORDS = (process.env.BOT_STOP_WORDS || "stop,halt,abort,cancel")
+  .split(",").map((w) => w.trim()).filter(Boolean);
+const STOP_ALTERNATION = STOP_WORDS.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+
+// Legacy auto-attach: file types the bot may hand back merely by NAMING the path,
+// without using the outbox or an [[attach:]] marker. Deliberately narrow — widening
+// it starts attaching every repo document a bot happens to mention. Configurable,
+// but read the warning in the README before adding to it.
+const ATTACH_EXTENSIONS = (process.env.BOT_ATTACH_EXTENSIONS || "csv,pdf,xlsx,png,jpg")
+  .split(",").map((e) => e.trim().replace(/^\./, "")).filter(Boolean);
+
 // The clock the bot is told it lives in. Every session gets this in its prompt, so
 // a wrong zone makes the bot wrong about "today" — and about anything it schedules.
 // Defaults to the host's own zone rather than to whoever wrote the code.
@@ -756,14 +776,14 @@ client.on("messageCreate", async (msg) => {
     }
 
     // Exactly "stop" / "/stop" — the historical form, always treated as a stop.
-    const stopPattern = /^(?:<@!?\d+>\s*)*(?:\/stop|stop)$/i;
+    const stopPattern = new RegExp(`^(?:<@!?\\d+>\\s*)*(?:/)?(?:${STOP_ALTERNATION})$`, "i");
     // A message that OPENS with a stop word but carries more text ("stop x, y, z",
     // "stop please", "stop!"). Anchoring on `$` meant these fell through to Claude
     // and SPAWNED A NEW RUN — the exact opposite of the intent, at the one moment
     // the user is trying to halt something. Treated as a stop only when this
     // channel actually has a run in flight, so "stop sending the Friday digest"
     // with nothing running is still a normal request to think about.
-    const stopPrefix = /^(?:<@!?\d+>\s*)*(?:\/)?(?:stop|halt|abort|cancel)\b/i;
+    const stopPrefix = new RegExp(`^(?:<@!?\\d+>\\s*)*(?:/)?(?:${STOP_ALTERNATION})\\b`, "i");
     const hasRun = activeProcesses.has(msg.channel.id);
     const isStopCommand = stopPattern.test(rawContent) || (hasRun && stopPrefix.test(rawContent));
 
@@ -878,7 +898,7 @@ client.on("messageCreate", async (msg) => {
     return;
   }
 
-  const typing = setInterval(() => msg.channel.sendTyping(), 8000);
+  const typing = setInterval(() => msg.channel.sendTyping(), TYPING_INTERVAL_MS);
   msg.channel.sendTyping();
 
   const sendQueue = createSendQueue(msg, reqLog);
@@ -1357,7 +1377,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       // via Bash/Python rather than the Write tool. Widening this extension list
       // would start attaching every repo doc the bot merely mentions, so new file
       // types go through the two routes above instead.
-      const FILE_EXTENSIONS = /\.(csv|pdf|xlsx|png|jpg)$/i;
+      const FILE_EXTENSIONS = new RegExp(`\\.(${ATTACH_EXTENSIONS.join("|")})$`, "i");
       const pathMatches = fullResponse.match(/(?:^|[\s`'"])(\/?(?:[\w.-]+\/)*[\w.-]+\.\w{2,4})(?:[\s`'"]|$)/gm) || [];
       for (const match of pathMatches) {
         const cleaned = match.trim().replace(/^[`'"]+|[`'"]+$/g, "");
@@ -1564,7 +1584,7 @@ function summarizeBufferLines(lines) {
       cwd: CLAUDE_CWD,
       env: cleanEnv,
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: 120000,
+      timeout: SUMMARIZE_TIMEOUT_MS,
     });
 
     let buf = "";
@@ -1720,7 +1740,7 @@ function summarizeWithClaude(channelName, date, messages) {
       cwd: CLAUDE_CWD,
       env: cleanEnv,
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: 120000,
+      timeout: SUMMARIZE_TIMEOUT_MS,
     });
 
     let buf = "";
@@ -1822,7 +1842,7 @@ if (SUMMARIZE_INTERVAL_MS > 0) {
   setTimeout(() => {
     runSummarizer();
     setInterval(runSummarizer, SUMMARIZE_INTERVAL_MS);
-  }, 10000);
+  }, SUMMARIZER_START_DELAY_MS);
   log.info({ intervalMs: SUMMARIZE_INTERVAL_MS, channels: SUMMARIZE_CHANNELS }, "Background summarizer enabled");
 }
 

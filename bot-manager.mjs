@@ -27,6 +27,18 @@ const LOG_FILE = join(__dirname, `${BOT_NAME}.log`);
 const BOT_SCRIPT = join(__dirname, "bot.js");
 const isWindows = process.platform === "win32";
 
+// Supervision waits. Hardcoded here for long enough that a slow host looked like
+// a failed start: the manager gave up after 2s and reported failure while the bot
+// was still connecting.
+// Named literally rather than through a computed key: a setting you cannot grep
+// for is a setting nobody finds, and the docs-vs-code test cannot see it either.
+const num = (raw, def) => {
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : def;
+};
+const START_CONFIRM_MS = num(process.env.BOT_START_CONFIRM_MS, 2000);
+const STOP_TIMEOUT_MS = num(process.env.BOT_STOP_TIMEOUT_MS, 5000);
+
 /** Last fatal/error line the bot logged — the cause, not just "it failed". */
 function lastErrorLine() {
   try {
@@ -123,7 +135,7 @@ function start() {
       process.exit(1);
     }
     process.exit(0);
-  }, 2000);
+  }, START_CONFIRM_MS);
 }
 
 function stop() {
@@ -147,7 +159,7 @@ function stop() {
   }
 
   // Wait for graceful shutdown (up to 5s)
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + STOP_TIMEOUT_MS;
   const poll = setInterval(() => {
     if (!isRunning(pid) || Date.now() > deadline) {
       clearInterval(poll);
@@ -172,7 +184,7 @@ function restart() {
   if (isRunning(pid)) {
     stop();
     // Wait for stop to complete before starting
-    const deadline = Date.now() + 6000;
+    const deadline = Date.now() + STOP_TIMEOUT_MS + 1000;
     const poll = setInterval(() => {
       if (!isRunning(pid) || Date.now() > deadline) {
         clearInterval(poll);

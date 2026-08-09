@@ -159,7 +159,10 @@ function summarizeWithClaude(channelName, date, messages) {
       cwd: CLAUDE_CWD,
       env: cleanEnv,
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: 120000, // 2 min per summary
+      // Same setting bot.js uses — one knob, three call sites (see #44).
+      timeout: Number.parseInt(process.env.SUMMARIZE_TIMEOUT_MS, 10) > 0
+        ? Number.parseInt(process.env.SUMMARIZE_TIMEOUT_MS, 10)
+        : 120000,
     });
 
     let buffer = "";
