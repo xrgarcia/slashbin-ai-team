@@ -7,6 +7,7 @@ const { join } = require("path");
 const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
 const pino = require("pino");
+const summarizeCore = require("./lib/summarize-core");
 
 // --- Logger ---
 const log = pino({
@@ -523,7 +524,7 @@ async function rotateBuffer() {
       try {
         const summary = await summarizeBufferLines(oldLines);
         const date = new Date().toISOString().split("T")[0];
-        writeSummary("buffer-rotation", date, oldLines.length, summary);
+        writeSummary("buffer-rotation", date, oldLines.length, summary, null, "buffer-rotation");
         rotLog.info({ date, lines: oldLines.length }, "Rotation summary saved");
       } catch (err) {
         rotLog.warn({ err: err.message }, "Failed to summarize during rotation, trimming anyway");
@@ -1778,89 +1779,14 @@ function splitMessage(text) {
 // --- Buffer rotation summarizer ---
 
 function summarizeBufferLines(lines) {
-  return new Promise((resolve, reject) => {
-    const transcript = lines.join("\n");
-
-    const prompt = [
-      "Summarize this conversation buffer that is being rotated out.",
-      "",
-      "Create a structured summary with:",
-      "- **Topics discussed** — what subjects came up",
-      "- **Decisions made** — any conclusions or agreements",
-      "- **Action items** — tasks assigned or next steps identified",
-      "- **Key context** — important facts, debugging results, or technical details worth remembering",
-      "",
-      "Be thorough but concise. Preserve specific details like error messages, file paths, issue numbers, and names.",
-      "Note which channels and participants were involved.",
-      "Do NOT add commentary — just summarize what happened.",
-      "",
-      "```",
-      transcript,
-      "```",
-    ].join("\n");
-
-    const args = [
-      "--output-format", "stream-json",
-      "--verbose",
-      ...permissionArgs("summarizer"),
-      "--append-system-prompt", "You are a summarization assistant. Output only the summary, no preamble. Keep it under 2000 characters.",
-      "-p", "--", prompt,
-    ];
-
-    const cleanEnv = { ...process.env };
-    delete cleanEnv.CLAUDECODE;
-    delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
-    delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
-    delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
-
-    const child = spawn(CLAUDE_BIN, args, {
-      cwd: CLAUDE_CWD,
-      env: cleanEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: SUMMARIZE_TIMEOUT_MS,
-    });
-
-    let buf = "";
-    let result = "";
-
-    child.stdout.on("data", (data) => {
-      buf += data.toString();
-      const jsonLines = buf.split("\n");
-      buf = jsonLines.pop();
-
-      for (const line of jsonLines) {
-        if (!line.trim()) continue;
-        try {
-          const event = JSON.parse(line);
-          if (event.type === "assistant" && event.message?.content) {
-            for (const block of event.message.content) {
-              if (block.type === "text") result += block.text;
-            }
-          }
-        } catch { /* skip */ }
-      }
-    });
-
-    child.on("close", (code) => {
-      if (buf.trim()) {
-        try {
-          const event = JSON.parse(buf);
-          if (event.type === "assistant" && event.message?.content) {
-            for (const block of event.message.content) {
-              if (block.type === "text") result += block.text;
-            }
-          }
-        } catch { /* ignore */ }
-      }
-
-      if (code !== 0) {
-        reject(new Error(`Claude exited with code ${code}`));
-        return;
-      }
-      resolve(result.trim());
-    });
-
-    child.on("error", (err) => reject(err));
+  return summarizeCore.summarize({
+    transcript: lines.join("\n"),
+    kind: "buffer-rotation",
+    claudeBin: CLAUDE_BIN,
+    cwd: CLAUDE_CWD,
+    model: process.env.SUMMARIZE_MODEL || process.env.CLAUDE_MODEL,
+    timeoutMs: SUMMARIZE_TIMEOUT_MS,
+    permissionArgs: permissionArgs("summarizer"),
   });
 }
 
@@ -1894,39 +1820,11 @@ function saveCheckpoints(checkpoints) {
  * sanitise to the same one). Without it the second channel's summaries append
  * into the first channel's file and the two conversations interleave.
  */
-function writeSummary(channelName, date, messageCount, summary, channelId = null) {
-  mkdirSync(HISTORY_DIR, { recursive: true });
-  const stamp = new Date().toLocaleTimeString("en-US", { timeZone: BOT_TIMEZONE, hour12: false });
-
-  let filepath = join(HISTORY_DIR, `${date}-${channelName}.md`);
-  let existing = "";
-  try { existing = readFileSync(filepath, "utf8"); } catch { /* first batch of the day */ }
-
-  // Same filename, different channel -> give this one its own file rather than
-  // interleaving two conversations under one heading.
-  if (existing && channelId) {
-    const owner = /^<!-- channel: (\S+) -->$/m.exec(existing);
-    if (owner && owner[1] !== String(channelId)) {
-      filepath = join(HISTORY_DIR, `${date}-${channelName}-${channelId}.md`);
-      try { existing = readFileSync(filepath, "utf8"); } catch { existing = ""; }
-    }
-  }
-
-  const header = existing
-    ? ""
-    : [`# ${channelName} — ${date}`, channelId ? `<!-- channel: ${channelId} -->` : "", ""]
-        .filter((l) => l !== null).join("\n") + "\n";
-
-  const section = [
-    `> ${messageCount} messages summarized at ${stamp}`,
-    "",
-    summary,
-    "",
-    "",
-  ].join("\n");
-
-  writeFileSync(filepath, existing ? existing + section : header + section);
-  return filepath;
+function writeSummary(channelName, date, messageCount, summary, channelId = null, kind = "channel-day") {
+  return summarizeCore.writeSummary({
+    historyDir: HISTORY_DIR, channelName, date, messageCount, summary, channelId, kind,
+    timezone: BOT_TIMEZONE,
+  });
 }
 
 async function fetchMessagesSince(channel, afterId) {
@@ -1967,90 +1865,19 @@ function groupByDate(messages) {
 }
 
 function summarizeWithClaude(channelName, date, messages) {
-  return new Promise((resolve, reject) => {
-    const transcript = messages
-      .map((m) => `[${m.timestamp}] ${m.isBot ? "(bot) " : ""}${m.author}: ${m.content}`)
-      .join("\n");
-
-    const prompt = [
-      `Summarize this Discord conversation from #${channelName} on ${date}.`,
-      "",
-      "Create a structured summary with:",
-      "- **Topics discussed** — what subjects came up",
-      "- **Decisions made** — any conclusions or agreements",
-      "- **Action items** — tasks assigned or next steps identified",
-      "- **Key context** — important facts, debugging results, or technical details worth remembering",
-      "",
-      "Be thorough but concise. Preserve specific details like error messages, file paths, issue numbers, and names.",
-      "Do NOT add commentary — just summarize what happened.",
-      "",
-      "```",
-      transcript,
-      "```",
-    ].join("\n");
-
-    const args = [
-      "--output-format", "stream-json",
-      "--verbose",
-      ...permissionArgs("summarizer"),
-      "--append-system-prompt", "You are a summarization assistant. Output only the summary, no preamble. Keep it under 2000 characters.",
-      "-p", "--", prompt,
-    ];
-
-    const cleanEnv = { ...process.env };
-    delete cleanEnv.CLAUDECODE;
-    delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
-    delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
-    delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
-
-    const child = spawn(CLAUDE_BIN, args, {
-      cwd: CLAUDE_CWD,
-      env: cleanEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: SUMMARIZE_TIMEOUT_MS,
-    });
-
-    let buf = "";
-    let result = "";
-
-    child.stdout.on("data", (data) => {
-      buf += data.toString();
-      const jsonLines = buf.split("\n");
-      buf = jsonLines.pop();
-
-      for (const line of jsonLines) {
-        if (!line.trim()) continue;
-        try {
-          const event = JSON.parse(line);
-          if (event.type === "assistant" && event.message?.content) {
-            for (const block of event.message.content) {
-              if (block.type === "text") result += block.text;
-            }
-          }
-        } catch { /* skip */ }
-      }
-    });
-
-    child.on("close", (code) => {
-      if (buf.trim()) {
-        try {
-          const event = JSON.parse(buf);
-          if (event.type === "assistant" && event.message?.content) {
-            for (const block of event.message.content) {
-              if (block.type === "text") result += block.text;
-            }
-          }
-        } catch { /* ignore */ }
-      }
-
-      if (code !== 0) {
-        reject(new Error(`Claude exited with code ${code}`));
-        return;
-      }
-      resolve(result.trim());
-    });
-
-    child.on("error", (err) => reject(err));
+  const transcript = messages
+    .map((m) => `[${m.timestamp}] ${m.isBot ? "(bot) " : ""}${m.author}: ${m.content}`)
+    .join("\n");
+  return summarizeCore.summarize({
+    transcript,
+    kind: "channel-day",
+    channelName,
+    date,
+    claudeBin: CLAUDE_BIN,
+    cwd: CLAUDE_CWD,
+    model: process.env.SUMMARIZE_MODEL || process.env.CLAUDE_MODEL,
+    timeoutMs: SUMMARIZE_TIMEOUT_MS,
+    permissionArgs: permissionArgs("summarizer"),
   });
 }
 

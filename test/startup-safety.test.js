@@ -135,29 +135,49 @@ check("the shared outbox is only swept when nothing else is running", () => {
     "the shared-root fallback must be guarded on no other run being in flight");
 });
 
+check("there is exactly ONE summarization implementation", () => {
+  // It lived in four places across two files: two prompt-and-spawn copies in
+  // bot.js, one in summarize.js, and writeSummary separately in both. Every
+  // change had to be made two or three times — BOT_PERMISSION_MODE needed three
+  // identical edits, SUMMARIZE_TIMEOUT_MS three, and the writeSummary overwrite
+  // bug had to be fixed twice because both copies carried it.
+  const core = readFileSync(join(REPO, "lib/summarize-core.js"), "utf8");
+  const sum = readFileSync(join(REPO, "summarize.js"), "utf8");
+
+  const promptCopies = [bot, sum, core].filter((f) => /Topics discussed/.test(f)).length;
+  assert.strictEqual(promptCopies, 1, "the summarization prompt exists in more than one file");
+
+  assert.ok(!/spawn\(CLAUDE_BIN/.test(sum), "summarize.js still spawns Claude itself");
+  // bot.js keeps exactly one spawn — the agent. Summarization is not it.
+  assert.strictEqual((bot.match(/spawn\(CLAUDE_BIN/g) || []).length, 1,
+    "bot.js should spawn Claude once (the agent); summarization goes through the module");
+
+  for (const f of [bot, sum]) {
+    assert.ok(!/function writeSummary\([^)]*\)\s*\{[\s\S]{0,200}writeFileSync/.test(f),
+      "a local writeSummary still writes files directly instead of delegating");
+  }
+});
+
 check("summaries APPEND — a day's history is never overwritten", () => {
-  // The summarizer runs on an interval and the checkpoint means each run only
-  // covers messages since the last one. writeFileSync therefore replaced a whole
-  // day's summary with a summary of the last few minutes. Observed 2026-08-09:
-  // a day with 14 completed conversations had a summary reading "6 messages".
-  const fn = /function writeSummary\([\s\S]*?\n}/.exec(bot);
-  assert.ok(fn, "writeSummary not found");
+  const core = readFileSync(join(REPO, "lib/summarize-core.js"), "utf8");
+  const fn = /function writeSummary\([\s\S]*?\n}/.exec(core);
+  assert.ok(fn, "writeSummary not found in the module");
   assert.ok(/existing \+ section/.test(fn[0]), "writeSummary still overwrites the day's file");
   assert.ok(/readFileSync\(filepath/.test(fn[0]), "it must read what is already there before writing");
 });
 
 check("two channels sharing a name do not interleave", () => {
-  const fn = /function writeSummary\([\s\S]*?\n}/.exec(bot)[0];
+  const core = readFileSync(join(REPO, "lib/summarize-core.js"), "utf8");
+  const fn = /function writeSummary\([\s\S]*?\n}/.exec(core)[0];
   assert.ok(/channel: \$\{channelId\}/.test(fn), "the owning channel must be recorded in the file");
   assert.ok(/-\$\{channelId\}\.md/.test(fn), "a different channel with the same name needs its own file");
 });
 
-check("summarize.js writes summaries the same way bot.js does", () => {
-  const sum = readFileSync(join(REPO, "summarize.js"), "utf8");
-  const fn = /function writeSummary\([\s\S]*?\n}/.exec(sum);
-  assert.ok(fn, "summarize.js has no writeSummary");
-  assert.ok(/existing \+ section/.test(fn[0]),
-    "npm run summarize still overwrites the day — the two copies must agree");
+check("a summary file records what KIND of summary it is", () => {
+  // Channel-day and buffer-rotation summaries land in the same directory and
+  // were distinguishable only by guessing from the filename.
+  const core = readFileSync(join(REPO, "lib/summarize-core.js"), "utf8");
+  assert.ok(/kind: \$\{kind\}/.test(core), "no kind recorded in the file");
 });
 
 console.log("\nStop — asking a bot to stop must not answer with an error");
