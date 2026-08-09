@@ -66,6 +66,19 @@ the upgrade is one line.
   `stop` / `halt` / `abort` / `cancel` now stops a run in flight. With nothing
   running it is still an ordinary message, so "stop sending the Friday digest"
   remains a request the bot thinks about rather than a silent no-op.
+- **A file written for one channel could be attached in another.** The outbox was
+  a single shared directory, `MAX_CONCURRENT_CLAUDE` defaults to 2, and each run
+  claimed every file whose mtime fell after its own start — including the other
+  run's. A document produced for one client could land in another client's
+  channel, which is exactly the separation this project advertises. The outbox is
+  now scoped per channel; the shared root is only swept when nothing else is in
+  flight, so a bot whose own context hardcodes the old path still works.
+- **Two attachments with the same name on one message resolved to one file.** The
+  saved path was keyed on the message id, so two `report.csv` on a single message
+  produced the same path and the already-downloaded short-circuit handed back the
+  first file's contents for the second — the bot described two attachments and
+  read one, silently. Now keyed on the attachment id, which Discord guarantees
+  unique per file.
 - **A failed Discord login no longer leaves a zombie.** `client.login()` was an
   un-awaited promise whose rejection only reached the global handler, so the
   process stayed alive — the WebSocket server and scheduler keep the event loop

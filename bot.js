@@ -644,7 +644,13 @@ async function downloadAttachmentPersistent(attachment, messageId) {
   // attachment.name is user-controlled — strip separators so it cannot escape
   // ATTACHMENTS_DIR.
   const safeName = (attachment.name || "file").replace(/[/\\]/g, "_");
-  const savePath = join(ATTACHMENTS_DIR, `${messageId}-${safeName}`);
+  // Keyed on the ATTACHMENT id, not the message id. A message can carry several
+  // files, and nothing requires their names to differ — two `report.csv` on one
+  // message produced the same path, and the existsSync short-circuit below then
+  // silently handed back the FIRST file's contents for the second one. The bot
+  // would describe two attachments and read one, with no error anywhere.
+  // attachment.id is a Discord snowflake: unique per file, forever.
+  const savePath = join(ATTACHMENTS_DIR, `${attachment.id}-${safeName}`);
 
   // Skip if already downloaded
   if (existsSync(savePath)) return savePath;
@@ -1255,11 +1261,31 @@ function collectMarkedFiles(text) {
 // the user asked for, so allow a tolerance.
 const OUTBOX_MTIME_TOLERANCE_MS = envInt("BOT_OUTBOX_MTIME_TOLERANCE_MS", 2000, { min: 0 });
 
-function collectOutboxFiles(sinceMs) {
+/**
+ * The outbox for ONE channel.
+ *
+ * A single shared outbox leaked across conversations: MAX_CONCURRENT_CLAUDE
+ * defaults to 2, so two runs overlap, and the old collector claimed every file
+ * whose mtime fell after ITS OWN start — including files the other run had just
+ * written for a different channel. A document produced for one client could be
+ * attached to a reply in another client's channel, which is precisely the
+ * separation this project advertises.
+ *
+ * Per CHANNEL is enough, and is stable: activeProcesses is keyed by channel, and
+ * a new message in a channel kills that channel's previous run, so a channel can
+ * never have two runs at once.
+ */
+function channelOutbox(channelId) {
+  const dir = join(OUTBOX_DIR, String(channelId));
+  try { mkdirSync(dir, { recursive: true }); } catch { /* best effort */ }
+  return dir;
+}
+
+function collectOutboxFiles(sinceMs, dir = OUTBOX_DIR) {
   const cutoff = sinceMs - OUTBOX_MTIME_TOLERANCE_MS;
   try {
-    return readdirSync(OUTBOX_DIR)
-      .map(f => join(OUTBOX_DIR, f))
+    return readdirSync(dir)
+      .map(f => join(dir, f))
       .filter(p => {
         try {
           const s = statSync(p);
@@ -1347,6 +1373,10 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 
     const channelContext = `${timeContext}\n\nYou are responding in channel: #${channelName}. Only respond to the message in THIS channel. The conversation buffer contains messages from multiple channels — focus only on #${channelName} context. Do NOT respond to or act on messages from other channels.`;
 
+    // This run's outbox. Per channel, so two concurrent runs cannot claim each
+    // other's files (see channelOutbox).
+    const runOutbox = channelOutbox(channelId);
+
     // Harness mechanics, not personality — appended even when BOT_SYSTEM_PROMPT
     // overrides the base prompt, because these are the only ways files move.
     const fileTransferContext = [
@@ -1354,7 +1384,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "",
       "--- Files ---",
       "RECEIVING: files the user attaches are downloaded and named to you in the prompt as [File attached by the user: ...] or [Image attached by the user: ...], with a local path. Any file type can arrive. Open the path with Read (or Bash for binary formats) before answering — never tell the user nothing was attached when such a line is present.",
-      `SENDING: to hand a file back, either write it into the outbox at ${OUTBOX_DIR} (anything you create there during this reply is attached automatically, any type), or emit a marker [[attach: /absolute/path]] anywhere in your reply. The marker is stripped before the user sees the message. Do not paste large file contents into chat when you can attach the file.`,
+      `SENDING: to hand a file back, either write it into the outbox at ${runOutbox} (anything you create there during this reply is attached automatically, any type), or emit a marker [[attach: /absolute/path]] anywhere in your reply. The marker is stripped before the user sees the message. Do not paste large file contents into chat when you can attach the file.`,
       "--- End files ---",
     ].join("\n");
 
@@ -1484,8 +1514,19 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       for (const p of collectMarkedFiles(fullResponse)) {
         if (existsSync(p) && !writtenFiles.includes(p)) writtenFiles.push(p);
       }
-      for (const p of collectOutboxFiles(startTime)) {
+      // This channel's outbox — unambiguous, whatever else is running.
+      for (const p of collectOutboxFiles(startTime, runOutbox)) {
         if (!writtenFiles.includes(p)) writtenFiles.push(p);
+      }
+      // Backward compatibility: a bot whose own context hardcodes the old shared
+      // outbox path still works — but only when nothing else is in flight, since
+      // that is the only moment a file in the shared root is unambiguously ours.
+      if (activeProcesses.size === 0) {
+        for (const p of collectOutboxFiles(startTime, OUTBOX_DIR)) {
+          if (!writtenFiles.includes(p)) writtenFiles.push(p);
+        }
+      } else {
+        reqLog.debug({ active: activeProcesses.size }, "Skipping shared outbox sweep — another run is in flight");
       }
 
       // Legacy route, deliberately kept narrow: Claude often names a file it made
