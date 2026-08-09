@@ -138,6 +138,9 @@ const ATTACH_RE = new RegExp(`\\.(${ATTACH_EXTENSIONS.join("|")})$`, "i");
 const PROGRESS_ENABLED = process.env.BOT_PROGRESS_ENABLED !== "false";
 // Discord rate-limits edits per channel. Coalesce rather than edit per tool call.
 const PROGRESS_INTERVAL_MS = envInt("BOT_PROGRESS_INTERVAL_MS", 2500, { min: 1000 });
+// How fast the FIRST update appears. Short on purpose: the point of progress is
+// to show up early, and a full interval of silence looks identical to no feature.
+const PROGRESS_FIRST_MS = envInt("BOT_PROGRESS_FIRST_MS", 800, { min: 100 });
 
 // The clock the bot is told it lives in. Every session gets this in its prompt, so
 // a wrong zone makes the bot wrong about "today" — and about anything it schedules.
@@ -1079,11 +1082,20 @@ function createProgressReporter(msg, reqLog) {
     sending = true;
     const body = `-# ⚙️ working — ${count} step${count === 1 ? "" : "s"} · ${latest}`;
     try {
-      if (statusMsg) await statusMsg.edit(body);
-      else statusMsg = await msg.reply(body);
+      if (statusMsg) {
+        await statusMsg.edit(body);
+        reqLog.info({ steps: count, latest }, "Progress updated");
+      } else {
+        statusMsg = await msg.reply(body);
+        reqLog.info({ steps: count, latest }, "Progress posted");
+      }
     } catch (err) {
-      // Never let progress reporting break the actual request.
-      reqLog.debug({ err: err.message }, "progress update failed");
+      // Never let progress reporting break the actual request — but SAY SO.
+      // This was debug-level, and the effective level is info, so the first time
+      // progress silently did nothing there was no way to tell whether it had
+      // failed or never run. An invisible failure in an observability feature is
+      // the worst of both.
+      reqLog.warn({ err: err.message, steps: count }, "Progress update FAILED");
     } finally {
       sending = false;
     }
@@ -1094,13 +1106,26 @@ function createProgressReporter(msg, reqLog) {
       count++;
       latest = label(name, input);
       if (timer) return;                     // an update is already scheduled
-      timer = setTimeout(() => { timer = null; render(); }, PROGRESS_INTERVAL_MS);
+      // Leading edge: show something almost immediately, then throttle. Waiting a
+      // full interval before the FIRST update meant a 14s request displayed
+      // status for only its last 5s — long enough to miss entirely, which is
+      // exactly what happened on the first live test.
+      const delay = statusMsg ? PROGRESS_INTERVAL_MS : PROGRESS_FIRST_MS;
+      timer = setTimeout(() => { timer = null; render(); }, delay);
     },
     async finish() {
       finished = true;
       if (timer) { clearTimeout(timer); timer = null; }
-      if (!statusMsg) return;
-      try { await statusMsg.delete(); } catch { /* already gone, or no permission */ }
+      if (!statusMsg) {
+        reqLog.info({ steps: count }, "Progress: nothing posted (run finished first)");
+        return;
+      }
+      try {
+        await statusMsg.delete();
+        reqLog.info({ steps: count }, "Progress cleared");
+      } catch (err) {
+        reqLog.warn({ err: err.message }, "Progress cleanup FAILED — a status message may be left behind");
+      }
       statusMsg = null;
     },
   };
@@ -1562,8 +1587,16 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 function handleStreamEvent(event, reqLog, sendMessage, state) {
   switch (event.type) {
     case "system":
-      reqLog.info({ sessionId: event.session_id }, "Claude session started");
-      if (event.session_id) state.sessionId = event.session_id;
+      // `system` arrives repeatedly during a run, not once — 29 of them landed in
+      // one request on 2026-08-09, all logged identically as "session started",
+      // burying the two Tool call lines that actually mattered. Only the init
+      // event is the session starting; the rest are noise at info level.
+      if (event.session_id && !state.sessionId) {
+        state.sessionId = event.session_id;
+        reqLog.info({ sessionId: event.session_id }, "Claude session started");
+      } else {
+        reqLog.debug({ subtype: event.subtype }, "Stream system event");
+      }
       break;
 
     case "assistant":
