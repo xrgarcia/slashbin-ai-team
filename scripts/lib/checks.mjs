@@ -7,7 +7,7 @@
  * this file may write a token, and nothing may write a value read from a config
  * file whose key looks credential-bearing.
  */
-import { existsSync, statSync, readFileSync, readdirSync } from "fs";
+import { existsSync, statSync, readFileSync, readdirSync, mkdirSync, writeFileSync, unlinkSync } from "fs";
 import { join, resolve } from "path";
 import { createServer } from "net";
 import { execFile } from "child_process";
@@ -129,6 +129,29 @@ export async function checkPortFree(port, label = "WS_PORT") {
   return free
     ? ok(label, `${p} is free`)
     : bad(label, `${p} is already in use`, `Another process (often a second bot) holds ${p}. Give each bot a unique ${label}.`);
+}
+
+/**
+ * Where this bot's memory lives, and whether it can actually be written.
+ * A read-only or full volume surfaces today as a summarizer that quietly saves
+ * nothing — the work looks successful and reaches no one.
+ */
+export function checkStateDir(stateDir, historyDir, harnessDir) {
+  const root = resolve(stateDir || historyDir || join(harnessDir, ".bot-history"));
+  try {
+    mkdirSync(root, { recursive: true });
+    const probe = join(root, ".doctor-write-probe");
+    writeFileSync(probe, "ok");
+    unlinkSync(probe);
+  } catch (e) {
+    return bad("State directory", `${root} is not writable (${e.message})`,
+      "The bot cannot save summaries, sessions or attachments here. Fix permissions, or point BOT_STATE_DIR somewhere writable.");
+  }
+  const inRepo = existsSync(join(root, ".git")) || existsSync(join(resolve(root, ".."), ".git"));
+  return inRepo
+    ? warn("State directory", `${root} — writable, inside a git working tree`,
+        "Fine for summaries, which are meant to be portable. But point BOT_ATTACHMENTS_DIR outside any repo: inbound files are arbitrary binaries, and `git clean -x` or a re-clone will take them.")
+    : ok("State directory", `${root} — writable`);
 }
 
 export function checkAllowlist(allowedUsers) {

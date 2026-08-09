@@ -12,7 +12,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import {
   checkNode, checkClaudeCli, checkDiscordToken, checkMessageContentIntent,
-  checkClaudeCwd, checkPortFree, checkAllowlist, checkEcosystem, render,
+  checkClaudeCwd, checkPortFree, checkAllowlist, checkEcosystem, checkStateDir, render,
 } from "./lib/checks.mjs";
 
 const HARNESS = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -26,6 +26,7 @@ results.push(await checkDiscordToken(process.env.DISCORD_TOKEN));
 results.push(await checkMessageContentIntent(process.env.DISCORD_TOKEN));
 results.push(await checkClaudeCwd(process.env.CLAUDE_CWD || process.cwd(), HARNESS));
 results.push(await checkPortFree(process.env.WS_PORT || 9800));
+results.push(checkStateDir(process.env.BOT_STATE_DIR, process.env.BOT_HISTORY_DIR, HARNESS));
 results.push(checkAllowlist(process.env.ALLOWED_USERS));
 results.push(...checkEcosystem(join(HARNESS, "ecosystem.config.js"), HARNESS));
 

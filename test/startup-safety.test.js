@@ -73,6 +73,38 @@ check("ALLOWED_USERS gates humans only — it must not veto an allowlisted bot",
   assert.ok(m, "the ALLOWED_USERS check must be scoped to non-bot authors");
 });
 
+console.log("\nState root — a bot's memory lives in one movable place");
+
+check("BOT_STATE_DIR exists and defaults to BOT_HISTORY_DIR", () => {
+  assert.ok(/const STATE_DIR = process\.env\.BOT_STATE_DIR/.test(bot), "no state root");
+  assert.ok(/: HISTORY_DIR;/.test(bot),
+    "the default must be BOT_HISTORY_DIR, so an existing install resolves to identical paths");
+});
+
+check("the buffer and sessions live under the state root, not the install dir", () => {
+  // These were pinned to __dirname, so the two artifacts recall needs most were
+  // the two you could not move — and a re-clone stranded them.
+  assert.ok(/const BUFFER_FILE = join\(STATE_DIR, "buffer\.txt"\)/.test(bot),
+    "buffer still pinned to the install directory");
+  assert.ok(/const SESSION_FILE = join\(STATE_DIR, "sessions\.json"\)/.test(bot),
+    "sessions still pinned to the install directory");
+});
+
+check("legacy state is migrated, never silently discarded", () => {
+  const fn = /function migrateLegacyState\(\)[\s\S]*?\n}/.exec(bot);
+  assert.ok(fn, "no migration — an upgrade would strand the buffer and sessions");
+  assert.ok(/renameSync/.test(fn[0]), "migration must move the file");
+  assert.ok(/existsSync\(to\)/.test(fn[0]),
+    "must not overwrite an existing destination — leave it for a human instead");
+  assert.ok(/log\.info|log\.warn/.test(fn[0]), "a silent migration is indistinguishable from data loss");
+});
+
+check("resolved paths are published to skills, so nothing has to hardcode one", () => {
+  for (const v of ["BOT_STATE_DIR", "BOT_SUMMARIES_DIR", "BOT_BUFFER_FILE", "BOT_SESSIONS_FILE", "BOT_OUTBOX_DIR"]) {
+    assert.ok(new RegExp(`cleanEnv\\.${v} =`).test(bot), `${v} is not exported to the child`);
+  }
+});
+
 console.log("\nFiles — collisions must be impossible, not unlikely");
 
 check("attachments are keyed on the ATTACHMENT id, not the message id", () => {

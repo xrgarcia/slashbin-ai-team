@@ -227,7 +227,8 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 ### Memory
 | Variable | Default | Description |
 |---|---|---|
-| `BOT_HISTORY_DIR` | `.bot-history` | Summaries, attachments, outbox, schedules |
+| `BOT_STATE_DIR` | `BOT_HISTORY_DIR` | **One root for everything a bot remembers** — buffer, sessions, and the default parent for the rest |
+| `BOT_HISTORY_DIR` | `.bot-history` | Daily summaries, schedules, job history |
 | `BOT_ATTACHMENTS_DIR` | `<history>/attachments` | Inbound files. Worth pointing **outside any git repo** — these are arbitrary user-supplied binaries, and a working tree loses them to `git clean -x` or a re-clone |
 | `BOT_OUTBOX_DIR` | `<history>/outbox` | Files written here are sent to the user |
 | `SUMMARIZE_INTERVAL_MS` | `0` *(off)* | Background summarization interval |
