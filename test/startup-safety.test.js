@@ -103,6 +103,31 @@ check("the shared outbox is only swept when nothing else is running", () => {
     "the shared-root fallback must be guarded on no other run being in flight");
 });
 
+check("summaries APPEND — a day's history is never overwritten", () => {
+  // The summarizer runs on an interval and the checkpoint means each run only
+  // covers messages since the last one. writeFileSync therefore replaced a whole
+  // day's summary with a summary of the last few minutes. Observed 2026-08-09:
+  // a day with 14 completed conversations had a summary reading "6 messages".
+  const fn = /function writeSummary\([\s\S]*?\n}/.exec(bot);
+  assert.ok(fn, "writeSummary not found");
+  assert.ok(/existing \+ section/.test(fn[0]), "writeSummary still overwrites the day's file");
+  assert.ok(/readFileSync\(filepath/.test(fn[0]), "it must read what is already there before writing");
+});
+
+check("two channels sharing a name do not interleave", () => {
+  const fn = /function writeSummary\([\s\S]*?\n}/.exec(bot)[0];
+  assert.ok(/channel: \$\{channelId\}/.test(fn), "the owning channel must be recorded in the file");
+  assert.ok(/-\$\{channelId\}\.md/.test(fn), "a different channel with the same name needs its own file");
+});
+
+check("summarize.js writes summaries the same way bot.js does", () => {
+  const sum = readFileSync(join(REPO, "summarize.js"), "utf8");
+  const fn = /function writeSummary\([\s\S]*?\n}/.exec(sum);
+  assert.ok(fn, "summarize.js has no writeSummary");
+  assert.ok(/existing \+ section/.test(fn[0]),
+    "npm run summarize still overwrites the day — the two copies must agree");
+});
+
 console.log("\nStop — asking a bot to stop must not answer with an error");
 
 check("a user-initiated stop is marked as intentional", () => {

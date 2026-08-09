@@ -1811,19 +1811,53 @@ function saveCheckpoints(checkpoints) {
   writeFileSync(CHECKPOINT_FILE, JSON.stringify(checkpoints, null, 2));
 }
 
-function writeSummary(channelName, date, messageCount, summary) {
+/**
+ * Write one summary batch for a channel-day.
+ *
+ * APPENDS. It used to writeFileSync, which silently destroyed the day's history:
+ * the summarizer runs on an interval, the checkpoint means each run only fetches
+ * messages since the last one, so every run replaced a whole day's summary with a
+ * summary of the last few minutes. Observed 2026-08-09 on this host — a day with
+ * 14 completed conversations had a "daily" summary reading "6 messages
+ * summarized", written at 11:34. Everything before 11:34 was gone, and the recall
+ * paths that read these files had no way to know.
+ *
+ * `channelId` disambiguates two Discord channels that share a name (or that
+ * sanitise to the same one). Without it the second channel's summaries append
+ * into the first channel's file and the two conversations interleave.
+ */
+function writeSummary(channelName, date, messageCount, summary, channelId = null) {
   mkdirSync(HISTORY_DIR, { recursive: true });
-  const filename = `${date}-${channelName}.md`;
-  const filepath = join(HISTORY_DIR, filename);
-  const content = [
-    `# ${channelName} — ${date}`,
-    "",
-    `> ${messageCount} messages summarized`,
+  const stamp = new Date().toLocaleTimeString("en-US", { timeZone: BOT_TIMEZONE, hour12: false });
+
+  let filepath = join(HISTORY_DIR, `${date}-${channelName}.md`);
+  let existing = "";
+  try { existing = readFileSync(filepath, "utf8"); } catch { /* first batch of the day */ }
+
+  // Same filename, different channel -> give this one its own file rather than
+  // interleaving two conversations under one heading.
+  if (existing && channelId) {
+    const owner = /^<!-- channel: (\S+) -->$/m.exec(existing);
+    if (owner && owner[1] !== String(channelId)) {
+      filepath = join(HISTORY_DIR, `${date}-${channelName}-${channelId}.md`);
+      try { existing = readFileSync(filepath, "utf8"); } catch { existing = ""; }
+    }
+  }
+
+  const header = existing
+    ? ""
+    : [`# ${channelName} — ${date}`, channelId ? `<!-- channel: ${channelId} -->` : "", ""]
+        .filter((l) => l !== null).join("\n") + "\n";
+
+  const section = [
+    `> ${messageCount} messages summarized at ${stamp}`,
     "",
     summary,
     "",
+    "",
   ].join("\n");
-  writeFileSync(filepath, content);
+
+  writeFileSync(filepath, existing ? existing + section : header + section);
   return filepath;
 }
 
@@ -1984,7 +2018,7 @@ async function runSummarizer() {
         const dayMessages = groups[date];
         try {
           const summary = await summarizeWithClaude(channelName, date, dayMessages);
-          writeSummary(channelName, date, dayMessages.length, summary);
+          writeSummary(channelName, date, dayMessages.length, summary, channelId);
           totalSummaries++;
           sumLog.info({ channel: channelName, date, messages: dayMessages.length }, "Summary saved");
         } catch (err) {
