@@ -1,0 +1,91 @@
+/**
+ * A bot that cannot reach Discord must DIE, not linger.
+ *
+ * `client.login()` was called as a bare un-awaited promise. When it rejected the
+ * only thing that caught it was the global `unhandledRejection` handler, which
+ * logs and returns — and the process then stayed alive indefinitely, because the
+ * WebSocket server and the scheduler's setInterval keep the event loop busy.
+ *
+ * The result, reproduced on a clean clone 2026-08-09: `npm start` printed
+ * "Bot started", `npm run status` printed "Bot is running", and the bot was
+ * permanently deaf. That is the worst state to hand a new user, and under PM2 it
+ * means a bot on a revoked token reports `online` forever.
+ *
+ * These assertions run against the source text — bot.js cannot be require()d
+ * because importing it logs a live bot into Discord.
+ */
+const { readFileSync } = require("fs");
+const { join } = require("path");
+const assert = require("assert");
+
+const REPO = join(__dirname, "..");
+const bot = readFileSync(join(REPO, "bot.js"), "utf8");
+const manager = readFileSync(join(REPO, "bot-manager.mjs"), "utf8");
+
+let pass = 0, fail = 0;
+function check(label, fn) {
+  try { fn(); console.log(`  ok   ${label}`); pass++; }
+  catch (e) { console.log(`  FAIL ${label}\n       ${e.message}`); fail++; }
+}
+
+console.log("\nStartup safety — a failed login must be fatal");
+
+check("client.login has a rejection handler attached", () => {
+  const m = /client\.login\([^)]*\)\s*\.catch\(/.test(bot);
+  assert.ok(m, "client.login() is un-awaited with no .catch — a rejected login would leave a zombie");
+});
+
+check("the login rejection handler exits non-zero", () => {
+  const start = bot.indexOf("client.login(");
+  assert.ok(start > -1, "client.login not found");
+  const tail = bot.slice(start);
+  assert.ok(/process\.exit\(\s*[1-9]/.test(tail), "login failure must exit non-zero, not just log");
+});
+
+check("unhandledRejection is not the only guard on login", () => {
+  // The handler may exist — it should just never be what catches a login failure.
+  const loginIdx = bot.indexOf("client.login(");
+  const catchIdx = bot.indexOf(".catch(", loginIdx);
+  assert.ok(catchIdx > -1 && catchIdx - loginIdx < 200, "no .catch near client.login");
+});
+
+console.log("\nStartup validation — fail while someone is watching");
+
+check("CLAUDE_CWD is validated at startup", () => {
+  assert.ok(/existsSync\(CLAUDE_CWD\)/.test(bot), "CLAUDE_CWD is never checked for existence");
+  assert.ok(/isDirectory\(\)/.test(bot), "CLAUDE_CWD is never checked to be a directory");
+});
+
+check("an empty ALLOWED_USERS produces a visible warning", () => {
+  assert.ok(/ALLOWED_USER_IDS\.length === 0/.test(bot), "no empty-allowlist check");
+  assert.ok(/log\.warn\(/.test(bot), "the empty-allowlist case must warn, not stay silent");
+});
+
+check("BOT_REQUIRE_ALLOWLIST can refuse to start open", () => {
+  assert.ok(/BOT_REQUIRE_ALLOWLIST/.test(bot), "no strict-allowlist opt-in");
+});
+
+console.log("\nProcess manager — one checkout, many bots");
+
+check("manager scopes pid/log by BOT_NAME", () => {
+  assert.ok(/\.\$\{BOT_NAME\}\.pid/.test(manager), "PID file is not scoped by BOT_NAME");
+  assert.ok(/\$\{BOT_NAME\}\.log/.test(manager), "log file is not scoped by BOT_NAME");
+});
+
+check("manager loads .env so it agrees with bot.js on BOT_NAME", () => {
+  assert.ok(/dotenv\/config/.test(manager), "manager does not load .env — BOT_NAME set there would desync the two");
+});
+
+check("manager distinguishes connected from merely alive", () => {
+  assert.ok(/\.ready/.test(manager), "manager has no readiness signal, so status cannot tell deaf from healthy");
+});
+
+check("bot writes a readiness marker only once Discord is ready", () => {
+  assert.ok(/markReady\(\)/.test(bot), "no readiness marker written");
+  const readyIdx = bot.indexOf('client.once("ready"');
+  assert.ok(readyIdx > -1, "no ready handler");
+  assert.ok(bot.indexOf("markReady()", readyIdx) - readyIdx < 100, "markReady must be inside the ready handler");
+});
+
+console.log(`\n${pass} passed, ${fail} failed\n`);
+process.exit(fail ? 1 : 0);
