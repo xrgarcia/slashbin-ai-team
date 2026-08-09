@@ -142,6 +142,35 @@ const ATTACH_EXTENSIONS = (process.env.BOT_ATTACH_EXTENSIONS || "csv,pdf,xlsx,pn
 // and making only one configurable is how a setting silently half-works.
 const ATTACH_RE = new RegExp(`\\.(${ATTACH_EXTENSIONS.join("|")})$`, "i");
 
+// --- Reserved commands ---
+// The harness intercepts these before Claude ever sees the message. Declared ONCE
+// so the collision warning, the injected context and the docs cannot drift from
+// the behaviour — they were three separate literals in the message handler.
+//
+// A bot defining one of these in its own repo gets silently shadowed: the PO bot
+// shipped a /status ("cross-customer status view") that could never run, and
+// still listed it when asked what it could do, because from inside Claude that
+// command is real. Nothing errored. Nothing logged.
+const RESERVED_COMMANDS = ["fresh", "status", ...STOP_WORDS];
+
+/**
+ * Commands in the bot's own project that a reserved name would shadow.
+ * Read from CLAUDE_CWD, which is where Claude Code looks for them.
+ */
+function shadowedCommands() {
+  const hits = [];
+  for (const [dir, suffix] of [[join(CLAUDE_CWD, ".claude", "commands"), ".md"],
+                               [join(CLAUDE_CWD, ".claude", "skills"), ""]]) {
+    let entries = [];
+    try { entries = readdirSync(dir); } catch { continue; }
+    for (const entry of entries) {
+      const name = suffix ? entry.replace(new RegExp(`\\${suffix}$`), "") : entry;
+      if (RESERVED_COMMANDS.includes(name.toLowerCase())) hits.push(join(dir, entry));
+    }
+  }
+  return hits;
+}
+
 // --- Summarization coverage ---
 // SUMMARIZE_CHANNELS defaults to MONITOR_CHANNELS, which answers the wrong
 // question. "Where do I reply unprompted?" and "what is worth remembering?" are
@@ -886,6 +915,13 @@ client.on("shardError", (err) => {
 client.once("ready", () => {
   markReady();
   log.info({ tag: client.user.tag, cwd: CLAUDE_CWD }, "Bot online");
+  const shadowed = shadowedCommands();
+  if (shadowed.length) {
+    log.warn(
+      { shadowed, reserved: RESERVED_COMMANDS },
+      "This bot defines command(s) the harness intercepts first — they can NEVER run. Rename them, or they will keep appearing in the bot's list of what it can do while silently doing nothing."
+    );
+  }
   if (ALLOWED_USER_IDS.length === 0) {
     log.warn(
       "ALLOWED_USERS is not set — EVERY Discord user who can DM this bot or post in a monitored channel can drive it. Set ALLOWED_USERS to your user ID, or BOT_REQUIRE_ALLOWLIST=true to refuse to start without it."
@@ -918,7 +954,7 @@ client.on("messageCreate", async (msg) => {
     const rawContent = msg.content.trim();
 
     // /fresh — clear session for this channel so next message starts a new Claude session
-    if (/^(?:<@!?\d+>\s*)*\/fresh$/i.test(rawContent)) {
+    if (new RegExp(`^(?:<@!?\\d+>\\s*)*/(?:fresh)$`, "i").test(rawContent)) {
       channelSessions.delete(msg.channel.id);
       await msg.reply("Session cleared. Next message starts fresh.");
       return;
@@ -1511,6 +1547,10 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "RECEIVING: files the user attaches are downloaded and named to you in the prompt as [File attached by the user: ...] or [Image attached by the user: ...], with a local path. Any file type can arrive. Open the path with Read (or Bash for binary formats) before answering — never tell the user nothing was attached when such a line is present.",
       `SENDING: to hand a file back, either write it into the outbox at ${runOutbox} (anything you create there during this reply is attached automatically, any type), or emit a marker [[attach: /absolute/path]] anywhere in your reply. The marker is stripped before the user sees the message. Do not paste large file contents into chat when you can attach the file.`,
       "--- End files ---",
+      "",
+      "--- Commands handled by the harness ---",
+      `These are intercepted before you see them, so you will never receive one as a message: ${RESERVED_COMMANDS.map((c) => "/" + c).join(", ")}. If asked what commands are available here, include them: /fresh clears this channel's session, /status reports buffer size and whether a request is running, and any of the stop words halts a run in flight. Do NOT define a command of your own with one of these names — the harness answers first and yours would never run.`,
+      "--- End commands ---",
     ].join("\n");
 
     let systemPrompt;

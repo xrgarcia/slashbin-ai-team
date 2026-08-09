@@ -105,6 +105,44 @@ check("resolved paths are published to skills, so nothing has to hardcode one", 
   }
 });
 
+console.log("\nReserved commands — a swallowed command must not be invisible");
+
+check("the reserved list is declared once, not scattered as literals", () => {
+  // It was three separate literals in the message handler, so the warning, the
+  // injected context and the docs could each drift from the behaviour.
+  assert.ok(/const RESERVED_COMMANDS = \["fresh", "status", \.\.\.STOP_WORDS\]/.test(bot),
+    "no single reserved list");
+});
+
+check("the bot is TOLD which commands the harness owns", () => {
+  // Precedent: the harness already injects a Files block explaining transport it
+  // owns. Without this the bot cannot answer "what commands can I use here" —
+  // /fresh and /stop are intercepted before it ever sees them.
+  assert.ok(/Commands handled by the harness/.test(bot), "no command context injected");
+  assert.ok(/RESERVED_COMMANDS\.map/.test(bot), "the injected list must come from the same constant");
+});
+
+check("a colliding bot command warns at startup", () => {
+  assert.ok(/function shadowedCommands\(\)/.test(bot), "nothing detects collisions");
+  assert.ok(/can NEVER run/.test(bot), "the warning must say the command cannot run, not merely that it exists");
+});
+
+check("collision detection looks where Claude Code actually looks", () => {
+  const fn = /function shadowedCommands\(\)[\s\S]*?\n}/.exec(bot)[0];
+  assert.ok(/\.claude", "commands"/.test(fn), "must check .claude/commands");
+  assert.ok(/\.claude", "skills"/.test(fn), "must check .claude/skills");
+  assert.ok(/CLAUDE_CWD/.test(fn), "must look in the BOT's project, not the harness");
+});
+
+check("a bot cannot override the harness stop command", () => {
+  // /stop must always be able to kill a runaway request. That is a safety
+  // control and cannot be delegated to the thing it may need to stop.
+  const idx = bot.indexOf("const isStopCommand");
+  assert.ok(idx > -1, "stop handling not found");
+  assert.ok(bot.indexOf("routeToAgents") > idx || /return;/.test(bot.slice(idx, idx + 2000)),
+    "stop must be handled by the harness before anything can intercept it");
+});
+
 console.log("\nSummarization coverage — recall can only find what got written");
 
 check("DMs and ad-hoc channels are summarized, not just monitored ones", () => {
