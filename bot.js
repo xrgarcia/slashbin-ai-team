@@ -694,7 +694,13 @@ client.on("messageCreate", async (msg) => {
   // --- Response filtering (only below this point) ---
   if (msg.author.bot && !ALLOWED_BOTS.includes(msg.author.id)) return;
 
-  if (ALLOWED_USER_IDS.length > 0 && !ALLOWED_USER_IDS.includes(msg.author.id)) {
+  // ALLOWED_USERS gates HUMANS. It used to gate everyone, so a bot that had been
+  // deliberately whitelisted in ALLOWED_BOTS was then dropped here for not also
+  // being in ALLOWED_USERS — bot-to-bot coordination broke silently the moment an
+  // operator secured their bot, which is exactly when they are least likely to
+  // suspect the allowlist. Bots are authorised by ALLOWED_BOTS, humans by
+  // ALLOWED_USERS; neither list should have to name the other's members.
+  if (!msg.author.bot && ALLOWED_USER_IDS.length > 0 && !ALLOWED_USER_IDS.includes(msg.author.id)) {
     return;
   }
 

@@ -65,6 +65,14 @@ check("BOT_REQUIRE_ALLOWLIST can refuse to start open", () => {
   assert.ok(/BOT_REQUIRE_ALLOWLIST/.test(bot), "no strict-allowlist opt-in");
 });
 
+check("ALLOWED_USERS gates humans only — it must not veto an allowlisted bot", () => {
+  // Securing a bot by setting ALLOWED_USERS used to silently kill bot-to-bot
+  // coordination: a peer already whitelisted in ALLOWED_BOTS was then dropped
+  // for not also appearing in ALLOWED_USERS.
+  const m = /if \(!msg\.author\.bot && ALLOWED_USER_IDS\.length > 0/.test(bot);
+  assert.ok(m, "the ALLOWED_USERS check must be scoped to non-bot authors");
+});
+
 console.log("\nProcess manager — one checkout, many bots");
 
 check("manager scopes pid/log by BOT_NAME", () => {
