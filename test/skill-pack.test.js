@@ -76,11 +76,26 @@ check("NO pack skill hardcodes a state path", () => {
   }
 });
 
-check("skills are told to read the published environment variables", () => {
+check("every skill reaches harness state through the published variables", () => {
+  // Either the skill reads $BOT_* itself, or it delegates to a script in the
+  // pack's bin/ that does. What is NOT allowed is reaching harness state by any
+  // third route — that route would be a hardcoded path.
   for (const f of skillFiles()) {
     const src = readFileSync(f, "utf8");
-    assert.ok(/\$BOT_[A-Z_]+/.test(src),
-      `${f} references no BOT_* variable — a harness skill that reads nothing from the harness is in the wrong place`);
+    const readsEnv = /\$BOT_[A-Z_]+/.test(src);
+    const delegates = /\$CLAUDE_PLUGIN_ROOT\/bin\/[\w.-]+/.test(src) || /bin\/[\w.-]+\.mjs/.test(src);
+    assert.ok(readsEnv || delegates,
+      `${f} neither reads a BOT_* variable nor delegates to a pack script — how is it reaching harness state?`);
+
+    if (delegates && !readsEnv) {
+      // The script it delegates to must itself read the published variables,
+      // or the delegation just moves the hardcoding one file along.
+      const scripts = existsSync(join(PACK, "bin"))
+        ? readdirSync(join(PACK, "bin")).map((n) => readFileSync(join(PACK, "bin", n), "utf8"))
+        : [];
+      assert.ok(scripts.some((sc) => /process\.env\.BOT_[A-Z_]+/.test(sc)),
+        `${f} delegates to a script, but no script in bin/ reads a BOT_* variable`);
+    }
   }
 });
 
@@ -122,6 +137,52 @@ check("the pack documents the no-hardcoded-path rule", () => {
   const src = readFileSync(readme, "utf8");
   assert.ok(/never name a file/i.test(src) || /Never hardcode a path/i.test(src),
     "the rule that keeps pack skills alive must be written down where skill authors will see it");
+});
+
+console.log("\n/remember — the contract that makes recall trustworthy");
+
+check("recall is a script, not a list of instructions", () => {
+  // A markdown skill cannot guarantee every source is searched, nor that an
+  // absent source is reported rather than silently skipped.
+  assert.ok(existsSync(join(PACK, "bin/recall.mjs")), "no gatherer script");
+});
+
+check("it distinguishes 'searched and found nothing' from 'never searched'", () => {
+  const src = readFileSync(join(PACK, "bin/recall.mjs"), "utf8");
+  for (const status of ["NO MATCH", "EMPTY", "MISSING", "UNAVAILABLE", "UNREADABLE"]) {
+    assert.ok(src.includes(status), `no ${status} status — the whole failure mode is conflating these`);
+  }
+});
+
+check("it searches all five stores", () => {
+  const src = readFileSync(join(PACK, "bin/recall.mjs"), "utf8");
+  for (const v of ["BOT_SUMMARIES_DIR", "BOT_BUFFER_FILE", "BOT_ATTACHMENTS_DIR",
+                   "BOT_SESSIONS_FILE", "BOT_JOB_HISTORY_FILE"]) {
+    assert.ok(src.includes(v), `${v} is never read — that store would be silently skipped`);
+  }
+});
+
+check("it is read-only", () => {
+  const src = readFileSync(join(PACK, "bin/recall.mjs"), "utf8");
+  for (const w of ["writeFileSync", "appendFileSync", "unlinkSync", "renameSync", "rmSync"]) {
+    assert.ok(!src.includes(w), `recall must never ${w} — it is a reader`);
+  }
+});
+
+check("it respects a documented context budget", () => {
+  const src = readFileSync(join(PACK, "bin/recall.mjs"), "utf8");
+  assert.ok(/RECENT_CONTEXT_MAX_CHARS/.test(src),
+    "no budget — this setting was documented for months while nothing read it");
+  assert.ok(/budget/.test(src) && /truncated to fit/.test(src),
+    "truncation must be visible, not silent");
+});
+
+check("the skill tells the bot never to pass a MISSING source off as checked", () => {
+  const skill = readFileSync(join(PACK, "skills/remember/SKILL.md"), "utf8");
+  assert.ok(/MISSING/.test(skill) && /never/i.test(skill),
+    "the reading rule is the difference between recall and confident invention");
+  assert.ok(/buffer is the source of truth/i.test(skill),
+    "summaries are compressions; verbatim questions must go to the buffer");
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

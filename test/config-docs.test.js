@@ -18,6 +18,13 @@ const REPO = join(__dirname, "..");
 
 // Settings the harness actually reads, both access patterns.
 const SOURCES = ["bot.js", "summarize.js", "bot-manager.mjs"];
+// Pack scripts count too: they read settings the harness documents, and leaving
+// them out reported a genuinely-read setting as documented-but-dead.
+const { readdirSync, existsSync } = require("fs");
+const PACK_BIN = join(REPO, "skill-pack", "bin");
+if (existsSync(PACK_BIN)) {
+  for (const f of readdirSync(PACK_BIN)) SOURCES.push(join("skill-pack", "bin", f));
+}
 const read = new Set();
 for (const f of SOURCES) {
   const src = readFileSync(join(REPO, f), "utf8");
@@ -39,6 +46,14 @@ const EXEMPT = new Set([
   "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
   "X",                                     // appears only in envInt()'s own doc comment
 ]);
+
+// Variables the harness PUBLISHES to skills, rather than settings an operator
+// sets. They belong in the skill-pack contract, not the operator config table —
+// documenting them as settings would invite people to set values the harness
+// overwrites on every run. Asserted separately below.
+const PUBLISHED = ["BOT_SUMMARIES_DIR", "BOT_BUFFER_FILE", "BOT_SESSIONS_FILE",
+                   "BOT_JOB_HISTORY_FILE", "BOT_CHANNEL_ID"];
+for (const v of PUBLISHED) EXEMPT.add(v);
 
 let pass = 0, fail = 0;
 function check(label, fn) {
@@ -76,6 +91,16 @@ check("every slash command the bot implements is documented", () => {
   for (const m of bot.matchAll(/prompt === "(\/[a-z]+)"/g)) implemented.add(m[1]);
   const undocumented = [...implemented].filter((c) => !readme.includes(`\`${c}\``)).sort();
   assert.deepStrictEqual(undocumented, [], `implemented but undocumented: ${undocumented.join(", ")}`);
+});
+
+check("published variables are documented for skill authors", () => {
+  // Exempt from the operator table, but they are a contract — a skill author who
+  // cannot find them will hardcode a path instead, which is the whole bug.
+  const packReadme = join(REPO, "skill-pack", "README.md");
+  const src = readFileSync(packReadme, "utf8");
+  for (const v of PUBLISHED) {
+    assert.ok(src.includes(v), `${v} is published to skills but documented nowhere they will look`);
+  }
 });
 
 check("the clone URL names this repository", () => {

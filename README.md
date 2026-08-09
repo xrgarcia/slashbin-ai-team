@@ -94,7 +94,11 @@ Keep it under 100 lines. Claude loads the full `CLAUDE.md` on every message — 
 
 **Memory and continuity** — each channel keeps its own Claude session, persisted across restarts. A rolling buffer records everything; when it fills, the oldest slice is summarized rather than dropped. A background summarizer writes daily summaries, and the last 48 hours are injected into new sessions.
 
-> **Known limit:** on a *resumed* session the buffer and summaries are not re-injected, and recall doesn't reach past the 48-hour window. A `/remember` command that searches every store is next — [#46](https://github.com/xrgarcia/slashbin-ai-team/issues/46).
+**Recall** — `/slashbin-harness:remember <question>` searches everything the bot has: **every** daily summary (not just the injected window), the live conversation buffer, files people sent, live sessions and scheduled runs.
+
+> It reports **which sources it actually searched**, so "searched and found nothing" is never confused with "never searched". That distinction is the feature: the version this replaces read three paths that had been dead for months, reported it had checked them, and answered confidently from the fraction it happened to find.
+>
+> Works mid-conversation on a resumed session, where the harness does not re-inject context — so a long conversation no longer *loses* memory as it goes.
 
 **Multiple employees, one install** — N bots from one clone, each with its own token, role, channels and state. Manage them individually (`--name`) or see them all (`npm run list`). Bots can @mention each other, with loop prevention built in.
 
@@ -241,7 +245,8 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `SUMMARIZE_CHANNELS` | `MONITOR_CHANNELS` | Channels to summarize |
 | `SUMMARIZE_SEEN_CHANNELS` | `true` | Also summarize **DMs and any channel the bot has spoken in**. Without this, a conversation held in a DM is never written down and recall cannot find it |
 | `SUMMARIZE_BATCH_SIZE` | `200` | Messages fetched per channel per run |
-| `SUMMARY_LOOKBACK_HOURS` | `48` | How much summary history is injected |
+| `SUMMARY_LOOKBACK_HOURS` | `48` | How much summary history is injected (`/remember` reaches past this) |
+| `RECENT_CONTEXT_MAX_CHARS` | `12000` | Context budget for `/remember` results |
 | `SUMMARIZE_TIMEOUT_MS` | `120000` | Wall clock for one summarization run |
 | `BOT_SUMMARIZER_START_DELAY_MS` | `10000` | Grace period after login before the first cycle |
 | `BUFFER_MAX_BYTES` | `32768` | Buffer size before rotation |

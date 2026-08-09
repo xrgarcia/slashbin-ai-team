@@ -26,6 +26,13 @@ the upgrade is one line.
   progress return without reviving the "bot answered twice" bug that removed
   streaming in the first place (3c79e5e, 2026-03-28). Tool inputs are never shown.
   Disable with `BOT_PROGRESS_ENABLED=false`.
+- **`/slashbin-harness:remember`** — recall across every store a bot has: all daily
+  summaries (not just the injected window), the conversation buffer, attachments,
+  live sessions and scheduled runs. Reports which sources it actually searched, so
+  a missing store is never mistaken for an empty one. Works on resumed sessions.
+- **Harness skill pack** — skills ship with the harness in `skill-pack/` and load
+  into every bot, namespaced `slashbin-harness:<name>`, instead of being copied
+  into each bot's repo where they hardcode paths and rot.
 - **`npm run list`** — every bot instance this checkout has state for.
 - Settings for previously frozen constants: `BOT_SCHEDULE_CHECK_MS`,
   `BOT_SCHEDULE_LOOKBACK_MINUTES`, `BOT_OUTBOX_MTIME_TOLERANCE_MS`,
