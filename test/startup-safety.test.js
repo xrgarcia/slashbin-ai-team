@@ -73,6 +73,38 @@ check("ALLOWED_USERS gates humans only — it must not veto an allowlisted bot",
   assert.ok(m, "the ALLOWED_USERS check must be scoped to non-bot authors");
 });
 
+console.log("\nConfiguration — nothing host-specific frozen into the source");
+
+check("no hardcoded timezone or zone abbreviation remains", () => {
+  assert.ok(!/America\/Chicago/.test(bot), "the host's timezone is still hardcoded");
+  // The literal was appended on top of timeStyle:"long", which already emits the
+  // abbreviation — so the prompt read "10:01 AM CDT CDT" in summer and
+  // "6:00 AM CST CDT" in winter.
+  assert.ok(!/\}\)\} CDT\)/.test(bot), "a literal zone abbreviation is still appended");
+});
+
+check("BOT_TIMEZONE is configurable and validated", () => {
+  assert.ok(/BOT_TIMEZONE/.test(bot), "no BOT_TIMEZONE setting");
+  assert.ok(/resolvedOptions\(\)\.timeZone/.test(bot), "default should be the host zone, not a baked-in city");
+  assert.ok(/new Intl\.DateTimeFormat\("en-US", \{ timeZone: BOT_TIMEZONE \}\)/.test(bot),
+    "an invalid IANA name must fail at startup, not on every message");
+});
+
+check("numeric settings are parsed safely, not with the ||-default idiom", () => {
+  assert.ok(/function envInt\(/.test(bot), "no envInt helper");
+  // `parseInt(x,10) || DEFAULT` swallows 0/NaN/negatives; for an interval a 0 that
+  // slipped through would be a hot loop.
+  assert.ok(/Number\.isFinite\(n\)/.test(bot), "envInt must reject non-numbers explicitly");
+  assert.ok(/n < min/.test(bot), "envInt must clamp below a minimum");
+});
+
+check("the scheduler tick and WS bridge are configurable", () => {
+  assert.ok(/BOT_SCHEDULE_CHECK_MS/.test(bot), "scheduler tick still frozen");
+  assert.ok(/WS_HOST/.test(bot), "WS bind host still frozen");
+  assert.ok(/const WS_HOST = process\.env\.WS_HOST \|\| "127\.0\.0\.1"/.test(bot),
+    "the bridge must still default to loopback — it takes commands");
+});
+
 console.log("\nProcess manager — one checkout, many bots");
 
 check("manager scopes pid/log by BOT_NAME", () => {

@@ -46,6 +46,15 @@ const ctx = {
   join, readdirSync: require("fs").readdirSync, statSync: require("fs").statSync,
   CLAUDE_CWD: REPO,
   OUTBOX_DIR: TMP,
+  // Settings extracted from bot.js now read the environment through envInt().
+  // Supply the real resolver semantics (env override, else default) so these
+  // tests exercise the same defaulting the bot does.
+  envInt: (name, def) => {
+    const raw = process.env[name];
+    if (raw === undefined || raw === "") return def;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n >= 0 ? n : def;
+  },
 };
 
 const code = [
