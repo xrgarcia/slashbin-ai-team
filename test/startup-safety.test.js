@@ -105,6 +105,40 @@ check("resolved paths are published to skills, so nothing has to hardcode one", 
   }
 });
 
+console.log("\nSummarization coverage — recall can only find what got written");
+
+check("DMs and ad-hoc channels are summarized, not just monitored ones", () => {
+  // SUMMARIZE_CHANNELS defaults to MONITOR_CHANNELS, and a DM can never appear
+  // in that list — so a conversation held entirely in a DM produced NO summary.
+  assert.ok(/function channelsToSummarize\(\)/.test(bot), "no widened channel set");
+  assert.ok(/for \(const channelId of channelsToSummarize\(\)\)/.test(bot),
+    "the summarizer still iterates only the configured list");
+});
+
+check("the bot records where it has actually spoken", () => {
+  assert.ok(/recordSeenChannel\(msg\.channel\.id\)/.test(bot),
+    "nothing records the channel, so 'where it talked' can never be known");
+});
+
+check("seen channels survive a restart", () => {
+  // channelSessions expires after SESSION_TIMEOUT_MS, so yesterday's DM would be
+  // invisible after a restart if that were the only source.
+  const fn = /function recordSeenChannel\([\s\S]*?\n}/.exec(bot);
+  assert.ok(fn, "recordSeenChannel not found");
+  assert.ok(/writeFileSync\(SEEN_CHANNELS_FILE/.test(fn[0]), "seen channels are not persisted");
+  assert.ok(/join\(STATE_DIR, "seen-channels\.json"\)/.test(bot),
+    "the record must live under the state root with the rest of the bot's memory");
+});
+
+check("SUMMARIZE_SEEN_CHANNELS=false reproduces the old behaviour", () => {
+  assert.ok(/SUMMARIZE_SEEN_CHANNELS !== "false"/.test(bot), "no opt-out");
+});
+
+check("a DM summary is named for who it is with, not a channel id", () => {
+  assert.ok(/channel\.recipient\?\.username/.test(bot),
+    "dm-<channelId> means nothing to a human reading the directory later");
+});
+
 console.log("\nFiles — collisions must be impossible, not unlikely");
 
 check("attachments are keyed on the ATTACHMENT id, not the message id", () => {

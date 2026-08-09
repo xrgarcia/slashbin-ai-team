@@ -142,6 +142,53 @@ const ATTACH_EXTENSIONS = (process.env.BOT_ATTACH_EXTENSIONS || "csv,pdf,xlsx,pn
 // and making only one configurable is how a setting silently half-works.
 const ATTACH_RE = new RegExp(`\\.(${ATTACH_EXTENSIONS.join("|")})$`, "i");
 
+// --- Summarization coverage ---
+// SUMMARIZE_CHANNELS defaults to MONITOR_CHANNELS, which answers the wrong
+// question. "Where do I reply unprompted?" and "what is worth remembering?" are
+// not the same, and the second must be at least as wide as everywhere the bot
+// actually talks. As written, a conversation held entirely in a DM produced NO
+// summary at all — a DM has no entry in MONITOR_CHANNELS and cannot have one —
+// and neither did any channel the bot was merely @mentioned in.
+//
+// That is upstream of recall: /remember can only find what got written down, so
+// asked about a DM it would search everything, find nothing, and answer
+// confidently from a different conversation.
+const SUMMARIZE_SEEN = process.env.SUMMARIZE_SEEN_CHANNELS !== "false";
+const SEEN_CHANNELS_FILE = join(STATE_DIR, "seen-channels.json");
+
+function loadSeenChannels() {
+  try {
+    const raw = JSON.parse(readFileSync(SEEN_CHANNELS_FILE, "utf8"));
+    return new Set(Array.isArray(raw) ? raw : []);
+  } catch {
+    return new Set();
+  }
+}
+const seenChannels = loadSeenChannels();
+
+/**
+ * Remember that this bot spoke here, so the summarizer can cover it later.
+ * Durable on purpose: channelSessions expires after SESSION_TIMEOUT_MS, so a
+ * conversation from yesterday would otherwise be invisible after a restart.
+ */
+function recordSeenChannel(channelId) {
+  if (!SUMMARIZE_SEEN || seenChannels.has(channelId)) return;
+  seenChannels.add(channelId);
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(SEEN_CHANNELS_FILE, JSON.stringify([...seenChannels], null, 2));
+  } catch (err) {
+    log.warn({ err: err.message }, "Could not persist seen channels — this channel may not be summarized");
+  }
+}
+
+/** Configured channels, plus everywhere the bot has actually spoken. */
+function channelsToSummarize() {
+  const configured = new Set(SUMMARIZE_CHANNELS);
+  if (SUMMARIZE_SEEN) for (const id of seenChannels) configured.add(id);
+  return [...configured];
+}
+
 // --- Harness skill pack ---
 // Skills that ship WITH the harness and load into every bot, so they never have
 // to be copied into each bot's repo. The copies are why this exists: the shipped
@@ -944,6 +991,9 @@ client.on("messageCreate", async (msg) => {
     log.debug({ channel: msg.channel.id, bot: BOT_NAME }, "Message ignored — channel not in ALLOWED_CHANNELS");
     return;
   }
+
+  // The bot is going to answer here, so this conversation is worth remembering.
+  recordSeenChannel(msg.channel.id);
 
   // Bot-to-bot loop prevention
   if (msg.author.bot) {
@@ -1907,22 +1957,27 @@ let summarizing = false;
 
 async function runSummarizer() {
   if (summarizing) return;
-  if (SUMMARIZE_CHANNELS.length === 0) return;
+  if (channelsToSummarize().length === 0) return;
   summarizing = true;
 
   const sumLog = log.child({ component: "summarizer" });
-  sumLog.info({ channels: SUMMARIZE_CHANNELS.length }, "Summarizer cycle starting");
+  sumLog.info({ configured: SUMMARIZE_CHANNELS.length, total: channelsToSummarize().length }, "Summarizer cycle starting");
 
   const checkpoints = loadCheckpoints();
   let totalMessages = 0;
   let totalSummaries = 0;
 
-  for (const channelId of SUMMARIZE_CHANNELS) {
+  for (const channelId of channelsToSummarize()) {
     try {
       const channel = await client.channels.fetch(channelId);
       if (!channel || !channel.isTextBased()) continue;
 
-      const channelName = (channel.name || `dm-${channelId}`).replace(/[^a-zA-Z0-9-_]/g, "-");
+      // A DM has no name. `dm-<channelId>` means nothing to a human reading the
+      // directory later, so prefer who the conversation is actually with.
+      const dmLabel = channel.recipient?.username
+        ? `dm-${channel.recipient.username}`
+        : `dm-${channelId}`;
+      const channelName = (channel.name || dmLabel).replace(/[^a-zA-Z0-9-_]/g, "-");
       const afterId = checkpoints[channelId] || null;
 
       const messages = await fetchMessagesSince(channel, afterId);
