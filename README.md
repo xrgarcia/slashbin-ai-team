@@ -239,6 +239,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `BOT_OUTBOX_DIR` | `<history>/outbox` | Files written here are sent to the user |
 | `SUMMARIZE_INTERVAL_MS` | `0` *(off)* | Background summarization interval |
 | `SUMMARIZE_CHANNELS` | `MONITOR_CHANNELS` | Channels to summarize |
+| `SUMMARIZE_SEEN_CHANNELS` | `true` | Also summarize **DMs and any channel the bot has spoken in**. Without this, a conversation held in a DM is never written down and recall cannot find it |
 | `SUMMARIZE_BATCH_SIZE` | `200` | Messages fetched per channel per run |
 | `SUMMARY_LOOKBACK_HOURS` | `48` | How much summary history is injected |
 | `SUMMARIZE_TIMEOUT_MS` | `120000` | Wall clock for one summarization run |
