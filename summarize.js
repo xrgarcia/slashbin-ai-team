@@ -213,22 +213,37 @@ function summarizeWithClaude(channelName, date, messages) {
 }
 
 // --- Write summary to disk ---
-function writeSummary(channelName, date, messageCount, summary) {
+// Must behave identically to bot.js's copy — see the comment there. APPENDS:
+// overwriting destroyed a whole day of summaries every time the summarizer ran,
+// because the checkpoint means each run only covers messages since the last one.
+// (Fourth place this logic is duplicated. See slashbin-ai-team#44.)
+function writeSummary(channelName, date, messageCount, summary, channelId = null) {
   mkdirSync(HISTORY_DIR, { recursive: true });
+  const stamp = new Date().toLocaleTimeString("en-US", {
+    timeZone: process.env.BOT_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+    hour12: false,
+  });
 
-  const filename = `${date}-${channelName}.md`;
-  const filepath = join(HISTORY_DIR, filename);
+  let filepath = join(HISTORY_DIR, `${date}-${channelName}.md`);
+  let existing = "";
+  try { existing = readFileSync(filepath, "utf8"); } catch { /* first batch */ }
 
-  const content = [
-    `# ${channelName} — ${date}`,
-    "",
-    `> ${messageCount} messages summarized`,
-    "",
-    summary,
-    "",
-  ].join("\n");
+  if (existing && channelId) {
+    const owner = /^<!-- channel: (\S+) -->$/m.exec(existing);
+    if (owner && owner[1] !== String(channelId)) {
+      filepath = join(HISTORY_DIR, `${date}-${channelName}-${channelId}.md`);
+      try { existing = readFileSync(filepath, "utf8"); } catch { existing = ""; }
+    }
+  }
 
-  writeFileSync(filepath, content);
+  const header = existing
+    ? ""
+    : [`# ${channelName} — ${date}`, channelId ? `<!-- channel: ${channelId} -->` : "", ""]
+        .filter((l) => l !== null).join("\n") + "\n";
+
+  const section = [`> ${messageCount} messages summarized at ${stamp}`, "", summary, "", ""].join("\n");
+
+  writeFileSync(filepath, existing ? existing + section : header + section);
   return filepath;
 }
 
@@ -292,7 +307,7 @@ async function main() {
         }
 
         const summary = await summarizeWithClaude(channelName, date, dayMessages);
-        const filepath = writeSummary(channelName, date, dayMessages.length, summary);
+        const filepath = writeSummary(channelName, date, dayMessages.length, summary, channelId);
         console.log(`    Saved: ${filepath}`);
         totalSummaries++;
       }

@@ -228,7 +228,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | Variable | Default | Description |
 |---|---|---|
 | `BOT_HISTORY_DIR` | `.bot-history` | Summaries, attachments, outbox, schedules |
-| `BOT_ATTACHMENTS_DIR` | `<history>/attachments` | Inbound files |
+| `BOT_ATTACHMENTS_DIR` | `<history>/attachments` | Inbound files. Worth pointing **outside any git repo** — these are arbitrary user-supplied binaries, and a working tree loses them to `git clean -x` or a re-clone |
 | `BOT_OUTBOX_DIR` | `<history>/outbox` | Files written here are sent to the user |
 | `SUMMARIZE_INTERVAL_MS` | `0` *(off)* | Background summarization interval |
 | `SUMMARIZE_CHANNELS` | `MONITOR_CHANNELS` | Channels to summarize |

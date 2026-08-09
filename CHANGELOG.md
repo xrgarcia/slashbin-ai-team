@@ -66,6 +66,16 @@ the upgrade is one line.
   `stop` / `halt` / `abort` / `cancel` now stops a run in flight. With nothing
   running it is still an ordinary message, so "stop sending the Friday digest"
   remains a request the bot thinks about rather than a silent no-op.
+- **Every summarizer run destroyed that day's summary.** `writeSummary` used
+  `writeFileSync`, and the checkpoint means each run only covers messages since
+  the last one — so an hourly summarizer replaced the whole day with a summary of
+  the last hour. Observed on a live host: a day with 14 completed conversations
+  had a "daily" summary reading *6 messages summarized*. Summaries now append,
+  each batch timestamped. This silently truncated the memory that cross-session
+  recall reads, in both `bot.js` and `summarize.js`.
+- **Two channels with the same name shared one summary file.** The owning channel
+  id is now recorded in the file, and a second channel with the same (or
+  same-sanitising) name gets its own.
 - **A file written for one channel could be attached in another.** The outbox was
   a single shared directory, `MAX_CONCURRENT_CLAUDE` defaults to 2, and each run
   claimed every file whose mtime fell after its own start — including the other
