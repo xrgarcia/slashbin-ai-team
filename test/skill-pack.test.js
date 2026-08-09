@@ -185,5 +185,33 @@ check("the skill tells the bot never to pass a MISSING source off as checked", (
     "summaries are compressions; verbatim questions must go to the buffer");
 });
 
+console.log("\nscheduling — a wrong schedule is worse than a rejected one");
+
+check("cron validation rejects what the SCHEDULER cannot evaluate", () => {
+  // Not cron in general: the matcher handles * and comma lists only, so "1-5"
+  // parses as 1 and a weekdays job fires on Mondays alone. Silently.
+  const src = readFileSync(join(PACK, "bin/schedule.mjs"), "utf8");
+  assert.ok(/ranges are not supported/.test(src), "a range must be rejected, not accepted");
+  assert.ok(/steps are not supported/.test(src), "a step must be rejected");
+  assert.ok(/fire every minute/.test(src), "a wildcard minute must be rejected");
+});
+
+check("a created job is read back before it is reported", () => {
+  const src = readFileSync(join(PACK, "bin/schedule.mjs"), "utf8");
+  assert.ok(/could not read it back/.test(src),
+    "a schedule nobody verified is one nobody notices is wrong until it fails to fire");
+  assert.ok(/nextRun\(/.test(src), "the next fire time must be computed and shown");
+});
+
+check("jobs pin the timezone they were created under", () => {
+  const src = readFileSync(join(PACK, "bin/schedule.mjs"), "utf8");
+  assert.ok(/tz: TZ/.test(src), "without a pinned zone, a host move silently reinterprets every job");
+});
+
+check("job count is capped", () => {
+  const src = readFileSync(join(PACK, "bin/schedule.mjs"), "utf8");
+  assert.ok(/BOT_MAX_SCHEDULED_JOBS/.test(src), "nothing stops a loop filling the schedules file");
+});
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
