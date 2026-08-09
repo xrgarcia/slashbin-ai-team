@@ -73,6 +73,36 @@ check("ALLOWED_USERS gates humans only — it must not veto an allowlisted bot",
   assert.ok(m, "the ALLOWED_USERS check must be scoped to non-bot authors");
 });
 
+console.log("\nFiles — collisions must be impossible, not unlikely");
+
+check("attachments are keyed on the ATTACHMENT id, not the message id", () => {
+  // A message can carry several files and nothing requires their names to differ.
+  // Keyed on messageId, two `report.csv` on one message produced the same path,
+  // and the existsSync short-circuit handed back the FIRST file for the second.
+  assert.ok(/join\(ATTACHMENTS_DIR, `\$\{attachment\.id\}-/.test(bot),
+    "attachment path must be keyed on attachment.id");
+  assert.ok(!/join\(ATTACHMENTS_DIR, `\$\{messageId\}-/.test(bot),
+    "still keyed on messageId — two same-named files on one message collide");
+});
+
+check("a user-supplied filename cannot escape the attachments directory", () => {
+  assert.ok(/replace\(\/\[\/\\\\\]\/g, "_"\)/.test(bot),
+    "path separators must be stripped from the Discord-supplied name");
+});
+
+check("the outbox is scoped per channel", () => {
+  assert.ok(/function channelOutbox\(/.test(bot), "no per-channel outbox");
+  assert.ok(/collectOutboxFiles\(startTime, runOutbox\)/.test(bot),
+    "collection must read this channel's outbox, not the shared root");
+});
+
+check("the shared outbox is only swept when nothing else is running", () => {
+  // Sweeping it during a concurrent run is the leak: mtime cannot tell whose
+  // file it is, so the other channel's document gets attached here.
+  assert.ok(/activeProcesses\.size === 0/.test(bot),
+    "the shared-root fallback must be guarded on no other run being in flight");
+});
+
 console.log("\nStop — asking a bot to stop must not answer with an error");
 
 check("a user-initiated stop is marked as intentional", () => {

@@ -153,6 +153,21 @@ check("a file predating the run is left alone", () => {
   const got = F.collectOutboxFiles(Date.now() + 60000);
   assert.deepStrictEqual(got, []);
 });
+check("one channel's outbox never returns another channel's files", () => {
+  // A single shared outbox leaked across conversations: two runs overlap
+  // (MAX_CONCURRENT_CLAUDE defaults to 2) and the collector claimed every file
+  // whose mtime fell after its own start — including the other run's. A document
+  // written for one client could be attached in another client's channel.
+  const a = join(TMP, "111"), b = join(TMP, "222");
+  mkdirSync(a, { recursive: true });
+  mkdirSync(b, { recursive: true });
+  const since = Date.now();
+  writeFileSync(join(a, "client-a.csv"), "a");
+  writeFileSync(join(b, "client-b.csv"), "b");
+  assert.deepStrictEqual(F.collectOutboxFiles(since, a), [join(a, "client-a.csv")]);
+  assert.deepStrictEqual(F.collectOutboxFiles(since, b), [join(b, "client-b.csv")]);
+});
+
 check("a missing outbox does not throw", () => {
   const F2 = new Function(...Object.keys(ctx), code)(...Object.values(ctx).map((v, i) =>
     Object.keys(ctx)[i] === "OUTBOX_DIR" ? "/nonexistent/outbox/path" : v));
