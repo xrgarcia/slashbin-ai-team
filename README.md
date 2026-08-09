@@ -246,7 +246,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | Variable | Default | Description |
 |---|---|---|
 | `BOT_STATE_DIR` | `BOT_HISTORY_DIR` | **One root for everything a bot remembers** — buffer, sessions, and the default parent for the rest |
-| `BOT_HISTORY_DIR` | `.bot-history` | Daily summaries, schedules, job history |
+| `BOT_HISTORY_DIR` | `.bot-history` | Daily summaries only — the reviewable record |
 | `BOT_ATTACHMENTS_DIR` | `<history>/attachments` | Inbound files. Worth pointing **outside any git repo** — these are arbitrary user-supplied binaries, and a working tree loses them to `git clean -x` or a re-clone |
 | `BOT_OUTBOX_DIR` | `<history>/outbox` | Files written here are sent to the user |
 | `SUMMARIZE_INTERVAL_MS` | `0` *(off)* | Background summarization interval |
@@ -352,7 +352,7 @@ where the server is.
 <details>
 <summary>Writing <code>schedules.json</code> by hand</summary>
 
-Jobs live in `<BOT_HISTORY_DIR>/schedules.json`. You rarely need to touch it, but:
+Jobs live in `<BOT_STATE_DIR>/schedules.json`. You rarely need to touch it, but:
 
 ```json
 [

@@ -32,7 +32,13 @@ const CLAUDE_CWD = process.env.CLAUDE_CWD || process.cwd();
 const HISTORY_DIR = process.env.BOT_HISTORY_DIR
   ? (process.env.BOT_HISTORY_DIR.startsWith("/") ? process.env.BOT_HISTORY_DIR : join(__dirname, process.env.BOT_HISTORY_DIR))
   : join(__dirname, ".bot-history");
-const CHECKPOINT_FILE = join(HISTORY_DIR, ".checkpoints.json");
+// Must resolve identically to bot.js. The checkpoint moved to the state root with
+// the rest of the runtime state; if these two disagree the summarizer re-reads
+// from the beginning and rewrites days that already have summaries.
+const STATE_DIR = process.env.BOT_STATE_DIR
+  ? (process.env.BOT_STATE_DIR.startsWith("/") ? process.env.BOT_STATE_DIR : join(__dirname, process.env.BOT_STATE_DIR))
+  : HISTORY_DIR;
+const CHECKPOINT_FILE = join(STATE_DIR, ".checkpoints.json");
 const SUMMARIZE_CHANNELS = process.env.SUMMARIZE_CHANNELS
   ? process.env.SUMMARIZE_CHANNELS.split(",").filter(Boolean)
   : (process.env.MONITOR_CHANNELS || "").split(",").filter(Boolean);

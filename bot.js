@@ -86,7 +86,12 @@ const STATE_DIR = process.env.BOT_STATE_DIR
       : join(__dirname, process.env.BOT_STATE_DIR))
   : HISTORY_DIR;
 
-const CHECKPOINT_FILE = join(HISTORY_DIR, ".checkpoints.json");
+// Runtime state, not memory. HISTORY_DIR holds SUMMARIES — the reviewable record
+// people deliberately keep in a repo. A user's schedules, the summarizer's read
+// position and the job log are none of those things, and living in a working tree
+// means one `git clean -x` or a re-clone destroys them. Gitignored is not safe;
+// it is only invisible.
+const CHECKPOINT_FILE = join(STATE_DIR, ".checkpoints.json");
 // --- Tool exposure ---
 // Every Claude invocation used to pass --dangerously-skip-permissions
 // unconditionally, with no way to change it. Combined with an empty ALLOWED_USERS
@@ -276,8 +281,8 @@ const BUFFER_FILE = join(STATE_DIR, "buffer.txt");
 // Declared here with the other state paths rather than beside the scheduler:
 // spawnClaude publishes these to the child env, and a path declared further down
 // the file is a temporal-dead-zone error waiting for the first message.
-const SCHEDULES_FILE = join(HISTORY_DIR, "schedules.json");
-const JOB_HISTORY_FILE = join(HISTORY_DIR, "job-history.jsonl");
+const SCHEDULES_FILE = join(STATE_DIR, "schedules.json");
+const JOB_HISTORY_FILE = join(STATE_DIR, "job-history.jsonl");
 
 // Files that used to live in the install directory, keyed by BOT_NAME. Moved on
 // first start rather than abandoned — a bot that silently forgets every session
@@ -830,6 +835,11 @@ const botExchanges = new Map();
 // --- Session continuity: track Claude session IDs per channel for --resume ---
 const SESSION_FILE = join(STATE_DIR, "sessions.json");
 LEGACY_STATE.push([join(__dirname, `.${BOT_NAME}-sessions.json`), SESSION_FILE]);
+// Moved out of the summaries directory: a schedule is the user's, and losing it
+// to a re-clone is the kind of failure nobody notices until a job stops firing.
+LEGACY_STATE.push([join(HISTORY_DIR, "schedules.json"), SCHEDULES_FILE]);
+LEGACY_STATE.push([join(HISTORY_DIR, "job-history.jsonl"), JOB_HISTORY_FILE]);
+LEGACY_STATE.push([join(HISTORY_DIR, ".checkpoints.json"), CHECKPOINT_FILE]);
 
 /**
  * Move pre-2.1 state into the state root, once, loudly.
