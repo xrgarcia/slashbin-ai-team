@@ -142,6 +142,27 @@ const ATTACH_EXTENSIONS = (process.env.BOT_ATTACH_EXTENSIONS || "csv,pdf,xlsx,pn
 // and making only one configurable is how a setting silently half-works.
 const ATTACH_RE = new RegExp(`\\.(${ATTACH_EXTENSIONS.join("|")})$`, "i");
 
+// --- Harness skill pack ---
+// Skills that ship WITH the harness and load into every bot, so they never have
+// to be copied into each bot's repo. The copies are why this exists: the shipped
+// per-repo /remember hardcoded harness internals, and every path it used was dead
+// by the time anyone checked. Loaded via --plugin-dir and namespaced by the
+// plugin, so a pack skill cannot shadow a bot's own.
+//
+// Set BOT_SKILL_PACK= (empty) to disable entirely.
+const SKILL_PACK = process.env.BOT_SKILL_PACK !== undefined
+  ? process.env.BOT_SKILL_PACK
+  : join(__dirname, "skill-pack");
+const EXTRA_SKILL_PACKS = (process.env.BOT_EXTRA_SKILL_PACKS || "")
+  .split(",").map((d) => d.trim()).filter(Boolean);
+
+/** --plugin-dir args for every pack that actually exists on disk. */
+function skillPackArgs() {
+  return [SKILL_PACK, ...EXTRA_SKILL_PACKS]
+    .filter((d) => d && existsSync(d))
+    .flatMap((d) => ["--plugin-dir", d]);
+}
+
 // --- Progress reporting ---
 // Streaming was removed on 2026-03-28 because text emitted BEFORE a tool call
 // ("Let me check...") was posted as its own Discord message, so the bot looked
@@ -1457,6 +1478,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     const args = [
       "--output-format", "stream-json",
       ...permissionArgs("session"),
+      ...skillPackArgs(),
       "--verbose",
       "--max-turns", String(CLAUDE_MAX_TURNS),
       ...(process.env.CLAUDE_MODEL ? ["--model", process.env.CLAUDE_MODEL] : []),
