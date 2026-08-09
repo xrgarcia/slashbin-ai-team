@@ -104,7 +104,9 @@ Keep it under 100 lines. Claude loads the full `CLAUDE.md` on every message — 
 
 **Access control** — allowlists for users, channels and peer bots. Humans are gated by `ALLOWED_USERS`, bots by `ALLOWED_BOTS`; neither list has to name the other's members.
 
-**Triggers and automation** — a DM, an @mention, any message in a monitored channel, or an emoji reaction. Plus a **cron-style scheduler**: jobs fire on a five-field cron, recover runs missed in the last few minutes, and record every execution.
+**Work that happens without you** — *"every weekday at 7am, post the customer reach numbers"*. Just ask; the bot schedules it, reads the job back, and tells you when it will next fire. Times are in **your** timezone, not the server's. Runs missed during a restart are recovered rather than skipped.
+
+**Triggers** — a DM, an @mention, any message in a monitored channel, or an emoji reaction.
 
 **Files, any type, both directions** — attach anything and the bot opens it; reply to a message that has one and ask about it. Bots hand files back via an outbox or a marker. Oversized files are reported, never silently dropped.
 
@@ -281,6 +283,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 |---|---|---|
 | `BOT_SCHEDULE_CHECK_MS` | `60000` | How often schedules are evaluated |
 | `BOT_SCHEDULE_LOOKBACK_MINUTES` | `5` | How far back a missed run is recovered |
+| `BOT_MAX_SCHEDULED_JOBS` | `25` | Cap on jobs per bot |
 
 ### WebSocket bridge
 | Variable | Default | Description |
@@ -323,7 +326,33 @@ constant — a non-English channel needs its own.
 
 ## Scheduled jobs
 
-Create `<BOT_HISTORY_DIR>/schedules.json`:
+**Ask for it.**
+
+> *"every weekday at 7am, post a summary of yesterday's merged PRs"*
+
+The bot creates the job, reads it back, and confirms what it understood:
+
+```
+Scheduled job-msm37m2z — every weekday at 07:00 America/Chicago
+Next run: 2026-08-10 12:00 UTC. Posts here.
+```
+
+Then *"list my scheduled jobs"* or *"remove job-msm37m2z"*. Ask what ran with
+*"did the standup job fire?"*.
+
+A job is a **stored prompt** that runs unattended with the bot's normal tool
+access, so write it to stand alone — *"post the reach numbers with the change
+since last week"*, not *"tell me the reach"*. The bot will ask before scheduling
+something vague, because a bad prompt scheduled daily is a bad answer delivered
+daily.
+
+**Times are interpreted in `BOT_TIMEZONE`**, so 7am means 7am where you are, not
+where the server is.
+
+<details>
+<summary>Writing <code>schedules.json</code> by hand</summary>
+
+Jobs live in `<BOT_HISTORY_DIR>/schedules.json`. You rarely need to touch it, but:
 
 ```json
 [
@@ -331,12 +360,20 @@ Create `<BOT_HISTORY_DIR>/schedules.json`:
     "id": "standup",
     "cron": "0 9 * * 1,2,3,4,5",
     "channel": "123456789012345678",
-    "prompt": "Post a short summary of yesterday's merged PRs."
+    "prompt": "Post a short summary of yesterday's merged PRs.",
+    "tz": "America/Chicago"
   }
 ]
 ```
 
-Five-field cron, evaluated in the host's local time. A run missed in the last few minutes — a restart, a gateway blip — is recovered rather than skipped. Add `"expires": "2026-12-31T00:00:00Z"` for a one-shot. Every run is appended to `job-history.jsonl`.
+Five fields: `minute hour day month weekday`, weekday `0` = Sunday. **Only `*` and
+comma-separated numbers** — write `1,2,3,4,5`, never `1-5`, which parses as `1` and
+would fire on Mondays alone. The tooling rejects a range rather than accepting one.
+
+Add `"expires": "2026-12-31T00:00:00Z"` for a one-shot. Every run is appended to
+`job-history.jsonl`. A run missed during a restart or a gateway blip is recovered.
+
+</details>
 
 ## Reaction triggers
 
@@ -387,6 +424,27 @@ Run **`npm run doctor`** first — it checks most of this and prints no secrets.
 ## Contributing
 
 [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) · [UPGRADING.md](UPGRADING.md) · [CHANGELOG.md](CHANGELOG.md)
+
+## Who builds this
+
+This is not a demo. **It is the harness running slashbin.io's own engineering
+team** — a Product Owner, an Engineering Manager and an SRE that file issues,
+review pull requests, and ship releases every day. Every guarantee in
+["safe to leave running"](#why-safe-to-leave-running) exists because that team hit
+the failure first.
+
+The work those bots ship is **[slashbin.io](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-team) — the webhook ETL gateway for
+engineers and AI agents.** Vendor webhooks in, transformed and delivered to every
+destination you own, with 100% delivery and retries that survive a destination
+being down for hours.
+
+If you are wiring up webhooks by hand, that is the problem it removes.
+
+**[Try slashbin.io free →](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-team)**
+
+The implementer half of the team is open source too:
+[slashbin-ai-foreman](https://github.com/xrgarcia/slashbin-ai-foreman) picks up
+approved issues and opens the pull requests these bots review.
 
 ## License
 
