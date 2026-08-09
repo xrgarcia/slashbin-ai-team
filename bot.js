@@ -755,13 +755,22 @@ client.on("messageCreate", async (msg) => {
       return;
     }
 
+    // Exactly "stop" / "/stop" — the historical form, always treated as a stop.
     const stopPattern = /^(?:<@!?\d+>\s*)*(?:\/stop|stop)$/i;
-    const isStopCommand = stopPattern.test(rawContent);
+    // A message that OPENS with a stop word but carries more text ("stop x, y, z",
+    // "stop please", "stop!"). Anchoring on `$` meant these fell through to Claude
+    // and SPAWNED A NEW RUN — the exact opposite of the intent, at the one moment
+    // the user is trying to halt something. Treated as a stop only when this
+    // channel actually has a run in flight, so "stop sending the Friday digest"
+    // with nothing running is still a normal request to think about.
+    const stopPrefix = /^(?:<@!?\d+>\s*)*(?:\/)?(?:stop|halt|abort|cancel)\b/i;
+    const hasRun = activeProcesses.has(msg.channel.id);
+    const isStopCommand = stopPattern.test(rawContent) || (hasRun && stopPrefix.test(rawContent));
 
     if (isStopCommand) {
       const mentionsThisBot = msg.mentions.has(client.user);
       const mentionsAnyBot = rawContent.match(/<@!?\d+>/g);
-      const isBroadcast = !mentionsAnyBot; // plain "stop" or "/stop" with no mentions
+      const isBroadcast = !mentionsAnyBot; // plain "stop" with no mentions
       const isTargeted = mentionsThisBot;   // "@ThisBot stop"
 
       if (isBroadcast || isTargeted) {
@@ -769,12 +778,19 @@ client.on("messageCreate", async (msg) => {
         channelSessions.delete(msg.channel.id);
         const child = activeProcesses.get(msg.channel.id);
         if (child) {
+          // MARK IT. Without this the close handler treats a deliberate stop as a
+          // crash: it rejects with "Claude exited with code 143", and the caller's
+          // catch replies `Error: ...`. So asking a bot to stop answered with an
+          // error message — the only feedback the broadcast form ever produced,
+          // since "Stopped." was sent for the @mention form alone.
+          child._intentionalKill = true;
           child.kill("SIGTERM");
           activeProcesses.delete(msg.channel.id);
           reqLog.info({ broadcast: isBroadcast }, "Claude process killed by stop");
-          if (isTargeted) {
-            await msg.reply("Stopped.");
-          }
+          // Acknowledge whenever we actually stopped something, however it was
+          // phrased. Only the bot that had a run in flight replies, so a broadcast
+          // in a channel of idle bots stays quiet instead of N-way spam.
+          await msg.reply("Stopped.");
         }
         return;
       }

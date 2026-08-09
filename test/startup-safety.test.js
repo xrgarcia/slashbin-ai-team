@@ -73,6 +73,41 @@ check("ALLOWED_USERS gates humans only — it must not veto an allowlisted bot",
   assert.ok(m, "the ALLOWED_USERS check must be scoped to non-bot authors");
 });
 
+console.log("\nStop — asking a bot to stop must not answer with an error");
+
+check("a user-initiated stop is marked as intentional", () => {
+  // Without the mark, the close handler treats a deliberate stop as a crash:
+  // it rejects with "Claude exited with code 143" and the caller replies
+  // `Error: ...`. Asking the bot to stop answered with an error message.
+  const stopBlock = /const stopPattern[\s\S]*?\/\/ Stop mentions a different bot/.exec(bot);
+  assert.ok(stopBlock, "stop handler not found");
+  assert.ok(/_intentionalKill = true/.test(stopBlock[0]),
+    "the stop path kills without marking the kill intentional");
+});
+
+check("stopping acknowledges regardless of how it was phrased", () => {
+  const stopBlock = /const stopPattern[\s\S]*?\/\/ Stop mentions a different bot/.exec(bot)[0];
+  assert.ok(/await msg\.reply\("Stopped\."\)/.test(stopBlock), "no acknowledgement");
+  // The reply must NOT be gated on the @mention form — the bare `stop` is the
+  // form people actually type, and it used to get nothing back but an error.
+  assert.ok(!/if \(isTargeted\) \{\s*await msg\.reply\("Stopped\."\)/.test(stopBlock),
+    "acknowledgement is still restricted to the @mention form");
+});
+
+check("a stop word with trailing text still stops a run in flight", () => {
+  // `stop x, y, z` used to fall through to Claude and SPAWN A NEW RUN.
+  assert.ok(/stopPrefix/.test(bot), "no prefix form — only an exact match is handled");
+  assert.ok(/activeProcesses\.has\(msg\.channel\.id\)/.test(bot),
+    "the prefix form must be conditioned on a run actually being in flight");
+});
+
+check("the prefix form cannot hijack a normal request when nothing is running", () => {
+  const m = /const isStopCommand = ([^;]+);/.exec(bot);
+  assert.ok(m, "isStopCommand not found");
+  assert.ok(/hasRun && stopPrefix/.test(m[1]),
+    "the loose form must require an in-flight run, or 'stop sending the digest' becomes a no-op");
+});
+
 console.log("\nTool exposure — the permission bypass must be a choice, not a constant");
 
 check("no invocation hardcodes the skip-permissions flags", () => {
