@@ -281,6 +281,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `BOT_TYPING_INTERVAL_MS` | `8000` | How often the typing indicator refreshes |
 | `BOT_PROGRESS_ENABLED` | `true` | Post a live status line while working |
 | `BOT_PROGRESS_INTERVAL_MS` | `2500` | How often that line updates (coalesced, to respect rate limits) |
+| `BOT_PROGRESS_FIRST_MS` | `800` | How fast the *first* update appears |
 | `BOT_STOP_WORDS` | `stop,halt,abort,cancel` | Words that halt a run in flight (see below) |
 | `BOT_START_CONFIRM_MS` | `2000` | How long `npm start` waits before judging the start |
 | `BOT_STOP_TIMEOUT_MS` | `5000` | Graceful-shutdown wait before `npm stop` force-kills |

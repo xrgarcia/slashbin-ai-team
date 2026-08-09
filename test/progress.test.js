@@ -24,7 +24,7 @@ const fnSrc = /function createProgressReporter\(msg, reqLog\) \{[\s\S]*?\n\}/.ex
 assert.ok(fnSrc, "createProgressReporter not found in bot.js");
 
 /** Build a reporter with injected config and a fake Discord message. */
-function make({ enabled = true, intervalMs = 5 } = {}) {
+function make({ enabled = true, intervalMs = 5, firstMs = 5 } = {}) {
   const sent = [];
   const edits = [];
   let deleted = false;
@@ -35,9 +35,9 @@ function make({ enabled = true, intervalMs = 5 } = {}) {
   const msg = { reply: async (body) => { sent.push(body); return statusStub; } };
   const reqLog = { debug() {}, info() {}, warn() {} };
   const factory = new Function(
-    "PROGRESS_ENABLED", "PROGRESS_INTERVAL_MS", "setTimeout", "clearTimeout",
+    "PROGRESS_ENABLED", "PROGRESS_INTERVAL_MS", "PROGRESS_FIRST_MS", "setTimeout", "clearTimeout",
     `${fnSrc[0]}; return createProgressReporter;`
-  )(enabled, intervalMs, setTimeout, clearTimeout);
+  )(enabled, intervalMs, firstMs, setTimeout, clearTimeout);
   return { reporter: factory(msg, reqLog), sent, edits, deleted: () => deleted };
 }
 
@@ -111,9 +111,9 @@ async function check(label, fn) {
 
   await check("a Discord failure never breaks the run", async () => {
     const factory = new Function(
-      "PROGRESS_ENABLED", "PROGRESS_INTERVAL_MS", "setTimeout", "clearTimeout",
+      "PROGRESS_ENABLED", "PROGRESS_INTERVAL_MS", "PROGRESS_FIRST_MS", "setTimeout", "clearTimeout",
       `${fnSrc[0]}; return createProgressReporter;`
-    )(true, 5, setTimeout, clearTimeout);
+    )(true, 5, 5, setTimeout, clearTimeout);
     const reporter = factory(
       { reply: async () => { throw new Error("missing permissions"); } },
       { debug() {}, info() {}, warn() {} }
@@ -121,6 +121,16 @@ async function check(label, fn) {
     reporter.tool("Read", { file_path: "/a.js" });
     await sleep(30);
     await reporter.finish();   // must not throw
+  });
+
+  await check("the FIRST update lands fast, not a full interval later", async () => {
+    // A 14s request that only showed status for its last 5s is indistinguishable
+    // from the feature not working — which is exactly how it read on first use.
+    const h = make({ intervalMs: 500, firstMs: 10 });
+    h.reporter.tool("Read", { file_path: "/a.js" });
+    await sleep(60);
+    assert.strictEqual(h.sent.length, 1,
+      "nothing posted within 60ms — the first update must not wait for the throttle interval");
   });
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
