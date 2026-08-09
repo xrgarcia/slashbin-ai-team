@@ -6,11 +6,24 @@
 
 **Build AI employees for your business on Discord. Give each one a role, connect it to your tools, and let them work together — across one product or across an entire portfolio.**
 
+[![CI](https://github.com/xrgarcia/slashbin-ai-team/actions/workflows/ci.yml/badge.svg)](https://github.com/xrgarcia/slashbin-ai-team/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 - **Cost:** $0 marginal under your Claude Max plan. Each bot runs through the Claude Code CLI — no API charges, no SaaS subscription, no per-bot fees.
 - **Focused context:** Each bot's `CLAUDE.md` is its job description. A PO bot loads product context, an SRE bot loads ops context. Separated context produces sharper output than one generalist juggling every role in one window.
 - **Async parallelism:** While you DM the PO, the EM bot can be reviewing a PR and the SRE bot can be watching a deploy. Multiple bots = multiple things happening at once, not role-play.
+- **Safe to leave running:** an agent that can merge a PR needs guarantees about what happens when it crashes. [See below.](#why-safe-to-leave-running)
 
 Built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI. Each bot gets full access to your codebase, MCP servers, and tools — not a chatbot wrapper, but a real AI teammate that can read code, query databases, create issues, and ship work.
+
+```bash
+git clone https://github.com/xrgarcia/slashbin-ai-team.git
+cd slashbin-ai-team && npm install
+npm run setup     # asks a handful of questions, validates every answer
+npm start
+```
+
+Full walkthrough including the Discord side: **[docs/INSTALL.md](docs/INSTALL.md)**.
 
 ## Who this is for
 
@@ -30,6 +43,17 @@ Three patterns where an AI team beats a single generalist agent:
 
 > **Why separate bots if you're solo?** Each bot has a focused context window — a PO bot loaded with product context produces sharper product output than a generalist juggling product, ops, and code in one session. And bots run in parallel: while you're talking to one, the others are working. Async, not role-play.
 
+## Why "safe to leave running"
+
+Plenty of projects put an LLM in Discord. The hard part isn't answering — it's what happens when an agent that can **merge a PR** crashes halfway through. These guarantees each exist because the failure happened here first:
+
+- **A crashed run is never blindly retried.** If a resumed session already started, called a tool, or produced text, the harness refuses to re-run it and tells you to check what landed. Re-running a prompt that merged a PR merges it twice. At-most-once, by construction.
+- **A step-cap is reported as a step-cap.** Hitting the limit means the work so far landed — you get "reply to continue", not a bare exit code that reads as total failure.
+- **A bot that can't reach Discord dies.** It doesn't sit there reporting healthy while ignoring every message. `npm run status` tells you *connected*, not just *running*.
+- **A scheduled run survives a reconnect.** Jobs aren't marked "ran" until their channel actually resolves, so a gateway blip doesn't silently burn the day's run.
+- **A dropped attachment says so.** The bot will never claim nothing was attached when something was.
+- **Bots can't spiral.** Bot-to-bot exchanges stop after a limit, and any human message resets it — you are always the circuit breaker.
+
 ## What you can build
 
 - A **Product Owner** that manages your backlog, writes issues, and talks to customers
@@ -39,58 +63,6 @@ Three patterns where an AI team beats a single generalist agent:
 - Any role you can describe in a `CLAUDE.md` file
 
 Each bot is defined by its context — a `CLAUDE.md` that describes who it is, what it knows, and what it can do. Change the context, change the employee.
-
-## Key features
-
-- **One codebase, many employees** — run multiple bot instances from a single install, each with its own role, tools, and Discord channels
-- **Real tool access** — connect Stripe, Postgres, Railway, GitHub, or any MCP server. Bots don't just talk — they act.
-- **Bot-to-bot coordination** — AI employees can @mention each other and collaborate, with built-in loop prevention so they don't spiral
-- **Conversation memory** — sessions persist across restarts. Background summarization compresses chat history into searchable daily summaries, giving bots cross-session awareness.
-- **Image understanding** — attach screenshots, diagrams, or UI mockups and the bot analyzes them
-- **Stream progress** — see what the bot is doing as it works, not just the final answer
-- **Works with your codebase** — bots run from your project directory with full read/write access to code, docs, and config
-
-## Quick start
-
-### 1. Create a Discord bot
-
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
-2. Click **New Application** → name it (e.g., "Product Owner")
-3. Go to **Bot** tab → **Reset Token** → copy the token
-4. Enable **Message Content Intent** under Privileged Gateway Intents
-5. Go to **OAuth2 → URL Generator** → select `bot` scope → permissions: `Send Messages`, `Read Message History`
-6. Open the generated URL → invite the bot to your server
-
-### 2. Clone and install
-
-```bash
-git clone https://github.com/xrgarcia/slashbin-discord-bot.git
-cd slashbin-discord-bot
-npm install
-```
-
-### 3. Configure
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env`:
-
-```env
-DISCORD_TOKEN=your-discord-bot-token-here
-CLAUDE_CWD=/path/to/your/project-repo
-```
-
-`CLAUDE_CWD` is your **project directory** — the repo with your `CLAUDE.md`, `.mcp.json`, and Claude Code skills. This is how the bot gets its personality and capabilities.
-
-### 4. Define your AI employee
-
-The `CLAUDE.md` in your project directory is the bot's brain. It controls what the bot knows, how it behaves, and what it can do.
-
-```bash
-cp CLAUDE.md.example CLAUDE.md
-```
 
 **What to include:**
 
@@ -102,287 +74,320 @@ cp CLAUDE.md.example CLAUDE.md
 | **Terminology** | Domain terms | "Golden Model = canonical output schema" |
 | **Repos** | Where to find code and file issues | "acme/backend — main API server" |
 
-Keep it under 100 lines. Claude loads the full `CLAUDE.md` on every message — lean context means faster responses.
+Keep it under 100 lines. Claude loads the full `CLAUDE.md` on every message — lean context means faster responses. Start from `CLAUDE.md.example`.
 
-### 5. Run
+## Features
 
-```bash
-npm start
+**Agent runtime** — spawns the `claude` CLI per message. Serialized send queue, automatic message splitting, per-request step and time caps, and a concurrency guard that refuses politely rather than thrashing.
+
+**Live progress** — while a request runs, the bot posts one status line that is edited in place as it works (`⚙️ working — 6 steps · Read bot.js`), then removed when the answer arrives.
+
+> It reports **activity, never prose**. The answer is still delivered exactly once, at the end, unsplit. That distinction is the whole design: an earlier version streamed the reply text itself, so a preamble like "Let me check…" landed as its own message and the bot looked like it answered twice. Tool *inputs* are never shown either — a Bash command routinely carries a connection string.
+>
+> Turn it off with `BOT_PROGRESS_ENABLED=false`.
+
+**Harness skills, one golden source** — skills that operate on harness-owned data ship *with the harness* in `skill-pack/` and load into every bot automatically, namespaced as `/slashbin-harness:<name>`. No copying into each bot's repo.
+
+> The harness publishes its **resolved** paths — `$BOT_STATE_DIR`, `$BOT_SUMMARIES_DIR`, `$BOT_BUFFER_FILE` and friends — into every run. Pack skills read those and never name a file, which is what stops them going stale when a bot is renamed or a directory moves. Disable with `BOT_SKILL_PACK=`; add your own with `BOT_EXTRA_SKILL_PACKS`.
+
+**Roles and identity** — one bot = one `CLAUDE_CWD`. That directory's `CLAUDE.md` is its role, its `.mcp.json` its tools, its skills its procedures.
+
+**Memory and continuity** — each channel keeps its own Claude session, persisted across restarts. A rolling buffer records everything; when it fills, the oldest slice is summarized rather than dropped. A background summarizer writes daily summaries, and the last 48 hours are injected into new sessions.
+
+**Recall** — `/slashbin-harness:remember <question>` searches everything the bot has: **every** daily summary (not just the injected window), the live conversation buffer, files people sent, live sessions and scheduled runs.
+
+> It reports **which sources it actually searched**, so "searched and found nothing" is never confused with "never searched". That distinction is the feature: the version this replaces read three paths that had been dead for months, reported it had checked them, and answered confidently from the fraction it happened to find.
+>
+> Works mid-conversation on a resumed session, where the harness does not re-inject context — so a long conversation no longer *loses* memory as it goes.
+
+**Multiple employees, one install** — N bots from one clone, each with its own token, role, channels and state. Manage them individually (`--name`) or see them all (`npm run list`). Bots can @mention each other, with loop prevention built in.
+
+**Access control** — allowlists for users, channels and peer bots. Humans are gated by `ALLOWED_USERS`, bots by `ALLOWED_BOTS`; neither list has to name the other's members.
+
+**Triggers and automation** — a DM, an @mention, any message in a monitored channel, or an emoji reaction. Plus a **cron-style scheduler**: jobs fire on a five-field cron, recover runs missed in the last few minutes, and record every execution.
+
+**Files, any type, both directions** — attach anything and the bot opens it; reply to a message that has one and ask about it. Bots hand files back via an outbox or a marker. Oversized files are reported, never silently dropped.
+
+**Operations** — `start`/`stop`/`restart`/`status`/`list`/`logs`, structured logging, graceful shutdown, duplicate-instance guard, and `npm run doctor`.
+
+## Commands
+
+In Discord:
+
+| Command | What it does |
+|---|---|
+| `/fresh` | Clear this channel's session; the next message starts a new conversation |
+| `/stop` | Kill the running request in this channel |
+| `/status` | Buffer size, message count, attachments, whether a request is running |
+
+> **These names are reserved.** The harness answers them before your bot ever sees
+> the message, so a command of your own with one of these names — including any
+> `BOT_STOP_WORDS` — **can never run**. Nothing errors; it silently does nothing
+> while still appearing in the bot's own list of what it can do. `npm run doctor`
+> fails if it finds one, and the bot warns at startup.
+
+In your shell (add `-- --name <bot>` to target one instance):
+
+| Command | What it does |
+|---|---|
+| `npm run setup` | Interactive configuration, validated as you go |
+| `npm run doctor` | Check an existing install; exits non-zero on failure |
+| `npm start` / `stop` / `restart` | Manage the bot |
+| `npm run status` | Is it running — and is it *connected*? |
+| `npm run list` | Every bot instance in this checkout |
+| `npm run logs [N]` | Tail the log |
+| `npm run summarize` | Summarize now rather than on the interval |
+| `npm test` | The suite |
+
+## Connecting tools (MCP)
+
+Put a `.mcp.json` in your project directory:
+
+```json
+{
+  "mcpServers": {
+    "stripe": { "command": "npx", "args": ["-y", "@stripe/mcp"] },
+    "db": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://..."] }
+  }
+}
 ```
 
-Your AI employee is online.
+Any MCP server works. Connected MCP tools stay available in `restricted` mode — the tool allowlist governs the built-ins.
 
-## Usage
+## Tool exposure
 
-- **DM the bot** — it responds to all direct messages
-- **@mention in a channel** — `@ProductOwner what's the status of open issues?`
-- **Monitored channels** — set `MONITOR_CHANNELS` in `.env` for always-on response (no @mention needed)
-- `/new` — clear the session, start fresh
-- `/stop` — kill the running Claude process
+| `BOT_PERMISSION_MODE` | Behaviour |
+|---|---|
+| `restricted` *(default)* | Only `BOT_ALLOWED_TOOLS` — read-only built-ins by default — plus connected MCP tools |
+| `bypass` | Every tool, no permission checks |
 
-### Sessions
+**Use `bypass` only for a bot you intend to let write code and run commands, and only alongside a real `ALLOWED_USERS`.** In that configuration anyone who can reach the bot can run commands on your machine. It warns on every start.
 
-Each channel gets its own conversation. Messages continue with full context until you type `/new`. Sessions survive bot restarts, idle time, and reboots.
+Upgrading from 1.x? `BOT_PERMISSION_MODE=bypass` restores the old behaviour — see [UPGRADING.md](UPGRADING.md).
 
-### Context tiers
-
-Every session gets two layers of memory:
-
-1. **Recent summaries** — compressed daily summaries from the last 48 hours
-2. **Recent messages** — last 30 raw messages from monitored channels
-
-This gives bots awareness across sessions and channels without raw message bloat.
-
-## Running multiple AI employees
-
-Run a whole team from a single install. Each bot gets its own Discord token, project directory, and role.
+## Running a team
 
 ```bash
-cp ecosystem.config.example.js ecosystem.config.js
-```
-
-```js
-require('dotenv').config();
-
-module.exports = {
-  apps: [
-    {
-      name: 'product-owner',
-      script: 'bot.js',
-      env: {
-        BOT_NAME: 'product-owner',
-        DISCORD_TOKEN: process.env.PO_DISCORD_TOKEN,
-        CLAUDE_CWD: '/path/to/product-owner-repo',
-        MONITOR_CHANNELS: '123456789',
-        SUMMARIZE_INTERVAL_MS: '3600000',
-        BOT_HISTORY_DIR: '/path/to/product-owner-repo/.bot-history',
-        WS_PORT: '9801',
-        NODE_ENV: 'production',
-      }
-    },
-    {
-      name: 'engineering-manager',
-      script: 'bot.js',
-      env: {
-        BOT_NAME: 'engineering-manager',
-        DISCORD_TOKEN: process.env.EM_DISCORD_TOKEN,
-        CLAUDE_CWD: '/path/to/engineering-manager-repo',
-        MONITOR_CHANNELS: '987654321',
-        SUMMARIZE_INTERVAL_MS: '3600000',
-        BOT_HISTORY_DIR: '/path/to/engineering-manager-repo/.bot-history',
-        WS_PORT: '9802',
-        NODE_ENV: 'production',
-      }
-    },
-  ]
-};
-```
-
-```bash
+cp ecosystem.config.example.js ecosystem.config.js   # edit the three paths at the top
 npm install -g pm2
-pm2 start ecosystem.config.js
-pm2 save
+pm2 start ecosystem.config.js && pm2 save
 ```
 
-**Using Doppler for secrets?** Replace `require('dotenv').config()` with `doppler run`:
+Secrets are referenced by name and read from the environment — never written into that file. Supply them via `.env` or a secrets manager:
 
 ```bash
 doppler run --project my-project --config prd -- pm2 start ecosystem.config.js
 ```
 
-Tokens are injected via `process.env` — no `.env` file needed. Set up as a systemd service for auto-start on reboot.
+`npm run doctor` fails if it finds a literal credential in the config.
+
+**Which supervisor?** PM2 or systemd for production; the built-in manager is for development and single-bot installs.
 
 ### Bot-to-bot coordination
 
-AI employees can talk to each other. A Product Owner bot can @mention the Engineering Manager to hand off work. An SRE bot can escalate to the Product Owner when something breaks.
-
-**Both bots must whitelist each other:**
+Both bots must whitelist each other:
 
 ```env
-# Product Owner's .env — allow Engineering Manager to talk to it
+# Product Owner's env — allow the EM to talk to it
 ALLOWED_BOTS=<em-bot-user-id>
-
-# Engineering Manager's .env — allow Product Owner to talk to it
+# Engineering Manager's env — allow the PO to talk to it
 ALLOWED_BOTS=<po-bot-user-id>
 ```
 
-**Loop prevention** is built in. Bots automatically stop after `MAX_BOT_EXCHANGES` consecutive exchanges (default: 2). Any human message resets the counter — you're always the circuit breaker.
+Exchanges stop after `MAX_BOT_EXCHANGES` (default 2). Any human message resets the counter.
 
-## Connecting tools (MCP servers)
+## Configuration
 
-Give your AI employees access to real systems via `.mcp.json`:
+Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI fails if this table and the source disagree. **Resolution order: environment variable → default.**
 
-```json
-{
-  "mcpServers": {
-    "stripe": {
-      "command": "npx",
-      "args": ["-y", "@stripe/mcp"]
-    },
-    "my-database": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://..."]
-    }
-  }
-}
-```
-
-Any MCP server works — Stripe, Postgres, Railway, GitHub, Slack, custom APIs. The bot connects them all before responding.
-
-## Managing bots
-
-```bash
-npm start          # start in background
-npm stop           # graceful shutdown
-npm restart        # stop + start
-npm run status     # PID, uptime, recent logs
-npm run logs       # tail last 20 lines
-npm run logs 50    # tail last 50 lines
-```
-
-For production, use **pm2** or **systemd** for auto-restart on crashes and reboots.
-
-<details>
-<summary>systemd example (Linux)</summary>
-
-```ini
-# /etc/systemd/system/ai-employee.service
-[Unit]
-Description=AI Employee (Discord)
-After=network.target
-
-[Service]
-Type=simple
-User=your-user
-WorkingDir=/path/to/slashbin-discord-bot
-ExecStart=/usr/bin/node bot.js
-Restart=always
-RestartSec=10
-Environment=NODE_ENV=production
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl enable ai-employee
-sudo systemctl start ai-employee
-journalctl -u ai-employee -f
-```
-
-</details>
-
-## Chat history & summarization
-
-The built-in summarizer compresses Discord chat history into searchable daily markdown files. Enable it in `.env`:
-
-```env
-SUMMARIZE_INTERVAL_MS=3600000   # summarize every hour
-```
-
-Summaries are automatically injected into every Claude session (last 48h), giving bots long-term memory across conversations. You can also run it manually:
-
-```bash
-npm run summarize          # summarize new messages
-npm run summarize:dry      # preview (no changes)
-```
-
-## Configuration reference
-
+### Identity
 | Variable | Default | Description |
 |---|---|---|
-| `DISCORD_TOKEN` | (required) | Discord bot token |
-| `BOT_NAME` | `bot` | Instance name (used for PID file, required for multi-bot) |
-| `CLAUDE_CWD` | current dir | Project repo with `CLAUDE.md`, `.mcp.json`, skills |
-| `MCP_CONFIG` | (none) | Path to `.mcp.json` if not in `CLAUDE_CWD` |
-| `ALLOWED_USERS` | (all) | Restrict access to specific Discord user IDs |
-| `MONITOR_CHANNELS` | (none) | Channels where bot responds without @mention |
-| `ALLOWED_CHANNELS` | (none) | Channels where bot can respond (DMs always allowed) |
-| `ALLOWED_BOTS` | (none) | Bot user IDs allowed to interact |
-| `MAX_BOT_EXCHANGES` | `2` | Max bot-to-bot exchanges before stopping |
-| `BOT_SYSTEM_PROMPT` | (built-in) | Override the system prompt |
-| `SESSION_TIMEOUT_MS` | `1800000` | Session inactivity timeout (30 min) |
-| `CLAUDE_TIMEOUT_MS` | `3600000` | Max time per session (1 hour) |
-| `CLAUDE_MODEL` | (CLI default) | Claude model (e.g., `claude-opus-4-6`) |
-| `SUMMARIZE_MODEL` | `CLAUDE_MODEL` | Model for summarization (use cheaper model) |
-| `RECENT_CONTEXT_CHANNELS` | (none) | Channels to pull recent messages from for session context |
-| `RECENT_CONTEXT_MAX_MESSAGES` | `30` | Sliding window size |
-| `RECENT_CONTEXT_MAX_CHARS` | `12000` | Total context budget |
-| `SUMMARIZE_CHANNELS` | (none) | Channels to summarize on interval |
-| `SUMMARY_LOOKBACK_HOURS` | `48` | Summary history window |
-| `SUMMARIZE_INTERVAL_MS` | `0` | Background summarization interval |
+| `DISCORD_TOKEN` | *(required)* | Bot token from the Developer Portal |
+| `CLAUDE_CWD` | current dir | **Your** project repo — its `CLAUDE.md` is the bot's role |
+| `BOT_NAME` | `bot` | Instance name; scopes pid, log and session files |
+| `MCP_CONFIG` | *(none)* | Path to `.mcp.json` if not in `CLAUDE_CWD` |
+| `BOT_SKILL_PACK` | `<harness>/skill-pack` | Harness-owned skills loaded into every bot. Empty disables |
+| `BOT_EXTRA_SKILL_PACKS` | *(none)* | Additional plugin directories, comma-separated |
+
+### Access
+| Variable | Default | Description |
+|---|---|---|
+| `ALLOWED_USERS` | *(empty = everyone)* | User IDs allowed to drive the bot |
+| `BOT_REQUIRE_ALLOWLIST` | `false` | Refuse to start when `ALLOWED_USERS` is empty |
+| `MONITOR_CHANNELS` | *(none)* | Channels answered without an @mention |
+| `ALLOWED_CHANNELS` | *(none)* | Restrict responses to these channels |
+| `ALLOWED_BOTS` | *(none)* | Peer bot IDs allowed to interact |
+| `MAX_BOT_EXCHANGES` | `2` | Consecutive bot-to-bot exchanges before stopping |
+
+### Tools
+| Variable | Default | Description |
+|---|---|---|
+| `BOT_PERMISSION_MODE` | `restricted` | `restricted` or `bypass` |
+| `BOT_ALLOWED_TOOLS` | `Read,Glob,Grep,WebFetch,WebSearch,TodoWrite` | Built-ins exposed in `restricted` |
+| `BOT_SUMMARIZER_TOOLS` | `Read` | Tools the summarizer may use |
+
+### Claude
+| Variable | Default | Description |
+|---|---|---|
+| `CLAUDE_MODEL` | CLI default | e.g. `claude-opus-5` |
+| `SUMMARIZE_MODEL` | `CLAUDE_MODEL` | A cheaper model is fine here |
+| `CLAUDE_BIN` | `claude` | Path to the CLI |
+| `CLAUDE_MAX_TURNS` | `100` | Steps per request before a cap-out |
+| `CLAUDE_TIMEOUT_MS` | `3600000` | Max wall time per request |
+| `SESSION_TIMEOUT_MS` | `1800000` | Idle time before a channel starts fresh |
+| `MAX_CONCURRENT_CLAUDE` | `2` | In-flight requests before new ones are refused |
+| `BOT_SYSTEM_PROMPT` | *(built-in)* | Override the harness prompt |
+| `BOT_TIMEZONE` | host zone | IANA name; the bot's sense of "today" |
+
+### Memory
+| Variable | Default | Description |
+|---|---|---|
+| `BOT_STATE_DIR` | `BOT_HISTORY_DIR` | **One root for everything a bot remembers** — buffer, sessions, and the default parent for the rest |
+| `BOT_HISTORY_DIR` | `.bot-history` | Daily summaries, schedules, job history |
+| `BOT_ATTACHMENTS_DIR` | `<history>/attachments` | Inbound files. Worth pointing **outside any git repo** — these are arbitrary user-supplied binaries, and a working tree loses them to `git clean -x` or a re-clone |
+| `BOT_OUTBOX_DIR` | `<history>/outbox` | Files written here are sent to the user |
+| `SUMMARIZE_INTERVAL_MS` | `0` *(off)* | Background summarization interval |
+| `SUMMARIZE_CHANNELS` | `MONITOR_CHANNELS` | Channels to summarize |
+| `SUMMARIZE_SEEN_CHANNELS` | `true` | Also summarize **DMs and any channel the bot has spoken in**. Without this, a conversation held in a DM is never written down and recall cannot find it |
+| `SUMMARIZE_BATCH_SIZE` | `200` | Messages fetched per channel per run |
+| `SUMMARY_LOOKBACK_HOURS` | `48` | How much summary history is injected (`/remember` reaches past this) |
+| `RECENT_CONTEXT_MAX_CHARS` | `12000` | Context budget for `/remember` results |
+| `SUMMARIZE_TIMEOUT_MS` | `120000` | Wall clock for one summarization run |
+| `BOT_SUMMARIZER_START_DELAY_MS` | `10000` | Grace period after login before the first cycle |
+| `BUFFER_MAX_BYTES` | `32768` | Buffer size before rotation |
+| `BUFFER_ROTATE_PERCENT` | `40` | Oldest N% summarized away on rotation |
+| `BUFFER_TRUNCATE_RESPONSE` | `500` | Chars of each reply kept in the buffer |
+
+### Files
+| Variable | Default | Description |
+|---|---|---|
+| `MAX_ATTACHMENT_BYTES` | `26214400` | Largest inbound file (25MB) |
+| `MAX_OUTBOUND_BYTES` | `8388608` | Largest file attached to a reply (8MB) |
+| `ATTACHMENT_FETCH_TIMEOUT_MS` | `60000` | Per-attachment download timeout |
+| `BOT_OUTBOX_MTIME_TOLERANCE_MS` | `2000` | Clock-skew slack when detecting new outbox files |
+| `BOT_ATTACH_EXTENSIONS` | `csv,pdf,xlsx,png,jpg` | Types the bot may hand back by *naming* a path, without the outbox or a marker. **Widen with care** — a broad list starts attaching every document a bot merely mentions |
+
+### Reactions
+| Variable | Default | Description |
+|---|---|---|
+| `REACTION_HANDLER_ENABLED` | `false` | Requires `ALLOWED_USERS` to be non-empty |
+| `REACTION_TRIGGER_EMOJI` | `👍` | Reacting with this invokes Claude |
+| `REACTION_ACK_EMOJI` | `✅` | Added on success |
+| `REACTION_FAIL_EMOJI` | `❌` | Added on failure |
+
+### Scheduler
+| Variable | Default | Description |
+|---|---|---|
+| `BOT_SCHEDULE_CHECK_MS` | `60000` | How often schedules are evaluated |
+| `BOT_SCHEDULE_LOOKBACK_MINUTES` | `5` | How far back a missed run is recovered |
+
+### WebSocket bridge
+| Variable | Default | Description |
+|---|---|---|
+| `WS_PORT` | `9800` | Bridge port — must be unique per bot |
+| `WS_HOST` | `127.0.0.1` | Bind address; it accepts commands, so widen deliberately |
+| `WS_HEARTBEAT_MS` | `30000` | Ping interval |
+| `WS_HEARTBEAT_MAX_MISSES` | `3` | Missed pings before disconnect |
+
+### Misc
+| Variable | Default | Description |
+|---|---|---|
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `REACTION_HANDLER_ENABLED` | `false` | Set `true` to enable emoji reaction triggers (requires `ALLOWED_USERS`) |
-| `REACTION_TRIGGER_EMOJI` | `👍` | Emoji that triggers Claude when reacted on a bot message |
-| `REACTION_ACK_EMOJI` | `✅` | Emoji the bot adds after a successful Claude invocation |
-| `REACTION_FAIL_EMOJI` | `❌` | Emoji the bot adds when Claude invocation fails |
+| `NODE_ENV` | — | `production` disables pretty logging |
+| `MAX_DISCORD_LENGTH` | `1900` | Chars per message before splitting |
+| `BOT_BOT_EXCHANGE_PRUNE_MS` | `600000` | How often bot-exchange counters reset |
+| `BOT_TYPING_INTERVAL_MS` | `8000` | How often the typing indicator refreshes |
+| `BOT_PROGRESS_ENABLED` | `true` | Post a live status line while working |
+| `BOT_PROGRESS_INTERVAL_MS` | `2500` | How often that line updates (coalesced, to respect rate limits) |
+| `BOT_PROGRESS_FIRST_MS` | `800` | How fast the *first* update appears |
+| `BOT_STOP_WORDS` | `stop,halt,abort,cancel` | Words that halt a run in flight (see below) |
+| `BOT_START_CONFIRM_MS` | `2000` | How long `npm start` waits before judging the start |
+| `BOT_STOP_TIMEOUT_MS` | `5000` | Graceful-shutdown wait before `npm stop` force-kills |
 
-## Reaction-trigger handler
+### Stopping a run
 
-Enable bots to respond to emoji reactions instead of typed messages. A single tap on a bot message invokes Claude with a labeled context line describing the reaction.
+Say any of `BOT_STOP_WORDS` to halt what a bot is doing. **Both forms work:**
 
-**Hard requirement:** `ALLOWED_USERS` must be non-empty when `REACTION_HANDLER_ENABLED=true`. If `ALLOWED_USERS` is empty, the handler refuses to register and logs a fatal warning — the bot otherwise starts normally for messages.
+- **`stop` on its own** — halts the run in every bot in the channel. Only a bot that
+  actually had something running replies, so idle bots stay quiet.
+- **`stop x, y, z`** — a message that *opens* with a stop word also halts, but only
+  when a run is in flight. With nothing running it is an ordinary message, so
+  "stop sending the Friday digest" is still a request the bot thinks about.
 
-Enable per-bot in `ecosystem.config.js`:
+`@TheBot stop` targets one bot. Stopping also clears that channel's session, since
+a killed run leaves one mid-thought.
 
-```js
-REACTION_HANDLER_ENABLED: 'true',
-ALLOWED_USERS: '<your-discord-user-id>',
-REACTION_TRIGGER_EMOJI: '👍',
+These words are configurable because "stop" is a vocabulary choice, not a protocol
+constant — a non-English channel needs its own.
+
+## Scheduled jobs
+
+Create `<BOT_HISTORY_DIR>/schedules.json`:
+
+```json
+[
+  {
+    "id": "standup",
+    "cron": "0 9 * * 1,2,3,4,5",
+    "channel": "123456789012345678",
+    "prompt": "Post a short summary of yesterday's merged PRs."
+  }
+]
 ```
 
-When the trigger emoji is reacted on a bot message, Claude receives this context:
+Five-field cron, evaluated in the host's local time. A run missed in the last few minutes — a restart, a gateway blip — is recovered rather than skipped. Add `"expires": "2026-12-31T00:00:00Z"` for a one-shot. Every run is appended to `job-history.jsonl`.
 
-```
-[reaction_trigger]
-emoji: 👍
-reactor: username#1234567890
-message_id: <id>
-channel_id: <id>
-reacted_content: <verbatim message text>
-```
+## Reaction triggers
 
-**Bot operator's responsibility:** Define in your `CLAUDE.md` what the trigger emoji means and which MCP tool to call. The harness is dumb transport — all semantic meaning lives in the bot's own context.
+With `REACTION_HANDLER_ENABLED=true` and a non-empty `ALLOWED_USERS`, reacting to one of the bot's messages with the trigger emoji invokes Claude with a labeled context block naming the emoji, the reactor, and the message reacted to.
 
-**Behavior notes:**
+The harness is dumb transport here — **what the emoji means is yours to define in your `CLAUDE.md`.** The bot's own ✅ never retriggers, double-taps fire once, and failures get both a ❌ and a reply.
 
-- The bot's own ack reaction (`✅`) does not retrigger — self-loop is prevented
-- Unauthorized users (not in `ALLOWED_USERS`) are silently ignored
-- Double-tapping the same message fires Claude only once; the second tap is dropped
-- Reactions on older messages after a bot restart still fire (Discord partials are resolved)
-- On failure: fail emoji is added AND a reply with the error summary is posted — no silent failure
+## Files
+
+**Sending to a bot:** attach a file, or reply to a message that has one and ask about it. Any type. The bot is told the name, size, type and local path, and opens it. If a file can't be downloaded, it says so and names the reason.
+
+**Getting files back:** anything the bot writes into its outbox during a reply is attached automatically, or it emits `[[attach: /path]]`, which is stripped before the message is sent. Both routes are explicit on purpose — a bot that merely *mentions* a path doesn't upload it. Files over the size limit are reported with their path rather than silently failing.
 
 ## Architecture
 
 ```
 Discord message
-  → bot.js receives via discord.js
-  → spawns `claude` CLI with --output-format stream-json
-  → streams events back as Discord messages
-  → session ID saved for conversation continuity
+  → bot.js (discord.js)
+  → spawn `claude` --output-format stream-json
+  → stream events back as Discord messages
+  → session id saved for continuity
 ```
 
-- **CLI spawn, not SDK** — uses Claude Code CLI directly, inheriting all built-in tools (Bash, Read, Edit, Grep) and MCP support
-- **stdin: "ignore"** — prevents Claude from hanging waiting for interactive consent
-- **Stream processing** — users see progress as the bot works, not just the final answer
-- **Send queue** — messages are serialized to avoid Discord rate limits
-
-## Troubleshooting
-
-| Problem | Cause | Fix |
-|---|---|---|
-| Bot sends empty messages | Claude hanging on stdin | Ensure `stdio: ["ignore", "pipe", "pipe"]` in spawn options |
-| Bot ignores @mentions from another bot | Bot-to-bot not configured | Add the other bot's user ID to `ALLOWED_BOTS` in both bots |
-| Bot appears stuck | MCP server unreachable | Remove `.mcp.json`, test, add servers back one at a time |
-| Error code 143 | Timeout (SIGTERM) | Increase `CLAUDE_TIMEOUT_MS` or check for hanging MCP servers |
-| "Claude exited with code 1" | CLI not authenticated | Run `claude auth` in your terminal |
-| Bot doesn't see messages | Missing intent | Enable **Message Content Intent** in Discord Developer Portal |
+- **CLI spawn, not SDK** — inherits every built-in tool and MCP support for free
+- **stdin ignored** — the CLI can never hang waiting for consent
+- **Streamed** — progress as it happens
+- **Serialized sends** — no rate-limit races
 
 ## Prerequisites
 
-- **Node.js** 18+
-- **Claude Code CLI** installed and authenticated ([install guide](https://docs.anthropic.com/en/docs/claude-code/getting-started))
+- Node.js 18+
+- Claude Code CLI, installed and authenticated
+
+## Troubleshooting
+
+Run **`npm run doctor`** first — it checks most of this and prints no secrets.
+
+| Symptom | Likely cause |
+|---|---|
+| Online but ignores everything | Message Content Intent is off — `doctor` catches this |
+| "Bot is not running" right after starting | Bad token; `doctor` or the log names it |
+| Ignores another bot | Both bots must list each other in `ALLOWED_BOTS` |
+| Ignores you | `ALLOWED_USERS` is set and you're not in it |
+| Won't write files or run commands | `BOT_PERMISSION_MODE=restricted` — that's the default |
+| Hangs, then exit code 143 | Timeout — raise `CLAUDE_TIMEOUT_MS`, or an MCP server is unreachable |
+| Second bot crashes at startup | `WS_PORT` collision — one port per bot |
+
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) · [UPGRADING.md](UPGRADING.md) · [CHANGELOG.md](CHANGELOG.md)
 
 ## License
 
-ISC
+MIT — see [LICENSE](LICENSE).

@@ -1,0 +1,53 @@
+name: Feature request
+description: Something the harness should be able to do
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One thing worth knowing before you write: **the harness is deliberately
+        dumb transport.** It moves messages, files and context; what any of it
+        *means* lives in your bot's own `CLAUDE.md`.
+
+        So "the bot should respond differently to X" is usually a change to your
+        context file, not to this project. "The bot has no way to receive X" is a
+        feature request.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What can't you do today?
+      description: Describe the situation, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What are you doing instead?
+      description: Even "nothing, I gave up" is useful — it tells us the cost.
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like it to do?
+      description: If you have a shape in mind, sketch it — settings, commands, behaviour.
+
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Which layer is this?
+      options:
+        - Harness — how messages, files or context move
+        - Bot behaviour — what a bot says or decides
+        - Not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: compat
+    attributes:
+      label: Compatibility
+      options:
+        - label: This can be added without changing behaviour for existing operators
+        - label: This would need a breaking change (say why in the proposal)

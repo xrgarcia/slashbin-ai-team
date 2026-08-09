@@ -1,20 +1,44 @@
 {
-  "name": "slashbin-discord-bot",
-  "version": "1.0.0",
-  "main": "index.js",
+  "name": "slashbin-ai-team",
+  "version": "2.0.0",
+  "description": "Run a team of AI coworkers in Discord. Powered by Claude Code — safe enough to leave running.",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "discord",
+    "discord-bot",
+    "ai-agent",
+    "ai-employee",
+    "mcp",
+    "chatops",
+    "self-hosted"
+  ],
+  "homepage": "https://github.com/xrgarcia/slashbin-ai-team#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xrgarcia/slashbin-ai-team.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xrgarcia/slashbin-ai-team/issues"
+  },
+  "author": "Slashbin, LLC",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "doctor": "node scripts/doctor.mjs",
     "start": "node bot-manager.mjs start",
     "stop": "node bot-manager.mjs stop",
     "restart": "node bot-manager.mjs restart",
     "status": "node bot-manager.mjs status",
     "logs": "node bot-manager.mjs logs",
     "summarize": "node summarize.js",
-    "summarize:dry": "node summarize.js --dry-run"
+    "summarize:dry": "node summarize.js --dry-run",
+    "test": "node test/attachments.test.js && node test/resume-safety.test.js && node test/history-dir.test.js && node test/startup-safety.test.js && node test/progress.test.js && node test/skill-pack.test.js && node test/config-docs.test.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
     "discord.js": "^14.25.1",
     "dotenv": "^17.3.1",
