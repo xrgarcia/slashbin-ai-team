@@ -105,6 +105,31 @@ check("resolved paths are published to skills, so nothing has to hardcode one", 
   }
 });
 
+check("a user's schedules live outside the repo, with the rest of the runtime state", () => {
+  // HISTORY_DIR holds SUMMARIES — the reviewable record people deliberately keep
+  // in a repo. Schedules, the job log and the summarizer's read position are
+  // none of those, and a working tree loses them to `git clean -x` or a
+  // re-clone. Gitignored is not safe, only invisible.
+  for (const [name, decl] of [["SCHEDULES_FILE", 'join(STATE_DIR, "schedules.json")'],
+                              ["JOB_HISTORY_FILE", 'join(STATE_DIR, "job-history.jsonl")'],
+                              ["CHECKPOINT_FILE", 'join(STATE_DIR, ".checkpoints.json")']]) {
+    assert.ok(bot.includes(`const ${name} = ${decl}`), `${name} must resolve under the state root`);
+  }
+});
+
+check("moving them migrates rather than strands", () => {
+  assert.ok(/LEGACY_STATE\.push\(\[join\(HISTORY_DIR, "schedules\.json"\)/.test(bot),
+    "an existing schedule must move, not be abandoned — a job that stops firing is silent");
+  assert.ok(/LEGACY_STATE\.push\(\[join\(HISTORY_DIR, "\.checkpoints\.json"\)/.test(bot),
+    "an unmigrated checkpoint makes the summarizer re-read from the beginning");
+});
+
+check("summarize.js resolves the checkpoint the same way", () => {
+  const sum = readFileSync(join(REPO, "summarize.js"), "utf8");
+  assert.ok(/join\(STATE_DIR, "\.checkpoints\.json"\)/.test(sum),
+    "if the two disagree the summarizer rewrites days that already have summaries");
+});
+
 console.log("\nScheduler — 7am must mean 7am where the user is");
 
 check("cron is evaluated in BOT_TIMEZONE, not the host zone", () => {
