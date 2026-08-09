@@ -86,6 +86,10 @@ Keep it under 100 lines. Claude loads the full `CLAUDE.md` on every message — 
 >
 > Turn it off with `BOT_PROGRESS_ENABLED=false`.
 
+**Harness skills, one golden source** — skills that operate on harness-owned data ship *with the harness* in `skill-pack/` and load into every bot automatically, namespaced as `/slashbin-harness:<name>`. No copying into each bot's repo.
+
+> The harness publishes its **resolved** paths — `$BOT_STATE_DIR`, `$BOT_SUMMARIES_DIR`, `$BOT_BUFFER_FILE` and friends — into every run. Pack skills read those and never name a file, which is what stops them going stale when a bot is renamed or a directory moves. Disable with `BOT_SKILL_PACK=`; add your own with `BOT_EXTRA_SKILL_PACKS`.
+
 **Roles and identity** — one bot = one `CLAUDE_CWD`. That directory's `CLAUDE.md` is its role, its `.mcp.json` its tools, its skills its procedures.
 
 **Memory and continuity** — each channel keeps its own Claude session, persisted across restarts. A rolling buffer records everything; when it fills, the oldest slice is summarized rather than dropped. A background summarizer writes daily summaries, and the last 48 hours are injected into new sessions.
@@ -193,6 +197,8 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `CLAUDE_CWD` | current dir | **Your** project repo — its `CLAUDE.md` is the bot's role |
 | `BOT_NAME` | `bot` | Instance name; scopes pid, log and session files |
 | `MCP_CONFIG` | *(none)* | Path to `.mcp.json` if not in `CLAUDE_CWD` |
+| `BOT_SKILL_PACK` | `<harness>/skill-pack` | Harness-owned skills loaded into every bot. Empty disables |
+| `BOT_EXTRA_SKILL_PACKS` | *(none)* | Additional plugin directories, comma-separated |
 
 ### Access
 | Variable | Default | Description |
