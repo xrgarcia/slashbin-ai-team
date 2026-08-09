@@ -37,7 +37,7 @@
     "logs": "node bot-manager.mjs logs",
     "summarize": "node summarize.js",
     "summarize:dry": "node summarize.js --dry-run",
-    "test": "node test/attachments.test.js && node test/resume-safety.test.js && node test/history-dir.test.js && node test/startup-safety.test.js && node test/config-docs.test.js"
+    "test": "node test/attachments.test.js && node test/resume-safety.test.js && node test/history-dir.test.js && node test/startup-safety.test.js && node test/progress.test.js && node test/config-docs.test.js"
   },
   "dependencies": {
     "discord.js": "^14.25.1",

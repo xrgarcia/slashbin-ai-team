@@ -20,6 +20,12 @@ the upgrade is one line.
 - **`BOT_PERMISSION_MODE`** — `restricted` (default) or `bypass`.
 - **`BOT_REQUIRE_ALLOWLIST`** — refuse to start with an empty `ALLOWED_USERS`.
 - **`BOT_TIMEZONE`** — the bot's clock, validated at startup.
+- **Live progress.** While a request runs the bot posts one status line, edited in
+  place as it works, removed when the answer arrives. It reports activity only —
+  the reply is still delivered once, at the end, unsplit — which is what lets
+  progress return without reviving the "bot answered twice" bug that removed
+  streaming in the first place (3c79e5e, 2026-03-28). Tool inputs are never shown.
+  Disable with `BOT_PROGRESS_ENABLED=false`.
 - **`npm run list`** — every bot instance this checkout has state for.
 - Settings for previously frozen constants: `BOT_SCHEDULE_CHECK_MS`,
   `BOT_SCHEDULE_LOOKBACK_MINUTES`, `BOT_OUTBOX_MTIME_TOLERANCE_MS`,
