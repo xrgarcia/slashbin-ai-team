@@ -78,7 +78,13 @@ Keep it under 100 lines. Claude loads the full `CLAUDE.md` on every message — 
 
 ## Features
 
-**Agent runtime** — spawns the `claude` CLI per message and streams progress as it works. Serialized send queue, automatic message splitting, per-request step and time caps, and a concurrency guard that refuses politely rather than thrashing.
+**Agent runtime** — spawns the `claude` CLI per message. Serialized send queue, automatic message splitting, per-request step and time caps, and a concurrency guard that refuses politely rather than thrashing.
+
+**Live progress** — while a request runs, the bot posts one status line that is edited in place as it works (`⚙️ working — 6 steps · Read bot.js`), then removed when the answer arrives.
+
+> It reports **activity, never prose**. The answer is still delivered exactly once, at the end, unsplit. That distinction is the whole design: an earlier version streamed the reply text itself, so a preamble like "Let me check…" landed as its own message and the bot looked like it answered twice. Tool *inputs* are never shown either — a Bash command routinely carries a connection string.
+>
+> Turn it off with `BOT_PROGRESS_ENABLED=false`.
 
 **Roles and identity** — one bot = one `CLAUDE_CWD`. That directory's `CLAUDE.md` is its role, its `.mcp.json` its tools, its skills its procedures.
 
@@ -273,6 +279,8 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `MAX_DISCORD_LENGTH` | `1900` | Chars per message before splitting |
 | `BOT_BOT_EXCHANGE_PRUNE_MS` | `600000` | How often bot-exchange counters reset |
 | `BOT_TYPING_INTERVAL_MS` | `8000` | How often the typing indicator refreshes |
+| `BOT_PROGRESS_ENABLED` | `true` | Post a live status line while working |
+| `BOT_PROGRESS_INTERVAL_MS` | `2500` | How often that line updates (coalesced, to respect rate limits) |
 | `BOT_STOP_WORDS` | `stop,halt,abort,cancel` | Words that halt a run in flight (see below) |
 | `BOT_START_CONFIRM_MS` | `2000` | How long `npm start` waits before judging the start |
 | `BOT_STOP_TIMEOUT_MS` | `5000` | Graceful-shutdown wait before `npm stop` force-kills |

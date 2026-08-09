@@ -120,6 +120,24 @@ const STOP_ALTERNATION = STOP_WORDS.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, 
 // but read the warning in the README before adding to it.
 const ATTACH_EXTENSIONS = (process.env.BOT_ATTACH_EXTENSIONS || "csv,pdf,xlsx,png,jpg")
   .split(",").map((e) => e.trim().replace(/^\./, "")).filter(Boolean);
+// Compiled once and used by BOTH call sites. Two copies of this list existed,
+// and making only one configurable is how a setting silently half-works.
+const ATTACH_RE = new RegExp(`\\.(${ATTACH_EXTENSIONS.join("|")})$`, "i");
+
+// --- Progress reporting ---
+// Streaming was removed on 2026-03-28 because text emitted BEFORE a tool call
+// ("Let me check...") was posted as its own Discord message, so the bot looked
+// like it answered twice. That diagnosis was right; the cure was too broad — it
+// batched everything to the end and took all progress visibility with it.
+//
+// The fix is to stream ACTIVITY, never prose. The answer is still delivered
+// exactly once, at the end, unsplit. Alongside it runs a single status message
+// that is EDITED IN PLACE as tools are called, then deleted. One answer, one
+// transient status: the original complaint cannot recur, because no part of the
+// reply is ever sent early.
+const PROGRESS_ENABLED = process.env.BOT_PROGRESS_ENABLED !== "false";
+// Discord rate-limits edits per channel. Coalesce rather than edit per tool call.
+const PROGRESS_INTERVAL_MS = envInt("BOT_PROGRESS_INTERVAL_MS", 2500, { min: 1000 });
 
 // The clock the bot is told it lives in. Every session gets this in its prompt, so
 // a wrong zone makes the bot wrong about "today" — and about anything it schedules.
@@ -903,9 +921,10 @@ client.on("messageCreate", async (msg) => {
 
   const sendQueue = createSendQueue(msg, reqLog);
   const channelName = msg.channel.name || "DM";
+  const progress = createProgressReporter(msg, reqLog);
 
   try {
-    const responseText = await runClaude(prompt, msg.channel.id, reqLog, sendQueue.enqueue, { fileRefs, attachmentFailures }, channelName);
+    const responseText = await runClaude(prompt, msg.channel.id, reqLog, sendQueue.enqueue, { fileRefs, attachmentFailures }, channelName, progress);
     clearInterval(typing);
     await sendQueue.flush();
 
@@ -913,6 +932,8 @@ client.on("messageCreate", async (msg) => {
     recordBotResponse(channelName, responseText);
   } catch (err) {
     clearInterval(typing);
+    // A failed run must not leave a "working..." message sitting there forever.
+    try { await progress?.finish(); } catch { /* ignore */ }
     await sendQueue.flush();
     // Don't send error to Discord for intentional kills — prevents bot-to-bot feedback loops
     if (err.message && err.message.includes("intentionally killed")) {
@@ -980,6 +1001,7 @@ if (REACTION_HANDLER_ENABLED && ALLOWED_USER_IDS.length > 0) {
     ].join("\n");
 
     const sendQueue = createSendQueue(reaction.message, reqLog);
+    const progress = createProgressReporter(reaction.message, reqLog);
 
     try {
       reqLog.info("Reaction trigger — invoking Claude");
@@ -989,7 +1011,8 @@ if (REACTION_HANDLER_ENABLED && ALLOWED_USER_IDS.length > 0) {
         reqLog,
         sendQueue.enqueue,
         {},
-        channelName
+        channelName,
+        progress
       );
       await sendQueue.flush();
       recordBotResponse(channelName, responseText);
@@ -1000,6 +1023,7 @@ if (REACTION_HANDLER_ENABLED && ALLOWED_USER_IDS.length > 0) {
         reqLog.warn({ err: err.message }, "Failed to add ack reaction");
       }
     } catch (err) {
+      try { await progress?.finish(); } catch { /* ignore */ }
       await sendQueue.flush();
       reqLog.error({ err }, "Reaction-triggered Claude invocation failed");
       try {
@@ -1017,6 +1041,69 @@ if (REACTION_HANDLER_ENABLED && ALLOWED_USER_IDS.length > 0) {
     { trigger: REACTION_TRIGGER_EMOJI, ack: REACTION_ACK_EMOJI, fail: REACTION_FAIL_EMOJI },
     "Reaction-trigger handler enabled"
   );
+}
+
+/**
+ * A single status message, edited in place while the bot works, deleted when done.
+ *
+ * Deliberately holds O(1) state — the latest tool name and a count, never a
+ * transcript. Nothing here grows with the length of a run.
+ *
+ * It shows tool NAMES, and a basename for file tools. It never shows tool INPUT:
+ * a Bash command routinely carries a connection string or an API key, and this
+ * text goes to a Discord channel that is not the transcript's security boundary.
+ */
+function createProgressReporter(msg, reqLog) {
+  if (!PROGRESS_ENABLED) return null;
+
+  let statusMsg = null;
+  let latest = null;
+  let count = 0;
+  let timer = null;
+  let sending = false;
+  let finished = false;
+
+  function label(name, input) {
+    // Only file-shaped tools get a detail, and only its basename.
+    if (input && typeof input.file_path === "string" && /^(Read|Write|Edit|NotebookEdit)$/.test(name)) {
+      return `${name} ${input.file_path.split("/").pop()}`;
+    }
+    if (input && typeof input.pattern === "string" && /^(Glob|Grep)$/.test(name)) {
+      return `${name} ${String(input.pattern).slice(0, 40)}`;
+    }
+    return name;
+  }
+
+  async function render() {
+    if (finished || sending) return;
+    sending = true;
+    const body = `-# ⚙️ working — ${count} step${count === 1 ? "" : "s"} · ${latest}`;
+    try {
+      if (statusMsg) await statusMsg.edit(body);
+      else statusMsg = await msg.reply(body);
+    } catch (err) {
+      // Never let progress reporting break the actual request.
+      reqLog.debug({ err: err.message }, "progress update failed");
+    } finally {
+      sending = false;
+    }
+  }
+
+  return {
+    tool(name, input) {
+      count++;
+      latest = label(name, input);
+      if (timer) return;                     // an update is already scheduled
+      timer = setTimeout(() => { timer = null; render(); }, PROGRESS_INTERVAL_MS);
+    },
+    async finish() {
+      finished = true;
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (!statusMsg) return;
+      try { await statusMsg.delete(); } catch { /* already gone, or no permission */ }
+      statusMsg = null;
+    },
+  };
 }
 
 // --- Send queue: serializes Discord messages to avoid race conditions ---
@@ -1183,14 +1270,14 @@ function isSafeToRetryFresh(err) {
   return !err.sessionStarted && !err.toolCalls && !err.producedText;
 }
 
-async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {}, channelName = "unknown") {
+async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {}, channelName = "unknown", progress = null) {
   const existingSession = channelSessions.get(channelId);
   const canResume = existingSession &&
     (Date.now() - existingSession.lastActivity) < SESSION_TIMEOUT_MS;
 
   if (canResume) {
     try {
-      return await spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, existingSession.sessionId);
+      return await spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, existingSession.sessionId, progress);
     } catch (err) {
       if (!isSafeToRetryFresh(err)) {
         // Keep the session. It exists and holds the conversation, so the user's
@@ -1213,10 +1300,10 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {
     }
   }
 
-  return spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, null);
+  return spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, null, progress);
 }
 
-function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, resumeSessionId) {
+function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, resumeSessionId, progress = null) {
   return new Promise((resolve, reject) => {
     const basePrompt = process.env.BOT_SYSTEM_PROMPT ||
       "You are running inside a Discord bot. Keep responses concise — Discord has a 2000 char limit per message. Do NOT perform startup rituals. Be brief.";
@@ -1315,6 +1402,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       writtenFiles,
       sessionId: null,
       resultSubtype: null,
+      progress,
       // Did this process actually DO anything? Decides whether a failed run can
       // be safely retried — see isSafeToRetryFresh.
       toolCalls: 0,
@@ -1341,8 +1429,10 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       reqLog.warn({ stderr: data.toString().trim() }, "Claude stderr");
     });
 
-    child.on("close", (code) => {
+    child.on("close", async (code) => {
       activeProcesses.delete(channelId);
+      // Remove the status message first, so it never sits above the answer.
+      try { await progress?.finish(); } catch { /* never block the reply */ }
       const elapsed = Date.now() - startTime;
 
       if (jsonBuffer.trim()) {
@@ -1377,7 +1467,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       // via Bash/Python rather than the Write tool. Widening this extension list
       // would start attaching every repo doc the bot merely mentions, so new file
       // types go through the two routes above instead.
-      const FILE_EXTENSIONS = new RegExp(`\\.(${ATTACH_EXTENSIONS.join("|")})$`, "i");
+      const FILE_EXTENSIONS = ATTACH_RE;
       const pathMatches = fullResponse.match(/(?:^|[\s`'"])(\/?(?:[\w.-]+\/)*[\w.-]+\.\w{2,4})(?:[\s`'"]|$)/gm) || [];
       for (const match of pathMatches) {
         const cleaned = match.trim().replace(/^[`'"]+|[`'"]+$/g, "");
@@ -1488,9 +1578,10 @@ function handleStreamEvent(event, reqLog, sendMessage, state) {
             // Track files Claude creates for Discord attachment
             // Only attach user-facing files (CSV, PDF, etc.), not config/internal files
             state.toolCalls++;
+            state.progress?.tool(block.name, block.input);
             if (block.name === "Write" && block.input?.file_path) {
               const fp = block.input.file_path;
-              if (/\.(csv|pdf|xlsx|png|jpg)$/i.test(fp)) {
+              if (ATTACH_RE.test(fp)) {
                 state.writtenFiles.push(fp);
               }
             }
