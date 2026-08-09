@@ -19,6 +19,7 @@ const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
 const { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } = require("fs");
 const { join } = require("path");
+const summarizeCore = require("./lib/summarize-core");
 
 // --- Config ---
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -111,104 +112,25 @@ function groupByDate(messages) {
 
 // --- Claude summarization ---
 function summarizeWithClaude(channelName, date, messages) {
-  return new Promise((resolve, reject) => {
-    const transcript = messages
-      .map((m) => `[${m.timestamp}] ${m.isBot ? "(bot) " : ""}${m.author}: ${m.content}`)
-      .join("\n");
-
-    const prompt = [
-      `Summarize this Discord conversation from #${channelName} on ${date}.`,
-      "",
-      "Create a structured summary with:",
-      "- **Topics discussed** — what subjects came up",
-      "- **Decisions made** — any conclusions or agreements",
-      "- **Action items** — tasks assigned or next steps identified",
-      "- **Key context** — important facts, debugging results, or technical details worth remembering",
-      "",
-      "Be thorough but concise. Preserve specific details like error messages, file paths, issue numbers, and names.",
-      "Do NOT add commentary — just summarize what happened.",
-      "",
-      "```",
-      transcript,
-      "```",
-    ].join("\n");
-
-    const summarizeModel = process.env.SUMMARIZE_MODEL || process.env.CLAUDE_MODEL;
-    const args = [
-      "--output-format", "stream-json",
-      "--verbose",
-      // Must resolve the same way bot.js does — see the "Tool exposure" block
-      // there for why --tools is the control surface and --allowedTools is not.
-      // Summarisation reads a transcript already present in its prompt, so it
-      // needs no write or execute tools in either mode.
-      ...(process.env.BOT_PERMISSION_MODE === "bypass"
-        ? ["--allow-dangerously-skip-permissions", "--dangerously-skip-permissions"]
-        : ["--tools", process.env.BOT_SUMMARIZER_TOOLS || "Read"]),
-      ...(summarizeModel ? ["--model", summarizeModel] : []),
-      "-p", prompt,
-      "--append-system-prompt", "You are a summarization assistant. Output only the summary, no preamble. Keep it under 2000 characters.",
-    ];
-
-    const cleanEnv = { ...process.env };
-    delete cleanEnv.CLAUDECODE;
-    delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
-    delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
-    delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
-
-    const child = spawn(CLAUDE_BIN, args, {
-      cwd: CLAUDE_CWD,
-      env: cleanEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-      // Same setting bot.js uses — one knob, three call sites (see #44).
-      timeout: Number.parseInt(process.env.SUMMARIZE_TIMEOUT_MS, 10) > 0
-        ? Number.parseInt(process.env.SUMMARIZE_TIMEOUT_MS, 10)
-        : 120000,
-    });
-
-    let buffer = "";
-    let result = "";
-
-    child.stdout.on("data", (data) => {
-      buffer += data.toString();
-      const lines = buffer.split("\n");
-      buffer = lines.pop();
-
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const event = JSON.parse(line);
-          if (event.type === "assistant" && event.message?.content) {
-            for (const block of event.message.content) {
-              if (block.type === "text") result += block.text;
-            }
-          }
-        } catch {
-          // skip non-JSON
-        }
-      }
-    });
-
-    child.on("close", (code) => {
-      // Process remaining buffer
-      if (buffer.trim()) {
-        try {
-          const event = JSON.parse(buffer);
-          if (event.type === "assistant" && event.message?.content) {
-            for (const block of event.message.content) {
-              if (block.type === "text") result += block.text;
-            }
-          }
-        } catch { /* ignore */ }
-      }
-
-      if (code !== 0) {
-        reject(new Error(`Claude exited with code ${code}`));
-        return;
-      }
-      resolve(result.trim());
-    });
-
-    child.on("error", (err) => reject(err));
+  const transcript = messages
+    .map((m) => `[${m.timestamp}] ${m.isBot ? "(bot) " : ""}${m.author}: ${m.content}`)
+    .join("\n");
+  return summarizeCore.summarize({
+    transcript,
+    kind: "channel-day",
+    channelName,
+    date,
+    claudeBin: CLAUDE_BIN,
+    cwd: CLAUDE_CWD,
+    model: process.env.SUMMARIZE_MODEL || process.env.CLAUDE_MODEL,
+    timeoutMs: Number.parseInt(process.env.SUMMARIZE_TIMEOUT_MS, 10) > 0
+      ? Number.parseInt(process.env.SUMMARIZE_TIMEOUT_MS, 10)
+      : 120000,
+    // Must resolve the same way bot.js does. Summarisation reads a transcript
+    // already present in its prompt, so it needs no write or execute tools.
+    permissionArgs: process.env.BOT_PERMISSION_MODE === "bypass"
+      ? ["--allow-dangerously-skip-permissions", "--dangerously-skip-permissions"]
+      : ["--tools", process.env.BOT_SUMMARIZER_TOOLS || "Read"],
   });
 }
 
@@ -218,33 +140,10 @@ function summarizeWithClaude(channelName, date, messages) {
 // because the checkpoint means each run only covers messages since the last one.
 // (Fourth place this logic is duplicated. See slashbin-ai-team#44.)
 function writeSummary(channelName, date, messageCount, summary, channelId = null) {
-  mkdirSync(HISTORY_DIR, { recursive: true });
-  const stamp = new Date().toLocaleTimeString("en-US", {
-    timeZone: process.env.BOT_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-    hour12: false,
+  return summarizeCore.writeSummary({
+    historyDir: HISTORY_DIR, channelName, date, messageCount, summary, channelId,
+    kind: "channel-day", timezone: process.env.BOT_TIMEZONE,
   });
-
-  let filepath = join(HISTORY_DIR, `${date}-${channelName}.md`);
-  let existing = "";
-  try { existing = readFileSync(filepath, "utf8"); } catch { /* first batch */ }
-
-  if (existing && channelId) {
-    const owner = /^<!-- channel: (\S+) -->$/m.exec(existing);
-    if (owner && owner[1] !== String(channelId)) {
-      filepath = join(HISTORY_DIR, `${date}-${channelName}-${channelId}.md`);
-      try { existing = readFileSync(filepath, "utf8"); } catch { existing = ""; }
-    }
-  }
-
-  const header = existing
-    ? ""
-    : [`# ${channelName} — ${date}`, channelId ? `<!-- channel: ${channelId} -->` : "", ""]
-        .filter((l) => l !== null).join("\n") + "\n";
-
-  const section = [`> ${messageCount} messages summarized at ${stamp}`, "", summary, "", ""].join("\n");
-
-  writeFileSync(filepath, existing ? existing + section : header + section);
-  return filepath;
 }
 
 // --- Main ---
