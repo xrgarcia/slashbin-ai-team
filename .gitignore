@@ -1,14 +1,18 @@
 node_modules/
 .env
 .mcp.json
-.claude/*
-!.claude/skills/
+.claude/
 CLAUDE.md
 *.log
 .bot.pid
 .bot-sessions.json
+# Session state is named from BOT_NAME (.engineering-manager-sessions.json,
+# .product-owner-sessions.json). The old .*-bot-sessions.json pattern stopped
+# matching when the bots were renamed off the *-bot suffix.
+.*-sessions.json
 .bot-history/
 *.pid
+*.ready
 ecosystem.config.js
 .conversation-buffer.txt
 .*-conversation-buffer.txt
