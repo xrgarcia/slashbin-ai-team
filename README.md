@@ -254,6 +254,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `SUMMARIZE_SEEN_CHANNELS` | `true` | Also summarize **DMs and any channel the bot has spoken in**. Without this, a conversation held in a DM is never written down and recall cannot find it |
 | `SUMMARIZE_BATCH_SIZE` | `200` | Messages fetched per channel per run |
 | `SUMMARY_LOOKBACK_HOURS` | `48` | How much summary history is injected (`/remember` reaches past this) |
+| `CONTEXT_MAX_BYTES` | `65536` | Ceiling on the remembered context (summaries + buffer) carried into a fresh session. Anything over it is dropped oldest-first, and the prompt says so. **Do not raise past ~120000** — the whole block travels as one command-line argument and Linux rejects any single argument over 128KB with a bare `spawn E2BIG` |
 | `RECENT_CONTEXT_MAX_CHARS` | `12000` | Context budget for `/remember` results |
 | `SUMMARIZE_TIMEOUT_MS` | `120000` | Wall clock for one summarization run |
 | `BOT_SUMMARIZER_START_DELAY_MS` | `10000` | Grace period after login before the first cycle |

@@ -8,6 +8,7 @@ const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
+const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
 
 // --- Logger ---
 const log = pino({
@@ -66,6 +67,11 @@ const SUMMARIZE_CHANNELS = process.env.SUMMARIZE_CHANNELS
   : MONITOR_CHANNELS;
 const SUMMARIZE_BATCH_SIZE = parseInt(process.env.SUMMARIZE_BATCH_SIZE, 10) || 200;
 const SUMMARY_LOOKBACK_HOURS = parseInt(process.env.SUMMARY_LOOKBACK_HOURS, 10) || 48;
+// How many bytes of remembered context (summaries + buffer) a fresh session may
+// carry. Not a taste setting — the whole block travels as ONE command-line
+// argument, and Linux rejects any single argument over 128KB with a bare
+// `spawn E2BIG`. Raising this past ~120000 re-arms that failure.
+const CONTEXT_MAX_BYTES = envInt("CONTEXT_MAX_BYTES", DEFAULT_CONTEXT_MAX_BYTES, { min: 4096 });
 const HISTORY_DIR = process.env.BOT_HISTORY_DIR
   ? (process.env.BOT_HISTORY_DIR.startsWith("/") ? process.env.BOT_HISTORY_DIR : join(__dirname, process.env.BOT_HISTORY_DIR))
   : join(__dirname, ".bot-history");
@@ -1379,30 +1385,30 @@ function loadRecentSummaries() {
   }
 }
 
-function buildContextPrompt() {
-  const sections = [];
+function buildContextPrompt(reqLog = log) {
+  // Summaries used to be injected whole, all of them, for the entire lookback
+  // window — the one input to the command line with no ceiling on it. Two busy
+  // days put this past the kernel's 128KB single-argument limit and every fresh
+  // session died with `spawn E2BIG`. Budget it. See lib/argv-budget.js.
+  const result = budgetContext({
+    summaries: loadRecentSummaries(),
+    buffer: readBuffer(),
+    maxBytes: CONTEXT_MAX_BYTES,
+  });
 
-  // Layer 1: Recent summaries (compressed history beyond buffer window)
-  const summaries = loadRecentSummaries();
-  if (summaries.length > 0) {
-    sections.push(
-      "--- Conversation history (summaries from prior sessions) ---",
-      ...summaries,
-      "--- End summaries ---"
+  if (result.droppedSummaries > 0 || result.bufferTruncated) {
+    reqLog.warn(
+      {
+        contextBytes: result.bytes,
+        budget: CONTEXT_MAX_BYTES,
+        droppedSummaries: result.droppedSummaries,
+        bufferTruncated: result.bufferTruncated,
+      },
+      "Remembered context exceeded CONTEXT_MAX_BYTES — oldest history was left out of this prompt (it is still on disk; raise CONTEXT_MAX_BYTES or lower SUMMARY_LOOKBACK_HOURS)"
     );
   }
 
-  // Layer 2: Conversation buffer (recent activity across all channels)
-  const buffer = readBuffer();
-  if (buffer.trim()) {
-    sections.push(
-      "--- Conversation buffer (recent activity across all channels) ---",
-      buffer.trim(),
-      "--- End conversation buffer ---"
-    );
-  }
-
-  return sections.join("\n\n");
+  return result.text;
 }
 
 // --- Outbound files (bot → user, any type) ---
@@ -1569,7 +1575,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       systemPrompt = `${basePrompt}${channelContext}${fileTransferContext}`;
       reqLog.info("Resume mode: skipping buffer/summary re-injection");
     } else {
-      const context = buildContextPrompt();
+      const context = buildContextPrompt(reqLog);
       systemPrompt = context
         ? `${basePrompt}${channelContext}${fileTransferContext}\n\n${context}`
         : `${basePrompt}${channelContext}${fileTransferContext}`;
@@ -1628,8 +1634,19 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
     delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
 
+    // The spawn boundary. The context budget above is the policy; this is the
+    // guarantee — an oversized argument gets cut here rather than becoming a
+    // `spawn E2BIG` that names neither the argument nor the reason.
+    const { args: safeArgs, clamped } = clampArgs(args);
+    for (const c of clamped) {
+      reqLog.error(
+        { argBytes: c.bytes, limit: c.limit, startsWith: c.preview },
+        "An argument to Claude exceeded the OS limit and was truncated — this run saw an incomplete prompt. Lower CONTEXT_MAX_BYTES or SUMMARY_LOOKBACK_HOURS."
+      );
+    }
+
     const startTime = Date.now();
-    const child = spawn(CLAUDE_BIN, args, {
+    const child = spawn(CLAUDE_BIN, safeArgs, {
       cwd: CLAUDE_CWD,
       env: cleanEnv,
       stdio: ["ignore", "pipe", "pipe"],
