@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.1.0] — 2026-08-12
 
 ### Fixed
 
@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The summarizer had the same exposure — it hands a `SUMMARIZE_BATCH_SIZE`
   transcript through argv — where a crossing would have taken down the daily
   summary that recall depends on.
+
+- **A user's schedules no longer live in a git working tree.** `schedules.json`,
+  the job run log and the summarizer's read position moved from `BOT_HISTORY_DIR`
+  to `BOT_STATE_DIR`, alongside the buffer and sessions. They were gitignored,
+  which is not safe — only invisible: one `git clean -x` or a re-clone and the
+  user's scheduled jobs are gone, and a schedule that silently stops firing is a
+  failure nobody notices. `BOT_HISTORY_DIR` holds summaries, the reviewable record
+  people deliberately keep in a repo; runtime state is not that. **Existing files
+  are migrated on first start**, not stranded, and `summarize.js` resolves the
+  checkpoint the same way — when those two disagreed, the summarizer re-read from
+  the wrong position.
 
 ### Added
 
