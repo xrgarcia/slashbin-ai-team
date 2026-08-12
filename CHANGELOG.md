@@ -5,6 +5,46 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-08-12
+
+### Fixed
+
+- **`Error: spawn E2BIG` on the first message after a restart.** A fresh session
+  carried every daily summary in the lookback window plus the whole conversation
+  buffer in one `--append-system-prompt` argument. Linux caps a *single* argv
+  string at 128KB — separately from the much larger total `ARG_MAX` — and while
+  the buffer had `BUFFER_MAX_BYTES`, summaries had no ceiling in the code or the
+  config. Two busy days measured 137,242 bytes against a limit of 131,071, and
+  every fresh session died at spawn with an error naming neither the cause nor a
+  setting. It read as a reboot fault because a *resumed* session skips context
+  injection entirely; in truth any conversation idle longer than
+  `SESSION_TIMEOUT_MS` would have hit it.
+
+  The summarizer had the same exposure — it hands a `SUMMARIZE_BATCH_SIZE`
+  transcript through argv — where a crossing would have taken down the daily
+  summary that recall depends on.
+
+- **A user's schedules no longer live in a git working tree.** `schedules.json`,
+  the job run log and the summarizer's read position moved from `BOT_HISTORY_DIR`
+  to `BOT_STATE_DIR`, alongside the buffer and sessions. They were gitignored,
+  which is not safe — only invisible: one `git clean -x` or a re-clone and the
+  user's scheduled jobs are gone, and a schedule that silently stops firing is a
+  failure nobody notices. `BOT_HISTORY_DIR` holds summaries, the reviewable record
+  people deliberately keep in a repo; runtime state is not that. **Existing files
+  are migrated on first start**, not stranded, and `summarize.js` resolves the
+  checkpoint the same way — when those two disagreed, the summarizer re-read from
+  the wrong position.
+
+### Added
+
+- **`CONTEXT_MAX_BYTES`** (default `65536`) — a declared ceiling on remembered
+  context. Over budget, the oldest summaries are dropped and the prompt states
+  that they were, pointing at `$BOT_SUMMARIES_DIR`, so a bot never reports that
+  nothing happened on a day it merely was not shown. `/remember` still reaches
+  every summary on disk. Independently, no argument now leaves the harness above
+  the OS limit whatever the configuration says, so this failure is unreachable
+  rather than merely unlikely.
+
 ## [2.0.0] — 2026-08-09
 
 First release aimed at people who are not us. See [UPGRADING.md](UPGRADING.md) —
