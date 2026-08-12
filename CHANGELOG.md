@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **Five advisories cleared — three rated high.** `npm audit` now reports zero.
+  Two were in direct dependencies: **`ws`** 8.20.0 → 8.21.3 (uninitialized memory
+  disclosure, and memory exhaustion from tiny fragments — this is the WebSocket
+  bridge bots use to talk to each other) and **`discord.js`** 14.25.1 → 14.27.0.
+  Upgrading those cleared the three underneath: `lodash` 4.17.23 → 4.18.1,
+  `undici` 6.21.3 → 6.28.0, `@discordjs/rest` 2.6.0 → 2.6.3.
+
+  Every fix fell inside the version ranges already declared, so `package.json` is
+  unchanged and this is a lockfile-only upgrade — nothing for an installer to do
+  beyond `npm install`.
+
+  Thanks to **@anupamme**, who reported the lodash vulnerability in #47. The
+  report was right; the pin was not — npm marks lodash 4.18.0 a bad release, and
+  4.18.1 is the clean one. Upgrading `discord.js` pulls it in transitively, which
+  fixes the cause rather than pinning around it.
+
 ## [2.1.0] — 2026-08-12
 
 ### Fixed
