@@ -246,7 +246,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | Variable | Default | Description |
 |---|---|---|
 | `BOT_STATE_DIR` | `BOT_HISTORY_DIR` | **One root for everything a bot remembers** — buffer, sessions, and the default parent for the rest |
-| `BOT_HISTORY_DIR` | `.bot-history` | Daily summaries, schedules, job history |
+| `BOT_HISTORY_DIR` | `.bot-history` | Daily summaries only — the reviewable record |
 | `BOT_ATTACHMENTS_DIR` | `<history>/attachments` | Inbound files. Worth pointing **outside any git repo** — these are arbitrary user-supplied binaries, and a working tree loses them to `git clean -x` or a re-clone |
 | `BOT_OUTBOX_DIR` | `<history>/outbox` | Files written here are sent to the user |
 | `SUMMARIZE_INTERVAL_MS` | `0` *(off)* | Background summarization interval |
@@ -254,12 +254,27 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `SUMMARIZE_SEEN_CHANNELS` | `true` | Also summarize **DMs and any channel the bot has spoken in**. Without this, a conversation held in a DM is never written down and recall cannot find it |
 | `SUMMARIZE_BATCH_SIZE` | `200` | Messages fetched per channel per run |
 | `SUMMARY_LOOKBACK_HOURS` | `48` | How much summary history is injected (`/remember` reaches past this) |
+| `CONTEXT_MAX_BYTES` | `65536` | Ceiling on the remembered context (summaries + buffer) carried into a fresh session. Anything over it is dropped oldest-first, and the prompt says so. **Do not raise past ~120000** — the whole block travels as one command-line argument and Linux rejects any single argument over 128KB with a bare `spawn E2BIG` |
 | `RECENT_CONTEXT_MAX_CHARS` | `12000` | Context budget for `/remember` results |
 | `SUMMARIZE_TIMEOUT_MS` | `120000` | Wall clock for one summarization run |
 | `BOT_SUMMARIZER_START_DELAY_MS` | `10000` | Grace period after login before the first cycle |
 | `BUFFER_MAX_BYTES` | `32768` | Buffer size before rotation |
 | `BUFFER_ROTATE_PERCENT` | `40` | Oldest N% summarized away on rotation |
 | `BUFFER_TRUNCATE_RESPONSE` | `500` | Chars of each reply kept in the buffer |
+
+**How much a bot carries into a new conversation.** Starting fresh, a bot brings
+its recent daily summaries and the conversation buffer along — up to
+`CONTEXT_MAX_BYTES`. Past that, the oldest days are left out, and the prompt says
+so, so the bot knows to go and read them rather than assume nothing happened.
+Nothing is deleted: the summaries stay on disk and `/slashbin-harness:remember`
+reaches all of them regardless of this setting. A continuing conversation carries
+none of it — it resumes the live session, which already has the history.
+
+Why there is a ceiling at all: this context travels to Claude as a **single
+command-line argument**, and Linux rejects any argument over 128KB outright, with
+a `spawn E2BIG` that names nothing useful. Values above ~120000 bring that back.
+Two busy weeks of summaries will reach it. The default is also a cost decision —
+64KB is roughly 16,000 tokens attached to every new conversation.
 
 ### Files
 | Variable | Default | Description |
@@ -352,7 +367,7 @@ where the server is.
 <details>
 <summary>Writing <code>schedules.json</code> by hand</summary>
 
-Jobs live in `<BOT_HISTORY_DIR>/schedules.json`. You rarely need to touch it, but:
+Jobs live in `<BOT_STATE_DIR>/schedules.json`. You rarely need to touch it, but:
 
 ```json
 [
@@ -419,6 +434,7 @@ Run **`npm run doctor`** first — it checks most of this and prints no secrets.
 | Ignores you | `ALLOWED_USERS` is set and you're not in it |
 | Won't write files or run commands | `BOT_PERMISSION_MODE=restricted` — that's the default |
 | Hangs, then exit code 143 | Timeout — raise `CLAUDE_TIMEOUT_MS`, or an MCP server is unreachable |
+| `Error: spawn E2BIG`, usually on the first message after a restart | Too much remembered context for one command line — lower `CONTEXT_MAX_BYTES` or `SUMMARY_LOOKBACK_HOURS`. See [Memory](#memory) |
 | Second bot crashes at startup | `WS_PORT` collision — one port per bot |
 
 ## Contributing
