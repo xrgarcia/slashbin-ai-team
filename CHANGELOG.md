@@ -5,6 +5,37 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] — 2026-08-18
+
+### Added
+
+- **`npm run advise` — an upgrade advisor that runs BEFORE you upgrade.** `doctor` answers
+  "is this install healthy right now". This answers "what will break when I upgrade, and
+  what do I do about it", as an ordered list of concrete actions rather than observations
+  to interpret.
+
+  It is built to run against an install that has **not** upgraded yet, which is the only
+  time the answer is useful. It imports nothing from the rest of the harness, evaluates
+  nothing, and starts no bot — so `--dir` can point at a checkout several majors behind,
+  from a current clone or as a single copied file.
+
+  Findings are gated on the version actually installed *there*, so a 1.x install is told
+  its tool exposure will flip to `restricted`, while a 2.2.1 install is not. The same
+  tight schedule is a blocker before 2.2.1 and a warning after it, because after 2.2.1 it
+  no longer accumulates context — it can still overlap its own previous run.
+
+  What it reports: tool exposure flipping on upgrade, schedules tighter than the session
+  timeout, where each bot's `schedules.json` actually resolves to (the backup target,
+  which is not obvious), tokens that need verifying, missing `stop_exit_codes`,
+  `ANTHROPIC_API_KEY` redirecting billing, uncommitted work and unpushed commits an
+  upgrade would discard, bots running code that is no longer on disk, and sibling
+  checkouts holding runtime state.
+
+  `--json` emits a stable schema for an agent: every entry has an id, a severity, the
+  reason, a concrete action and structured evidence, sorted blockers first. Exits non-zero
+  when there are blockers so it drops into a script. No credential value is ever printed —
+  tokens are named by the variable they come from.
+
 ## [2.3.0] — 2026-08-18
 
 ### Added
