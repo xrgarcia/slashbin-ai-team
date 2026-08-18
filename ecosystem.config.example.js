@@ -28,6 +28,10 @@ module.exports = {
       name: 'product-owner',
       script: 'bot.js',
       cwd: REPO,
+      // 78 means the configuration is wrong — a rejected token, a missing
+      // CLAUDE_CWD. Restarting cannot fix any of those, so stop instead of
+      // looping. Every other failure exits 1 and still restarts.
+      stop_exit_codes: [78],
       env: {
         BOT_NAME: 'product-owner',
         DISCORD_TOKEN: process.env.PO_DISCORD_TOKEN,   // name only — never a literal
@@ -44,6 +48,9 @@ module.exports = {
         //   bypass               — every tool, no permission checks
         // Use bypass only for a bot you intend to let write code and run commands,
         // and only alongside a real ALLOWED_USERS.
+        // On a multi-bot host, set BOT_PERMISSION_MODE_DEFAULT once in the host
+        // environment instead of repeating this line in every app entry below.
+        // A per-bot value always wins over the host default.
         BOT_PERMISSION_MODE: 'restricted',
         // BOT_ALLOWED_TOOLS: 'Read,Glob,Grep,WebFetch,WebSearch,TodoWrite',
 
@@ -71,6 +78,10 @@ module.exports = {
       name: 'engineering-manager',
       script: 'bot.js',
       cwd: REPO,
+      // 78 means the configuration is wrong — a rejected token, a missing
+      // CLAUDE_CWD. Restarting cannot fix any of those, so stop instead of
+      // looping. Every other failure exits 1 and still restarts.
+      stop_exit_codes: [78],
       env: {
         BOT_NAME: 'engineering-manager',
         DISCORD_TOKEN: process.env.EM_DISCORD_TOKEN,

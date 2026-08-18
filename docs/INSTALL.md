@@ -246,6 +246,18 @@ pm2 save
 pm2 startup        # follow the printed command so it survives reboot
 ```
 
+**Tell PM2 not to retry a failure that cannot succeed.** A bot exits **78** when its
+configuration is wrong — a rejected token, a `CLAUDE_CWD` that does not exist, an
+unrecognised permission mode. Restarting changes none of those, so without this the
+bot loops forever and its log drowns every sibling that is healthy:
+
+```js
+stop_exit_codes: [78],   // in each app entry
+```
+
+Every other failure exits 1 and stays restartable, because a network blip does
+deserve another go. Run `npm run doctor` to see the reason before restarting.
+
 Tokens are read from the environment, never written into that file. Use `.env` or
 a secrets manager:
 
