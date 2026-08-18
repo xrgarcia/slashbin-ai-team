@@ -1,6 +1,6 @@
 {
   "name": "slashbin-ai-team",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "description": "Run a team of AI coworkers in Discord. Powered by Claude Code — safe enough to leave running.",
   "keywords": [
     "claude",
