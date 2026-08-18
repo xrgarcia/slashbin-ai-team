@@ -4,6 +4,26 @@ Newest first. Each entry says whether you have to do anything, and exactly what.
 
 ---
 
+## 2.2.0 → 2.2.1
+
+**No action required.** One bug fix, no new configuration.
+
+### Scheduled jobs no longer share the channel's conversation session
+
+If you run a scheduled job on a cadence shorter than `SESSION_TIMEOUT_MS` (default 30
+minutes), it was holding that channel's session open permanently: sessions expire on
+*idle*, and a job firing every 10 minutes is never idle. Every fire re-sent the whole
+accumulated history, and the job also shared its session with any human talking in the
+same channel.
+
+Each scheduled run now gets a clean session and leaves the channel's untouched.
+
+**What changes for you:** if a job's prompt relied on remembering earlier runs, it no
+longer will. Nothing else — remembered context (summaries and the buffer) is still
+injected exactly as before, and interactive conversations are unaffected.
+
+---
+
 ## 2.1.x → 2.2.0
 
 **No action required.** Everything here is additive. Two changes are worth knowing
