@@ -5,6 +5,34 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] — 2026-08-18
+
+### Fixed
+
+- **A scheduled job no longer runs inside the channel's conversation session.** A job
+  on a 10-minute cron held ONE session open for 28.8 hours across 2,115 turns. Every
+  fire re-sent the whole accumulated history, so a poll that correctly found nothing
+  still paid for ~400k tokens; context reached 998k and that single session cost
+  ~$1,664 in a day.
+
+  The cause is that sessions are keyed by CHANNEL and expire on 30 minutes of **idle**.
+  A job firing faster than `SESSION_TIMEOUT_MS` means its channel is never idle, so
+  rotation never fires — the safety net cannot catch a cadence shorter than its own
+  timeout, and nothing warns, because a busy channel is what a healthy channel looks
+  like.
+
+  Second defect in the same place: the job and any human talking in that channel
+  shared one session, so the poller inherited conversation context and the
+  conversation inherited hundreds of prior polls.
+
+  Scheduled runs are now **ephemeral** — they resume nothing and store nothing. A job
+  is a task, not a conversation; it has nothing to carry forward, and remembered
+  context is still injected as it always was.
+
+  Deliberately not applied globally: a human message and a reaction trigger still
+  resume the channel session, because a conversation that resumes nothing loses the
+  continuity the session exists for.
+
 ## [2.2.0] — 2026-08-17
 
 ### Added
