@@ -5,6 +5,49 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-08-17
+
+### Added
+
+- **`BOT_PERMISSION_MODE_DEFAULT`** — a host-wide default for the tool-permission
+  mode. `BOT_PERMISSION_MODE` was per-bot and nothing else, so a host running eight
+  bots needed the same line eight times, and missing one failed silently: that bot
+  kept answering questions and had quietly lost the ability to write a file.
+  Resolution is per-bot, then host default, then `restricted`. Opt-in and additive —
+  set neither variable and the answer is `restricted`, exactly as before.
+
+  The startup log now names which of the three the value came from. On a multi-bot
+  host the question is never "what mode is this bot in" but "why is this one
+  different from its siblings", and an explicit `restricted` and an unset one were
+  indistinguishable.
+
+### Fixed
+
+- **A dead token no longer restart-loops forever.** A failed login has exited
+  non-zero since 2.0, which was the right fix for a bot that used to linger and
+  report itself healthy. Under a process manager it created a new failure: a
+  rejected token is the same token next time, so the bot restarted endlessly and its
+  log drowned every sibling that was healthy.
+
+  Failures a restart cannot cure now exit **78** (`EX_CONFIG`) — a rejected token, a
+  missing `DISCORD_TOKEN`, a `CLAUDE_CWD` that does not exist, an unrecognised
+  permission mode, an invalid `BOT_TIMEZONE`, `BOT_REQUIRE_ALLOWLIST=true` with an
+  empty allowlist. Everything else keeps exit 1 and stays restartable, because a
+  network blip does deserve another go, and a duplicate-instance guard is transient.
+  `docs/INSTALL.md` shows the PM2 and systemd settings that act on it.
+
+- **A scheduled job with nothing to report posts nothing.** The model cannot emit a
+  truly empty turn — the harness re-prompts it — so a polling job whose answer was
+  "nothing happened" reached for a placeholder (`[no output]`, `.`) and every one
+  became a Discord ping. Suppressed at the send boundary, where the decision is
+  deterministic. Scheduled jobs only; an interactive reply is never filtered.
+
+- **`summarize.js` resolves the permission mode through shared code.** It read the
+  environment variable directly, so a host-level default would have been honoured in
+  the bot and ignored in the summarizer — the same drift documented at the top of
+  `lib/summarize-core.js`, where adding this setting once needed three identical
+  edits.
+
 ## [2.1.1] — 2026-08-12
 
 ### Security

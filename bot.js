@@ -9,6 +9,8 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
+const { resolvePermissionMode, VALID_MODES } = require("./lib/permission-mode");
+const { isNothingToReport } = require("./lib/nothing-to-report");
 
 // --- Logger ---
 const log = pino({
@@ -111,7 +113,9 @@ const CHECKPOINT_FILE = join(STATE_DIR, ".checkpoints.json");
 //   --permission-mode plan   -> restricts NOTHING. Bash exposed and used.
 //   --tools Read,Grep        -> exposes EXACTLY those (plus connected MCP tools).
 // So --tools is the real control surface, and the one we use.
-const PERMISSION_MODE = process.env.BOT_PERMISSION_MODE || "restricted";
+// Resolved in one place for every process that needs it — see lib/permission-mode.js
+// for the precedence (per-bot -> host default -> restricted) and why it is shared.
+const { mode: PERMISSION_MODE, source: PERMISSION_MODE_SOURCE } = resolvePermissionMode();
 const DEFAULT_ALLOWED_TOOLS = "Read,Glob,Grep,WebFetch,WebSearch,TodoWrite";
 const ALLOWED_TOOLS = process.env.BOT_ALLOWED_TOOLS || DEFAULT_ALLOWED_TOOLS;
 // Summarisation reads a transcript that is already in its prompt. It never needs
@@ -313,9 +317,21 @@ const OUTBOX_DIR = process.env.BOT_OUTBOX_DIR
   : join(STATE_DIR, "outbox");
 const MAX_OUTBOUND_BYTES = parseInt(process.env.MAX_OUTBOUND_BYTES, 10) || 8 * 1024 * 1024;
 
+// --- Exit codes ---
+// A process manager restarts on failure, which is right for a crash and wrong for
+// a typo. Nothing about restarting fixes a revoked token or a path that does not
+// exist, so those exits are marked as permanent and the manager is told to stop
+// rather than thrash. Measured on an 8-bot host: one stale token produced an
+// endless restart loop whose log drowned the seven bots that were healthy.
+//
+// 78 is sysexits' EX_CONFIG — "something is wrong with the configuration." Reserved
+// for failures a restart cannot cure. Everything else keeps exit 1 and stays
+// restartable, because a network blip genuinely does deserve another go.
+const EXIT_CONFIG = 78;
+
 if (!DISCORD_TOKEN) {
   log.fatal("DISCORD_TOKEN environment variable is required — see docs/INSTALL.md");
-  process.exit(1);
+  process.exit(EXIT_CONFIG);
 }
 
 // A bot pointed at a directory that does not exist used to start happily and then
@@ -326,26 +342,34 @@ if (!existsSync(CLAUDE_CWD)) {
     { CLAUDE_CWD },
     "CLAUDE_CWD does not exist. Set it to YOUR project directory — the repo holding the CLAUDE.md that gives this bot its role. It is not this repo."
   );
-  process.exit(1);
+  process.exit(EXIT_CONFIG);
 }
 if (!statSync(CLAUDE_CWD).isDirectory()) {
   log.fatal({ CLAUDE_CWD }, "CLAUDE_CWD is not a directory");
-  process.exit(1);
+  process.exit(EXIT_CONFIG);
 }
 
-if (!["bypass", "restricted"].includes(PERMISSION_MODE)) {
+if (!VALID_MODES.includes(PERMISSION_MODE)) {
   log.fatal(
-    { BOT_PERMISSION_MODE: PERMISSION_MODE },
-    'BOT_PERMISSION_MODE must be "restricted" (default — expose only BOT_ALLOWED_TOOLS) or "bypass" (all tools, no permission checks)'
+    { mode: PERMISSION_MODE, source: PERMISSION_MODE_SOURCE },
+    'Permission mode must be "restricted" (default — expose only BOT_ALLOWED_TOOLS) or "bypass" (all tools, no permission checks)'
   );
-  process.exit(1);
+  process.exit(EXIT_CONFIG);
 }
+// Name the SOURCE, not just the value. On a multi-bot host the question is never
+// "what mode is this bot in" — it is "why is this one different from its
+// siblings", and that is unanswerable without knowing whether the value came from
+// the bot, the host, or nowhere at all.
 if (PERMISSION_MODE === "bypass") {
   log.warn(
-    "BOT_PERMISSION_MODE=bypass — this bot runs with ALL tools and no permission checks. Anyone allowed to talk to it can run arbitrary commands on this host. Remove it to fall back to BOT_ALLOWED_TOOLS."
+    { source: PERMISSION_MODE_SOURCE },
+    "Permission mode is bypass — this bot runs with ALL tools and no permission checks. Anyone allowed to talk to it can run arbitrary commands on this host. Remove it to fall back to BOT_ALLOWED_TOOLS."
   );
 } else {
-  log.info({ tools: ALLOWED_TOOLS }, "Tool exposure restricted — set BOT_PERMISSION_MODE=bypass for the previous unrestricted behaviour, or widen BOT_ALLOWED_TOOLS");
+  log.info(
+    { tools: ALLOWED_TOOLS, source: PERMISSION_MODE_SOURCE },
+    "Tool exposure restricted — set BOT_PERMISSION_MODE=bypass for the previous unrestricted behaviour, or widen BOT_ALLOWED_TOOLS"
+  );
 }
 
 // Fail on a bad IANA name here rather than throwing on every message.
@@ -356,7 +380,7 @@ try {
     { BOT_TIMEZONE },
     'BOT_TIMEZONE is not a valid IANA timezone name (expected e.g. "Europe/London", "America/New_York", "UTC")'
   );
-  process.exit(1);
+  process.exit(EXIT_CONFIG);
 }
 
 // Opt-in strict mode. Default stays permissive so "invite the bot and talk to it"
@@ -365,7 +389,7 @@ if (process.env.BOT_REQUIRE_ALLOWLIST === "true" && ALLOWED_USER_IDS.length === 
   log.fatal(
     "BOT_REQUIRE_ALLOWLIST=true but ALLOWED_USERS is empty — refusing to start open to every Discord user. Set ALLOWED_USERS to a comma-separated list of user IDs."
   );
-  process.exit(1);
+  process.exit(EXIT_CONFIG);
 }
 
 // --- Duplicate instance guard ---
@@ -2199,6 +2223,11 @@ function shouldRunNow(cron, lastRunKey, tz = BOT_TIMEZONE) {
   return false;
 }
 
+// A polling job whose answer is "nothing happened" must post NOTHING. The model
+// cannot emit a truly empty turn — the harness re-prompts it — so it reaches for
+// a placeholder instead ("[no output]", "."), and every one of those became a
+// Discord ping. Suppress them here, where the decision is deterministic.
+// Scheduled jobs only; interactive replies are never filtered.
 // Re-entrancy guard: setInterval fires this without awaiting, so a job running
 // longer than the check interval would otherwise stack overlapping ticks.
 let schedulerRunning = false;
@@ -2261,6 +2290,10 @@ async function runScheduledJobs() {
           if (typeof content === "object" && content.files) {
             await channel.send(content);
           } else {
+            if (isNothingToReport(content)) {
+              jobLog.info({ id: job.id, preview: String(content ?? "").slice(0, 40) }, "Suppressed empty scheduled-job reply");
+              return;
+            }
             for (const chunk of splitMessage(content)) {
               await channel.send(chunk);
             }
@@ -2347,9 +2380,16 @@ process.on("SIGTERM", () => {
 // permanently deaf, which is the worst failure mode we can hand a new user.
 client.login(DISCORD_TOKEN).catch((err) => {
   clearReady();
-  const hint = /token/i.test(err.message)
+  // A rejected token is permanent by definition — it is the same token next time.
+  // Discord.js reports it as code TokenInvalid; the message check stays as a
+  // fallback for the shapes that arrive without one.
+  const badToken = err.code === "TokenInvalid" || /token/i.test(err.message || "");
+  const hint = badToken
     ? "Check DISCORD_TOKEN — it is missing, malformed, or has been reset in the Discord Developer Portal."
     : "Check network access to Discord, then the token.";
-  log.fatal({ err: err.message }, `Discord login failed. ${hint}`);
-  process.exit(1);
+  log.fatal(
+    { err: err.message, code: err.code, permanent: badToken },
+    `Discord login failed. ${hint}${badToken ? " Not retrying — a restart cannot fix a rejected token." : ""}`,
+  );
+  process.exit(badToken ? EXIT_CONFIG : 1);
 });

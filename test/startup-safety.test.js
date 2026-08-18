@@ -39,7 +39,15 @@ check("the login rejection handler exits non-zero", () => {
   const start = bot.indexOf("client.login(");
   assert.ok(start > -1, "client.login not found");
   const tail = bot.slice(start);
-  assert.ok(/process\.exit\(\s*[1-9]/.test(tail), "login failure must exit non-zero, not just log");
+  // Both branches must be non-zero: a bad token exits EXIT_CONFIG (78, permanent,
+  // so a process manager can stop instead of thrash) and everything else exits 1
+  // (transient, still restartable). Zero would report a deaf bot as a clean exit.
+  const exitCall = /process\.exit\(([^)]*)\)/.exec(tail);
+  assert.ok(exitCall, "login failure must exit, not just log");
+  const arg = exitCall[1];
+  assert.ok(!/\b0\b/.test(arg), `login failure must exit non-zero, got exit(${arg})`);
+  assert.ok(/EXIT_CONFIG/.test(arg) || /[1-9]/.test(arg),
+    "login failure must exit non-zero, not just log");
 });
 
 check("unhandledRejection is not the only guard on login", () => {
@@ -351,7 +359,26 @@ check("no invocation hardcodes the skip-permissions flags", () => {
 });
 
 check("restricted is the default, bypass must be asked for", () => {
-  assert.ok(/BOT_PERMISSION_MODE \|\| "restricted"/.test(bot), "the default must be restricted");
+  const perm = readFileSync(join(REPO, "lib/permission-mode.js"), "utf8");
+  assert.ok(/return \{ mode: "restricted", source: "built-in default" \}/.test(perm),
+    "the default must be restricted");
+  assert.ok(/resolvePermissionMode\(\)/.test(bot), "bot.js must resolve through the shared resolver");
+});
+
+check("a host-level default applies, and the per-bot value still wins", () => {
+  const perm = readFileSync(join(REPO, "lib/permission-mode.js"), "utf8");
+  const fn = perm.slice(perm.indexOf("function resolvePermissionMode"));
+  const perBotAt = fn.indexOf("BOT_PERMISSION_MODE ||");
+  const fleetAt = fn.indexOf("BOT_PERMISSION_MODE_DEFAULT ||");
+  assert.ok(perBotAt !== -1, "no per-bot lookup");
+  assert.ok(fleetAt !== -1, "no host-level default — a fleet needs the same edit N times");
+  assert.ok(perBotAt < fleetAt, "the per-bot value must be checked FIRST, or the host default overrides it");
+});
+
+check("the resolved mode reports where it came from", () => {
+  // On a multi-bot host the question is "why is this one different", which an
+  // explicit `restricted` and an unset one answer identically without a source.
+  assert.ok(/PERMISSION_MODE_SOURCE/.test(bot), "startup logging drops the source of the value");
 });
 
 check("restriction uses --tools, which is the flag that actually restricts", () => {
@@ -369,14 +396,32 @@ check("summarizers never get write or execute tools when restricted", () => {
 
 check("summarize.js resolves the mode the same way bot.js does", () => {
   const sum = readFileSync(join(REPO, "summarize.js"), "utf8");
-  assert.ok(/BOT_PERMISSION_MODE/.test(sum), "summarize.js ignores the permission mode");
+  assert.ok(/resolvePermissionMode/.test(sum),
+    "summarize.js must use the SHARED resolver — a second copy is how the host default gets honoured in one process and ignored in the other");
+  assert.ok(!/process\.env\.BOT_PERMISSION_MODE/.test(sum),
+    "summarize.js still reads the env var directly, bypassing the precedence rules");
   assert.ok(!/^\s*"--dangerously-skip-permissions",\s*$/m.test(sum.replace(/\?[\s\S]*?:/, "")),
     "summarize.js still hardcodes the skip flags outside the mode check");
 });
 
-check("an unknown BOT_PERMISSION_MODE fails at startup", () => {
-  assert.ok(/\["bypass", "restricted"\]\.includes\(PERMISSION_MODE\)/.test(bot),
+check("an unknown permission mode fails at startup", () => {
+  assert.ok(/VALID_MODES\.includes\(PERMISSION_MODE\)/.test(bot),
     "an unrecognised mode must fail loudly, not silently pick one");
+  const perm = readFileSync(join(REPO, "lib/permission-mode.js"), "utf8");
+  assert.ok(/VALID_MODES = \["bypass", "restricted"\]/.test(perm), "the valid set moved or changed");
+});
+
+check("a failure a restart cannot fix exits distinctly from one it can", () => {
+  assert.ok(/const EXIT_CONFIG = 78/.test(bot), "no dedicated exit code for permanent config failure");
+  // A rejected token is the same token next time. Restarting is pure thrash, and
+  // on a multi-bot host it drowns the logs of every sibling that is healthy.
+  assert.ok(/process\.exit\(badToken \? EXIT_CONFIG : 1\)/.test(bot),
+    "a bad token must exit permanently while a network failure stays restartable");
+  assert.ok(/TokenInvalid/.test(bot), "the discord.js error code is the reliable signal, not the message text");
+  // Transient conditions must NOT claim the permanent code.
+  const dupGuard = bot.slice(bot.indexOf("Another bot instance is already running"));
+  assert.ok(!/EXIT_CONFIG/.test(dupGuard.slice(0, 400)),
+    "a duplicate instance is transient — the other process may stop; it must stay restartable");
 });
 
 console.log("\nConfiguration — nothing host-specific frozen into the source");
