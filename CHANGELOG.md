@@ -5,6 +5,37 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] — 2026-08-18
+
+### Added
+
+- **Upgrade-readiness checks in `npm run doctor`.** The guide could tell you what changed
+  in a release; nothing could tell you what was going to break on *your* host when you
+  restarted. Three checks now answer that:
+  - **Scheduled jobs** — flags any job firing faster than `SESSION_TIMEOUT_MS`. On 2.2.0
+    and earlier that job pins its channel's session open permanently (the bug fixed in
+    2.2.1); on any version it means a job can overlap its own previous run.
+  - **Running code** — flags a connected bot that started before `bot.js` was last
+    changed. The working tree is the deployment and Node reads the file once at startup,
+    so a fleet restarted at different times runs different code with nothing to say so.
+  - **Claude billing** — flags `ANTHROPIC_API_KEY` in the environment, which silently
+    bills spawned Claude runs as metered API usage instead of the subscription.
+
+- **`npm run doctor:fleet`** — checks every bot in `ecosystem.config.js` in one pass:
+  token verified against Discord, `CLAUDE_CWD`, permission mode resolvable, schedules and
+  running code. `doctor` previously validated only whichever bot's configuration was in
+  the ambient environment, so an 8-bot host needed 8 runs with 8 environments — which is
+  the same as not running it. Plain `doctor` now points at it when it sees more than one
+  bot configured. No secret value is printed; a token is confirmed by the bot name that
+  comes back.
+
+### Fixed
+
+- **`doctor` no longer recommends deleting working configuration.** Its "dead settings"
+  check scanned only top-level source files, so a setting resolved inside `lib/` read as
+  configured-but-unread — including `BOT_PERMISSION_MODE`, which every bot depends on. It
+  now scans `lib/` and recognises settings read through a shared resolver.
+
 ## [2.2.1] — 2026-08-18
 
 ### Fixed
