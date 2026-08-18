@@ -9,6 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
+const { isNothingToReport } = require("./lib/nothing-to-report");
 
 // --- Logger ---
 const log = pino({
@@ -2197,20 +2198,6 @@ function shouldRunNow(cron, lastRunKey, tz = BOT_TIMEZONE) {
   }
 
   return false;
-}
-
-// A polling job whose answer is "nothing happened" must post NOTHING. The model
-// cannot emit a truly empty turn — the harness re-prompts it — so it reaches for
-// a placeholder instead ("[no output]", "."), and every one of those became a
-// Discord ping. Suppress them here, where the decision is deterministic.
-// Scheduled jobs only; interactive replies are never filtered.
-const NOTHING_TO_REPORT = /^\s*(?:[.•\-–—]+|\[[^\]]*\]|\((?:no|none)[^)]*\)|no (?:output|open prs?|changes?|updates?|new (?:prs?|activity))[.!]?)\s*$/i;
-
-function isNothingToReport(content) {
-  if (content == null) return true;
-  const text = String(content).trim();
-  if (!text) return true;
-  return NOTHING_TO_REPORT.test(text);
 }
 
 // Re-entrancy guard: setInterval fires this without awaiting, so a job running
