@@ -1522,14 +1522,38 @@ function isSafeToRetryFresh(err) {
   return !err.sessionStarted && !err.toolCalls && !err.producedText;
 }
 
-async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {}, channelName = "unknown", progress = null) {
+/**
+ * `opts.ephemeral` — run outside the channel's conversation entirely: resume
+ * nothing, store nothing.
+ *
+ * Sessions are keyed by CHANNEL and expire on 30 minutes of idle. That is right
+ * for a conversation and wrong for a schedule, in two ways that compounded:
+ *
+ *  1. A job firing faster than SESSION_TIMEOUT_MS means its channel is never
+ *     idle, so the session never rotates. Measured: a 10-minute poll held one
+ *     session open for 28.8 hours across 2,115 turns, re-sending the whole
+ *     accumulated history every fire. A poll that found nothing still paid for
+ *     ~400k tokens, and context reached 998k. The rotation safety net cannot
+ *     fire against a cadence shorter than its own timeout.
+ *  2. The job and any human talking in that channel SHARED one session, so a
+ *     poller inherited conversation context and a conversation inherited 300
+ *     prior polls.
+ *
+ * A scheduled job is a task, not a conversation — it has nothing to carry
+ * forward. Each fire gets a clean session and leaves no trace in the channel's.
+ */
+async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {}, channelName = "unknown", progress = null, opts = {}) {
+  if (opts.ephemeral) {
+    return spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, null, progress, opts);
+  }
+
   const existingSession = channelSessions.get(channelId);
   const canResume = existingSession &&
     (Date.now() - existingSession.lastActivity) < SESSION_TIMEOUT_MS;
 
   if (canResume) {
     try {
-      return await spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, existingSession.sessionId, progress);
+      return await spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, existingSession.sessionId, progress, opts);
     } catch (err) {
       if (!isSafeToRetryFresh(err)) {
         // Keep the session. It exists and holds the conversation, so the user's
@@ -1552,10 +1576,10 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {
     }
   }
 
-  return spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, null, progress);
+  return spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, null, progress, opts);
 }
 
-function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, resumeSessionId, progress = null) {
+function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, resumeSessionId, progress = null, opts = {}) {
   return new Promise((resolve, reject) => {
     const basePrompt = process.env.BOT_SYSTEM_PROMPT ||
       "You are running inside a Discord bot. Keep responses concise — Discord has a 2000 char limit per message. Do NOT perform startup rituals. Be brief.";
@@ -1806,14 +1830,21 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       }
 
       // Persist session for resume — even on intentional kill (new message arriving)
-      // so the next message can resume the conversation
-      if (state.sessionId) {
+      // so the next message can resume the conversation.
+      //
+      // NOT for an ephemeral run. Storing it would hand the channel's next human
+      // message the job's session, which is the same coupling ephemeral exists to
+      // break — and would keep lastActivity fresh forever, so the channel's real
+      // conversation could never rotate either.
+      if (state.sessionId && !opts.ephemeral) {
         channelSessions.set(channelId, {
           sessionId: state.sessionId,
           lastActivity: Date.now(),
         });
         saveSessions();
         reqLog.info({ sessionId: state.sessionId, code }, "Session stored for resume");
+      } else if (state.sessionId && opts.ephemeral) {
+        reqLog.info({ sessionId: state.sessionId, code }, "Ephemeral run — session not stored");
       }
 
       if (code !== 0) {
@@ -2307,7 +2338,7 @@ async function runScheduledJobs() {
       const startTime = new Date();
       try {
         const channelName = channel.name || job.channel;
-        await runClaude(job.prompt, job.channel, jobLog, sendToChannel, {}, channelName);
+        await runClaude(job.prompt, job.channel, jobLog, sendToChannel, {}, channelName, null, { ephemeral: true });
         const durationMs = Date.now() - startTime.getTime();
         sLog.info({ id: job.id, durationMs }, "Scheduled job completed successfully");
         recordJobExecution(job, startTime, durationMs, true);
