@@ -4,6 +4,80 @@ Newest first. Each entry says whether you have to do anything, and exactly what.
 
 ---
 
+## 2.1.x → 2.2.0
+
+**No action required.** Everything here is additive. Two changes are worth knowing
+about if you run more than one bot.
+
+### 1. A host-wide default for the permission mode
+
+`BOT_PERMISSION_MODE` was per-bot and nothing else, so a host running eight bots
+needed the same line in eight app entries — and missing one was silent: that bot
+kept answering questions and had quietly lost the ability to write a file.
+
+There is now a host-level default:
+
+```
+BOT_PERMISSION_MODE_DEFAULT=bypass
+```
+
+Resolution order, per bot:
+
+1. `BOT_PERMISSION_MODE` — this bot. Always wins.
+2. `BOT_PERMISSION_MODE_DEFAULT` — the host default.
+3. `restricted` — unchanged built-in default.
+
+**Nothing changes for an existing install.** Set neither and you still get
+`restricted`; a bot that sets `BOT_PERMISSION_MODE` is unaffected by any host
+default. The new variable is opt-in.
+
+The startup log now names *where* the resolved value came from, so an explicit
+`restricted` can be told apart from an unset one.
+
+`summarize.js` resolves the mode through the same shared code as `bot.js`. It
+previously read the environment variable directly, which would have honoured a host
+default in the bot and ignored it in the summarizer.
+
+### 2. A configuration failure exits 78 instead of 1
+
+A process manager restarts on failure, which is right for a crash and wrong for a
+typo. A rejected token is the same token next time, so restarting it is pure
+thrash — on a multi-bot host, one stale token can loop endlessly and drown the logs
+of every sibling that is healthy.
+
+Failures a restart cannot fix now exit **78** (`EX_CONFIG`): a rejected Discord
+token, a missing `DISCORD_TOKEN`, a `CLAUDE_CWD` that does not exist or is not a
+directory, an unrecognised permission mode, an invalid `BOT_TIMEZONE`, and
+`BOT_REQUIRE_ALLOWLIST=true` with an empty allowlist.
+
+Everything else still exits 1 and stays restartable — a network failure reaching
+Discord genuinely does deserve another go, and a duplicate-instance guard is
+transient because the other process may stop.
+
+**To act on it**, tell your process manager to stop rather than retry:
+
+```js
+stop_exit_codes: [78],   // PM2, in each app entry
+```
+
+```ini
+# systemd
+RestartPreventExitStatus=78
+```
+
+**If you do nothing**, behaviour is what it was — a non-zero exit that your manager
+restarts. You just keep the loop.
+
+### 3. A scheduled job with nothing to report posts nothing
+
+A polling job whose honest answer is "nothing happened" could not say so quietly:
+the model cannot emit an empty turn, so it reached for a placeholder (`[no output]`,
+`.`) and every one became a Discord ping. Those shapes are now suppressed for
+**scheduled jobs only**. An interactive reply is never filtered — a human asked, and
+silence would read as the bot being broken.
+
+---
+
 ## 1.x → 2.0.0
 
 **Action required: one line.** Everything else in this release is additive.

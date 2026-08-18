@@ -25,11 +25,24 @@ const PACK_BIN = join(REPO, "skill-pack", "bin");
 if (existsSync(PACK_BIN)) {
   for (const f of readdirSync(PACK_BIN)) SOURCES.push(join("skill-pack", "bin", f));
 }
+// Shared modules count too. A setting resolved in lib/ is every bit as read as one
+// resolved in bot.js — and when BOT_PERMISSION_MODE moved there so both processes
+// could honour one rule, this check called a live setting documented-but-dead.
+const LIB = join(REPO, "lib");
+if (existsSync(LIB)) {
+  for (const f of readdirSync(LIB)) if (f.endsWith(".js")) SOURCES.push(join("lib", f));
+}
 const read = new Set();
 for (const f of SOURCES) {
   const src = readFileSync(join(REPO, f), "utf8");
   for (const m of src.matchAll(/process\.env\.([A-Z][A-Z0-9_]*)/g)) read.add(m[1]);
   for (const m of src.matchAll(/envInt\(\s*["']([A-Z][A-Z0-9_]*)["']/g)) read.add(m[1]);
+  // A shared resolver takes the environment as a parameter (`env = process.env`)
+  // and reads `env.NAME`, which the `process.env.` pattern above cannot see. That
+  // gap reported BOT_PERMISSION_MODE_DEFAULT — a live, working setting — as
+  // documented-but-dead. Anchored on a word boundary so `.env` filenames and
+  // `cleanEnv.NAME` deletions do not count as reads.
+  for (const m of src.matchAll(/(?<![.\w])env\.([A-Z][A-Z0-9_]*)/g)) read.add(m[1]);
 }
 
 // Settings the README documents: rows shaped `| \`NAME\` | default | description |`

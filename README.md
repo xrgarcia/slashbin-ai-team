@@ -165,6 +165,14 @@ Any MCP server works. Connected MCP tools stay available in `restricted` mode �
 
 **Use `bypass` only for a bot you intend to let write code and run commands, and only alongside a real `ALLOWED_USERS`.** In that configuration anyone who can reach the bot can run commands on your machine. It warns on every start.
 
+Running several bots? Set `BOT_PERMISSION_MODE_DEFAULT` once in the host environment instead of repeating `BOT_PERMISSION_MODE` in every app entry. Resolution order:
+
+1. `BOT_PERMISSION_MODE` — this bot. Always wins.
+2. `BOT_PERMISSION_MODE_DEFAULT` — every bot on this host that sets no mode of its own.
+3. `restricted` — the built-in default.
+
+The startup log names which of the three the value came from, so one bot behaving differently from its siblings is a question you can answer.
+
 Upgrading from 1.x? `BOT_PERMISSION_MODE=bypass` restores the old behaviour — see [UPGRADING.md](UPGRADING.md).
 
 ## Running a team
@@ -225,7 +233,8 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 ### Tools
 | Variable | Default | Description |
 |---|---|---|
-| `BOT_PERMISSION_MODE` | `restricted` | `restricted` or `bypass` |
+| `BOT_PERMISSION_MODE` | `restricted` | `restricted` or `bypass`. This bot only |
+| `BOT_PERMISSION_MODE_DEFAULT` | — | Host-wide default for bots that set no `BOT_PERMISSION_MODE` |
 | `BOT_ALLOWED_TOOLS` | `Read,Glob,Grep,WebFetch,WebSearch,TodoWrite` | Built-ins exposed in `restricted` |
 | `BOT_SUMMARIZER_TOOLS` | `Read` | Tools the summarizer may use |
 
