@@ -4,6 +4,61 @@ Newest first. Each entry says whether you have to do anything, and exactly what.
 
 ---
 
+## 2.2.x → 2.3.0
+
+**No action required, but run one command.** Everything here is additive. The point of
+this release is to answer a question the guide could not: *what is going to bite me
+when I restart?*
+
+### `npm run doctor` now checks upgrade readiness
+
+Three checks, on top of what it already did:
+
+| Check | What it catches |
+|---|---|
+| **Scheduled jobs** | A job firing faster than `SESSION_TIMEOUT_MS`. On 2.2.0 and earlier this is the expensive bug fixed in 2.2.1 — the job pins its channel's session open permanently. |
+| **Running code** | A connected bot that started *before* `bot.js` was last changed. It is running the previous code from memory, and nothing else says so. |
+| **Claude billing** | `ANTHROPIC_API_KEY` present in the environment, which silently bills spawned Claude runs as metered API usage instead of your subscription. |
+
+### `npm run doctor:fleet` checks every bot at once
+
+`doctor` validates whichever bot's configuration is in your current environment. On a
+multi-bot host that meant running it once per bot with a different environment loaded
+each time — which in practice means it does not get run, and a token that has been reset
+only announces itself when that bot restart-loops after an upgrade.
+
+```bash
+doppler run -- npm run doctor:fleet     # or however you supply secrets
+```
+
+It walks `ecosystem.config.js` and, for each bot, verifies the token against Discord,
+checks `CLAUDE_CWD` exists, confirms a permission mode is resolvable, and runs the
+schedule and running-code checks. No secret value is ever printed — a token is confirmed
+by the bot name that comes back.
+
+Run it in the same environment PM2 launches from, or the tokens cannot be read.
+
+### Were you affected by the 2.2.1 session bug?
+
+If you upgraded straight from 2.2.0 or earlier and want to know whether it cost you:
+
+1. `npm run doctor:fleet` — any job listed as *tighter than the session timeout* was
+   pinning that channel's session open before 2.2.1.
+2. For each one, look at that bot's largest session transcript. A session spanning many
+   hours with turns in the hundreds of thousands of tokens is the signature. The cost is
+   in re-sent context, so it shows up as cache reads rather than output.
+
+2.2.1 already fixes the behaviour. This only tells you whether it happened.
+
+### One fixed false positive
+
+`doctor`'s "dead settings" check scanned only the top-level source files, so any setting
+resolved inside `lib/` was reported as configured-but-unread — including
+`BOT_PERMISSION_MODE`, which every bot depends on. It recommended deleting working
+configuration. It now scans `lib/` too.
+
+---
+
 ## 2.2.0 → 2.2.1
 
 **No action required.** One bug fix, no new configuration.
@@ -17,6 +72,9 @@ accumulated history, and the job also shared its session with any human talking 
 same channel.
 
 Each scheduled run now gets a clean session and leaves the channel's untouched.
+
+**To find out whether this was happening to you**, run `npm run doctor:fleet` (2.3.0+) —
+it lists any job whose cadence is tighter than the session timeout.
 
 **What changes for you:** if a job's prompt relied on remembering earlier runs, it no
 longer will. Nothing else — remembered context (summaries and the buffer) is still

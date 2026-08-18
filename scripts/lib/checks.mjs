@@ -12,6 +12,7 @@ import { join, resolve } from "path";
 import { createServer } from "net";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { createRequire } from "module";
 
 const run = promisify(execFile);
 
@@ -223,14 +224,29 @@ export function checkEcosystem(file, sourceDir) {
 
   if (sourceDir) {
     const read = new Set();
+    // Shared modules count too. Scanning only the top level reported
+    // BOT_PERMISSION_MODE as dead the moment its resolution moved into lib/ — a
+    // setting every bot depends on, recommended for deletion.
+    const files = [];
     for (const f of readdirSync(sourceDir)) {
-      if (!/\.(js|mjs|cjs)$/.test(f) || f.startsWith("ecosystem")) continue;
-      const src = readFileSync(join(sourceDir, f), "utf8");
-      // Settings are read two ways and BOTH count. Matching only the first form
+      if (/\.(js|mjs|cjs)$/.test(f) && !f.startsWith("ecosystem")) files.push(join(sourceDir, f));
+    }
+    const libDir = join(sourceDir, "lib");
+    if (existsSync(libDir)) {
+      for (const f of readdirSync(libDir)) {
+        if (/\.(js|mjs|cjs)$/.test(f)) files.push(join(libDir, f));
+      }
+    }
+    for (const file of files) {
+      const src = readFileSync(file, "utf8");
+      // Settings are read three ways and ALL count. Matching only the first form
       // reported every envInt-backed setting as dead — a false positive that would
       // have had operators deleting working configuration.
       for (const m of src.matchAll(/process\.env\.([A-Z][A-Z0-9_]*)/g)) read.add(m[1]);
       for (const m of src.matchAll(/envInt\(\s*["']([A-Z][A-Z0-9_]*)["']/g)) read.add(m[1]);
+      // A shared resolver takes the environment as a parameter and reads `env.NAME`.
+      // Anchored so `.env` filenames and `cleanEnv.NAME` deletions do not count.
+      for (const m of src.matchAll(/(?<![.\w])env\.([A-Z][A-Z0-9_]*)/g)) read.add(m[1]);
     }
     const set = [...text.matchAll(/^\s*([A-Z][A-Z0-9_]*)\s*:/gm)].map((m) => m[1]);
     const dead = [...new Set(set)].filter((k) => !read.has(k) && k !== "NODE_ENV");
@@ -252,4 +268,173 @@ export function render(results) {
   }
   console.log(`\n  ${results.length - failed - warned} passed, ${warned} warning(s), ${failed} failed`);
   return failed;
+}
+
+// --- Upgrade readiness -----------------------------------------------------
+// These answer "what will bite me when I restart", which is the question an
+// operator actually has and the one nothing used to answer. Each maps to a
+// failure that has really happened on a running fleet.
+
+const require_ = createRequire(import.meta.url);
+
+/**
+ * A schedule firing faster than the session idle timeout.
+ *
+ * Sessions expire on IDLE, so a job tighter than SESSION_TIMEOUT_MS keeps its
+ * channel permanently busy and the session never rotates. Before 2.2.1 that meant
+ * every fire re-sent the whole accumulated history — a 10-minute poll held one
+ * session open for 28.8 hours and cost ~$1,664 in a day while correctly finding
+ * nothing. 2.2.1 makes scheduled runs ephemeral, so this is no longer a cost bug;
+ * it stays a check because on any earlier version it IS one, and because a job
+ * tighter than its own runtime overlaps itself regardless of version.
+ */
+export function checkScheduleCadence(stateDir, historyDir, harnessDir, sessionTimeoutMs) {
+  const { jobsTighterThanTimeout } = require_("../../lib/cron-cadence.js");
+  const root = resolve(stateDir || historyDir || join(harnessDir, ".bot-history"));
+  const file = join(root, "schedules.json");
+  if (!existsSync(file)) return ok("Scheduled jobs", "none configured");
+
+  let jobs;
+  try {
+    jobs = JSON.parse(readFileSync(file, "utf8"));
+  } catch (e) {
+    return warn("Scheduled jobs", `${file} could not be parsed (${e.message})`,
+      "The scheduler will treat this as no jobs at all. Fix the JSON or the schedules are silently gone.");
+  }
+  const count = Array.isArray(jobs) ? jobs.length : 0;
+  if (!count) return ok("Scheduled jobs", "none configured");
+
+  const timeoutMs = sessionTimeoutMs || 30 * 60 * 1000;
+  const tight = jobsTighterThanTimeout(jobs, timeoutMs);
+  if (!tight.length) return ok("Scheduled jobs", `${count} job(s), none tighter than the session timeout`);
+
+  const listed = tight.map((t) => `${t.id} every ${t.everyMinutes}m`).join(", ");
+  return warn("Scheduled jobs", `${listed} — tighter than the ${tight[0].timeoutMinutes}m session timeout`,
+    "On 2.2.0 and earlier these hold their channel's session open permanently: sessions expire on IDLE, and a job this frequent is never idle, so every fire re-sends the whole accumulated conversation. Upgrade to 2.2.1+, where scheduled runs are ephemeral. Even after upgrading, check the job cannot overlap its own previous run.");
+}
+
+/**
+ * Is the running bot executing the code that is on disk?
+ *
+ * The working tree IS the deployment — PM2 runs bot.js straight out of the
+ * checkout, and Node reads it once at startup. So an edit or a `git pull` reaches
+ * a bot only when that bot next restarts, and a fleet restarted at different times
+ * runs different code with nothing to say so. Measured on the maintainer host: two
+ * bots, same checkout, four days apart in what they were actually running.
+ *
+ * The readiness marker is written when a bot connects, so its mtime is that bot's
+ * last successful start. No process manager required.
+ */
+export function checkRunningCodeFresh(harnessDir, botName) {
+  const botFile = join(harnessDir, "bot.js");
+  const ready = join(harnessDir, `.${botName || "bot"}.ready`);
+  if (!existsSync(botFile)) return warn("Running code", "bot.js not found", null);
+  if (!existsSync(ready)) return ok("Running code", "this bot is not currently connected — it will pick up the current code on start");
+
+  const code = statSync(botFile).mtimeMs;
+  const started = statSync(ready).mtimeMs;
+  if (started >= code) return ok("Running code", "the connected bot is running the code on disk");
+
+  const hours = Math.round((code - started) / 3600000);
+  return warn("Running code", `this bot connected BEFORE bot.js was last changed (~${hours}h of drift)`,
+    "It is running the previous code from memory — Node reads bot.js once at startup. Restart it, or it keeps running whatever the file said when it launched.");
+}
+
+/**
+ * A credential that silently changes who pays.
+ *
+ * The harness hands its own environment to every Claude process it spawns. If
+ * ANTHROPIC_API_KEY is present, those runs bill as API usage instead of using the
+ * subscription the operator thinks they are on — with nothing in any log to say so.
+ */
+export function checkBillingKeyAbsent(env = process.env) {
+  return env.ANTHROPIC_API_KEY
+    ? warn("Claude billing", "ANTHROPIC_API_KEY is set in this environment",
+        "Every Claude run the bot spawns inherits it and bills as metered API usage rather than your subscription. If that is not what you want, unset it in the environment the bot is launched from — a wrapper that `unset`s it before exec, or restarting your process manager from a clean shell. Setting it to an empty string does NOT work; it must be absent.")
+    : ok("Claude billing", "ANTHROPIC_API_KEY not set — Claude runs use the CLI's own auth");
+}
+
+/**
+ * Read the per-bot settings out of a PM2 ecosystem file WITHOUT evaluating it.
+ *
+ * Evaluating it would execute arbitrary JS and, worse, would resolve the token
+ * references into memory. This walks app blocks textually and returns only the
+ * NAME of the variable each bot's token comes from, never a value.
+ */
+export function parseFleet(file) {
+  if (!existsSync(file)) return [];
+  const text = readFileSync(file, "utf8");
+  const bots = [];
+  // Split on BOT_NAME, which every app must set uniquely (checkEcosystem enforces).
+  const blocks = text.split(/^\s*\{\s*$/m);
+  for (const block of blocks) {
+    const name = /^\s*BOT_NAME:\s*['"]([^'"]+)['"]/m.exec(block);
+    if (!name) continue;
+    const tokenRef = /^\s*DISCORD_TOKEN:\s*process\.env\.([A-Z0-9_]+)/m.exec(block);
+    const pick = (key) => {
+      const m = new RegExp(`^\\s*${key}:\\s*['"]([^'"]*)['"]`, "m").exec(block);
+      return m ? m[1] : null;
+    };
+    bots.push({
+      name: name[1],
+      tokenVar: tokenRef ? tokenRef[1] : null,
+      claudeCwd: pick("CLAUDE_CWD"),
+      wsPort: pick("WS_PORT"),
+      permissionMode: pick("BOT_PERMISSION_MODE"),
+      stateDir: pick("BOT_STATE_DIR"),
+      historyDir: pick("BOT_HISTORY_DIR"),
+      sessionTimeoutMs: Number(pick("SESSION_TIMEOUT_MS")) || null,
+    });
+  }
+  return bots;
+}
+
+/**
+ * Every bot in the fleet, checked in one pass.
+ *
+ * Doctor otherwise validates whichever single bot's configuration happens to be in
+ * the ambient environment, so an operator with eight bots had to run it eight
+ * times with eight different environments loaded — which in practice means the
+ * check does not get run, and a token that has been reset only announces itself
+ * when the bot restart-loops after an upgrade.
+ */
+export async function checkFleet(file, harnessDir, env = process.env) {
+  const bots = parseFleet(file);
+  if (!bots.length) return [warn("Fleet", "no bots found in ecosystem.config.js", "Expected app entries each setting BOT_NAME.")];
+
+  const out = [ok("Fleet", `${bots.length} bot(s) configured: ${bots.map((b) => b.name).join(", ")}`)];
+  const hostDefault = env.BOT_PERMISSION_MODE_DEFAULT;
+
+  for (const b of bots) {
+    const label = `  ${b.name}`;
+
+    if (!b.tokenVar) {
+      out.push(warn(`${label}: token`, "DISCORD_TOKEN is not a process.env reference",
+        "Point it at an environment variable so the token is never stored in the file."));
+    } else if (!env[b.tokenVar]) {
+      out.push(warn(`${label}: token`, `${b.tokenVar} is not set in this shell`,
+        `Run doctor in the same environment PM2 launches from (e.g. under your secrets manager), or this bot's token cannot be verified.`));
+    } else {
+      const res = await checkDiscordToken(env[b.tokenVar]);
+      out.push({ ...res, name: `${label}: token` });
+    }
+
+    if (b.claudeCwd && !existsSync(b.claudeCwd)) {
+      out.push(bad(`${label}: CLAUDE_CWD`, `${b.claudeCwd} does not exist`,
+        "The bot exits at startup rather than failing on the first message. Fix the path."));
+    }
+
+    const mode = b.permissionMode || hostDefault;
+    if (!mode) {
+      out.push(warn(`${label}: tools`, "no permission mode set, and no host default",
+        "This bot starts in `restricted` and cannot write files or run commands. Set BOT_PERMISSION_MODE_DEFAULT once for the host, or BOT_PERMISSION_MODE on this bot."));
+    }
+
+    out.push({
+      ...checkScheduleCadence(b.stateDir, b.historyDir, harnessDir, b.sessionTimeoutMs || Number(env.SESSION_TIMEOUT_MS) || 30 * 60 * 1000),
+      name: `${label}: schedules`,
+    });
+    out.push({ ...checkRunningCodeFresh(harnessDir, b.name), name: `${label}: running code` });
+  }
+  return out;
 }
