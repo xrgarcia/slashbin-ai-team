@@ -9,8 +9,8 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { isNothingToReport } = require("./lib/nothing-to-report");
 const { resolvePermissionMode, VALID_MODES } = require("./lib/permission-mode");
+const { isNothingToReport } = require("./lib/nothing-to-report");
 
 // --- Logger ---
 const log = pino({
@@ -317,9 +317,21 @@ const OUTBOX_DIR = process.env.BOT_OUTBOX_DIR
   : join(STATE_DIR, "outbox");
 const MAX_OUTBOUND_BYTES = parseInt(process.env.MAX_OUTBOUND_BYTES, 10) || 8 * 1024 * 1024;
 
+// --- Exit codes ---
+// A process manager restarts on failure, which is right for a crash and wrong for
+// a typo. Nothing about restarting fixes a revoked token or a path that does not
+// exist, so those exits are marked as permanent and the manager is told to stop
+// rather than thrash. Measured on an 8-bot host: one stale token produced an
+// endless restart loop whose log drowned the seven bots that were healthy.
+//
+// 78 is sysexits' EX_CONFIG — "something is wrong with the configuration." Reserved
+// for failures a restart cannot cure. Everything else keeps exit 1 and stays
+// restartable, because a network blip genuinely does deserve another go.
+const EXIT_CONFIG = 78;
+
 if (!DISCORD_TOKEN) {
   log.fatal("DISCORD_TOKEN environment variable is required — see docs/INSTALL.md");
-  process.exit(1);
+  process.exit(EXIT_CONFIG);
 }
 
 // A bot pointed at a directory that does not exist used to start happily and then
@@ -330,11 +342,11 @@ if (!existsSync(CLAUDE_CWD)) {
     { CLAUDE_CWD },
     "CLAUDE_CWD does not exist. Set it to YOUR project directory — the repo holding the CLAUDE.md that gives this bot its role. It is not this repo."
   );
-  process.exit(1);
+  process.exit(EXIT_CONFIG);
 }
 if (!statSync(CLAUDE_CWD).isDirectory()) {
   log.fatal({ CLAUDE_CWD }, "CLAUDE_CWD is not a directory");
-  process.exit(1);
+  process.exit(EXIT_CONFIG);
 }
 
 if (!VALID_MODES.includes(PERMISSION_MODE)) {
@@ -342,7 +354,7 @@ if (!VALID_MODES.includes(PERMISSION_MODE)) {
     { mode: PERMISSION_MODE, source: PERMISSION_MODE_SOURCE },
     'Permission mode must be "restricted" (default — expose only BOT_ALLOWED_TOOLS) or "bypass" (all tools, no permission checks)'
   );
-  process.exit(1);
+  process.exit(EXIT_CONFIG);
 }
 // Name the SOURCE, not just the value. On a multi-bot host the question is never
 // "what mode is this bot in" — it is "why is this one different from its
@@ -368,7 +380,7 @@ try {
     { BOT_TIMEZONE },
     'BOT_TIMEZONE is not a valid IANA timezone name (expected e.g. "Europe/London", "America/New_York", "UTC")'
   );
-  process.exit(1);
+  process.exit(EXIT_CONFIG);
 }
 
 // Opt-in strict mode. Default stays permissive so "invite the bot and talk to it"
@@ -377,7 +389,7 @@ if (process.env.BOT_REQUIRE_ALLOWLIST === "true" && ALLOWED_USER_IDS.length === 
   log.fatal(
     "BOT_REQUIRE_ALLOWLIST=true but ALLOWED_USERS is empty — refusing to start open to every Discord user. Set ALLOWED_USERS to a comma-separated list of user IDs."
   );
-  process.exit(1);
+  process.exit(EXIT_CONFIG);
 }
 
 // --- Duplicate instance guard ---
@@ -2211,6 +2223,11 @@ function shouldRunNow(cron, lastRunKey, tz = BOT_TIMEZONE) {
   return false;
 }
 
+// A polling job whose answer is "nothing happened" must post NOTHING. The model
+// cannot emit a truly empty turn — the harness re-prompts it — so it reaches for
+// a placeholder instead ("[no output]", "."), and every one of those became a
+// Discord ping. Suppress them here, where the decision is deterministic.
+// Scheduled jobs only; interactive replies are never filtered.
 // Re-entrancy guard: setInterval fires this without awaiting, so a job running
 // longer than the check interval would otherwise stack overlapping ticks.
 let schedulerRunning = false;
@@ -2363,9 +2380,16 @@ process.on("SIGTERM", () => {
 // permanently deaf, which is the worst failure mode we can hand a new user.
 client.login(DISCORD_TOKEN).catch((err) => {
   clearReady();
-  const hint = /token/i.test(err.message)
+  // A rejected token is permanent by definition — it is the same token next time.
+  // Discord.js reports it as code TokenInvalid; the message check stays as a
+  // fallback for the shapes that arrive without one.
+  const badToken = err.code === "TokenInvalid" || /token/i.test(err.message || "");
+  const hint = badToken
     ? "Check DISCORD_TOKEN — it is missing, malformed, or has been reset in the Discord Developer Portal."
     : "Check network access to Discord, then the token.";
-  log.fatal({ err: err.message }, `Discord login failed. ${hint}`);
-  process.exit(1);
+  log.fatal(
+    { err: err.message, code: err.code, permanent: badToken },
+    `Discord login failed. ${hint}${badToken ? " Not retrying — a restart cannot fix a rejected token." : ""}`,
+  );
+  process.exit(badToken ? EXIT_CONFIG : 1);
 });
