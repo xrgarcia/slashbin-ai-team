@@ -4,6 +4,34 @@ Newest first. Each entry says whether you have to do anything, and exactly what.
 
 ---
 
+## Before you upgrade, from any version
+
+```bash
+npm run advise
+```
+
+It reads the install, works out what the version gap means for **your** configuration,
+and prints an ordered list of things to do first — blockers before warnings, each with
+the reason and the command.
+
+It is designed to run on an install that has **not** upgraded yet, which is the only time
+the answer is useful. Nothing is imported from the rest of the harness and nothing is
+evaluated, so it runs on a checkout several majors behind. To analyse an old install from
+a current clone:
+
+```bash
+node scripts/upgrade-advisor.mjs --dir /path/to/the/old/install
+```
+
+Add `--json` for a stable, machine-readable list an agent can act on directly — every
+entry carries an id, a severity, the reason and a concrete action. It exits non-zero when
+there are blockers, so it drops into a script.
+
+No credential value is ever printed; tokens are referred to by the name of the variable
+they come from.
+
+---
+
 ## 2.2.x → 2.3.0
 
 **No action required, but run one command.** Everything here is additive. The point of
