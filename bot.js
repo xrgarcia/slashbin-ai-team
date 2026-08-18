@@ -2199,6 +2199,20 @@ function shouldRunNow(cron, lastRunKey, tz = BOT_TIMEZONE) {
   return false;
 }
 
+// A polling job whose answer is "nothing happened" must post NOTHING. The model
+// cannot emit a truly empty turn — the harness re-prompts it — so it reaches for
+// a placeholder instead ("[no output]", "."), and every one of those became a
+// Discord ping. Suppress them here, where the decision is deterministic.
+// Scheduled jobs only; interactive replies are never filtered.
+const NOTHING_TO_REPORT = /^\s*(?:[.•\-–—]+|\[[^\]]*\]|\((?:no|none)[^)]*\)|no (?:output|open prs?|changes?|updates?|new (?:prs?|activity))[.!]?)\s*$/i;
+
+function isNothingToReport(content) {
+  if (content == null) return true;
+  const text = String(content).trim();
+  if (!text) return true;
+  return NOTHING_TO_REPORT.test(text);
+}
+
 // Re-entrancy guard: setInterval fires this without awaiting, so a job running
 // longer than the check interval would otherwise stack overlapping ticks.
 let schedulerRunning = false;
@@ -2261,6 +2275,10 @@ async function runScheduledJobs() {
           if (typeof content === "object" && content.files) {
             await channel.send(content);
           } else {
+            if (isNothingToReport(content)) {
+              jobLog.info({ id: job.id, preview: String(content ?? "").slice(0, 40) }, "Suppressed empty scheduled-job reply");
+              return;
+            }
             for (const chunk of splitMessage(content)) {
               await channel.send(chunk);
             }
