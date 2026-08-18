@@ -10,6 +10,7 @@ const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
 const { isNothingToReport } = require("./lib/nothing-to-report");
+const { resolvePermissionMode, VALID_MODES } = require("./lib/permission-mode");
 
 // --- Logger ---
 const log = pino({
@@ -112,7 +113,9 @@ const CHECKPOINT_FILE = join(STATE_DIR, ".checkpoints.json");
 //   --permission-mode plan   -> restricts NOTHING. Bash exposed and used.
 //   --tools Read,Grep        -> exposes EXACTLY those (plus connected MCP tools).
 // So --tools is the real control surface, and the one we use.
-const PERMISSION_MODE = process.env.BOT_PERMISSION_MODE || "restricted";
+// Resolved in one place for every process that needs it — see lib/permission-mode.js
+// for the precedence (per-bot -> host default -> restricted) and why it is shared.
+const { mode: PERMISSION_MODE, source: PERMISSION_MODE_SOURCE } = resolvePermissionMode();
 const DEFAULT_ALLOWED_TOOLS = "Read,Glob,Grep,WebFetch,WebSearch,TodoWrite";
 const ALLOWED_TOOLS = process.env.BOT_ALLOWED_TOOLS || DEFAULT_ALLOWED_TOOLS;
 // Summarisation reads a transcript that is already in its prompt. It never needs
@@ -334,19 +337,27 @@ if (!statSync(CLAUDE_CWD).isDirectory()) {
   process.exit(1);
 }
 
-if (!["bypass", "restricted"].includes(PERMISSION_MODE)) {
+if (!VALID_MODES.includes(PERMISSION_MODE)) {
   log.fatal(
-    { BOT_PERMISSION_MODE: PERMISSION_MODE },
-    'BOT_PERMISSION_MODE must be "restricted" (default — expose only BOT_ALLOWED_TOOLS) or "bypass" (all tools, no permission checks)'
+    { mode: PERMISSION_MODE, source: PERMISSION_MODE_SOURCE },
+    'Permission mode must be "restricted" (default — expose only BOT_ALLOWED_TOOLS) or "bypass" (all tools, no permission checks)'
   );
   process.exit(1);
 }
+// Name the SOURCE, not just the value. On a multi-bot host the question is never
+// "what mode is this bot in" — it is "why is this one different from its
+// siblings", and that is unanswerable without knowing whether the value came from
+// the bot, the host, or nowhere at all.
 if (PERMISSION_MODE === "bypass") {
   log.warn(
-    "BOT_PERMISSION_MODE=bypass — this bot runs with ALL tools and no permission checks. Anyone allowed to talk to it can run arbitrary commands on this host. Remove it to fall back to BOT_ALLOWED_TOOLS."
+    { source: PERMISSION_MODE_SOURCE },
+    "Permission mode is bypass — this bot runs with ALL tools and no permission checks. Anyone allowed to talk to it can run arbitrary commands on this host. Remove it to fall back to BOT_ALLOWED_TOOLS."
   );
 } else {
-  log.info({ tools: ALLOWED_TOOLS }, "Tool exposure restricted — set BOT_PERMISSION_MODE=bypass for the previous unrestricted behaviour, or widen BOT_ALLOWED_TOOLS");
+  log.info(
+    { tools: ALLOWED_TOOLS, source: PERMISSION_MODE_SOURCE },
+    "Tool exposure restricted — set BOT_PERMISSION_MODE=bypass for the previous unrestricted behaviour, or widen BOT_ALLOWED_TOOLS"
+  );
 }
 
 // Fail on a bad IANA name here rather than throwing on every message.
