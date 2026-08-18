@@ -110,7 +110,7 @@ Keep it under 100 lines. Claude loads the full `CLAUDE.md` on every message — 
 
 **Files, any type, both directions** — attach anything and the bot opens it; reply to a message that has one and ask about it. Bots hand files back via an outbox or a marker. Oversized files are reported, never silently dropped.
 
-**Operations** — `start`/`stop`/`restart`/`status`/`list`/`logs`, structured logging, graceful shutdown, duplicate-instance guard, and `npm run doctor`.
+**Operations** — `start`/`stop`/`restart`/`status`/`list`/`logs`, structured logging, graceful shutdown, duplicate-instance guard, and `npm run doctor` (plus `doctor:fleet` for every bot at once).
 
 ## Commands
 
@@ -134,6 +134,7 @@ In your shell (add `-- --name <bot>` to target one instance):
 |---|---|
 | `npm run setup` | Interactive configuration, validated as you go |
 | `npm run doctor` | Check an existing install; exits non-zero on failure |
+| `npm run doctor:fleet` | Check **every** bot in `ecosystem.config.js` in one pass — tokens, schedules, stale processes |
 | `npm start` / `stop` / `restart` | Manage the bot |
 | `npm run status` | Is it running — and is it *connected*? |
 | `npm run list` | Every bot instance in this checkout |

@@ -246,6 +246,16 @@ pm2 save
 pm2 startup        # follow the printed command so it survives reboot
 ```
 
+**Check every bot before you start them.** `npm run doctor` validates whichever bot's
+configuration is in your current environment; on a multi-bot host run
+`npm run doctor:fleet` instead — it walks `ecosystem.config.js` and checks each bot's
+token, schedules and running code in one pass. Run it in the same environment PM2
+launches from, or the tokens cannot be verified:
+
+```bash
+doppler run -- npm run doctor:fleet     # or however you supply secrets
+```
+
 **Tell PM2 not to retry a failure that cannot succeed.** A bot exits **78** when its
 configuration is wrong — a rejected token, a `CLAUDE_CWD` that does not exist, an
 unrecognised permission mode. Restarting changes none of those, so without this the
