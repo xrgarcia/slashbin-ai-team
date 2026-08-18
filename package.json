@@ -30,6 +30,7 @@
   "scripts": {
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/doctor.mjs",
+    "doctor:fleet": "node scripts/doctor.mjs --fleet",
     "start": "node bot-manager.mjs start",
     "stop": "node bot-manager.mjs stop",
     "restart": "node bot-manager.mjs restart",
@@ -37,7 +38,7 @@
     "logs": "node bot-manager.mjs logs",
     "summarize": "node summarize.js",
     "summarize:dry": "node summarize.js --dry-run",
-    "test": "node test/attachments.test.js && node test/resume-safety.test.js && node test/history-dir.test.js && node test/startup-safety.test.js && node test/progress.test.js && node test/skill-pack.test.js && node test/argv-budget.test.js && node test/config-docs.test.js && node test/permission-mode.test.js && node test/nothing-to-report.test.js && node test/scheduled-session.test.js"
+    "test": "node test/attachments.test.js && node test/resume-safety.test.js && node test/history-dir.test.js && node test/startup-safety.test.js && node test/progress.test.js && node test/skill-pack.test.js && node test/argv-budget.test.js && node test/config-docs.test.js && node test/permission-mode.test.js && node test/nothing-to-report.test.js && node test/scheduled-session.test.js && node test/cron-cadence.test.js"
   },
   "dependencies": {
     "discord.js": "^14.25.1",
