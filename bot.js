@@ -462,6 +462,32 @@ const WS_HEARTBEAT_MS = envInt("WS_HEARTBEAT_MS", 30000, { min: 1000 });
 const WS_HEARTBEAT_MAX_MISSES = envInt("WS_HEARTBEAT_MAX_MISSES", 3, { min: 1 });
 const connectedAgents = new Map(); // agentId → { ws, discordBotId, channels }
 
+// A channel the bot has no access to is simply ABSENT from channels.cache, and
+// every bridge send below used to sit inside a bare `if (channel)`. So a message
+// to a channel the bot could not see vanished with no log line anywhere: the
+// Foreman published status for hours while the logs stayed clean, and the
+// missing permission looked like a message-cache bug (2026-08-26). Fetch as a
+// fallback — that also covers the moment after a gateway reconnect when the
+// cache is briefly empty — and when even the fetch fails, say so loudly. A drop
+// must always name the channel it was dropped for.
+async function resolveBridgeChannel(channelId, ctx) {
+  if (!channelId) return null;
+  const cached = client.channels.cache.get(channelId);
+  if (cached) return cached;
+  try {
+    const fetched = await client.channels.fetch(channelId);
+    if (fetched) {
+      log.warn({ ...ctx, channelId }, "Channel not in cache, resolved by fetch");
+      return fetched;
+    }
+    log.error({ ...ctx, channelId }, "Discord knows no such channel — message dropped");
+  } catch (err) {
+    log.error({ ...ctx, channelId, err: err.message },
+      "Cannot reach Discord channel (bot lacks access?) — message dropped");
+  }
+  return null;
+}
+
 const wss = new WebSocketServer({ port: WS_PORT, host: WS_HOST });
 log.info({ port: WS_PORT }, "WebSocket bridge listening");
 
@@ -511,40 +537,44 @@ wss.on("connection", (ws) => {
 
     if (msg.type === "status") {
       const agent = connectedAgents.get(agentId);
-      if (agent?.channels?.status) {
-        const channel = client.channels.cache.get(agent.channels.status);
-        if (channel) {
-          const prefix = msg.level === "error" ? "**[ERROR]**" : msg.level === "warn" ? "**[WARN]**" : "";
-          const text = prefix ? `${prefix} ${msg.text}` : msg.text;
-          for (const chunk of splitMessage(text)) {
-            try { await channel.send(chunk); } catch (err) {
-              log.error({ err: err.message, agentId }, "Failed to send status to Discord");
-            }
-          }
+      const statusChannelId = agent?.channels?.status;
+      if (!statusChannelId) {
+        log.warn({ agentId }, "Agent sent status but has no status channel configured — dropped");
+        return;
+      }
+      const channel = await resolveBridgeChannel(statusChannelId, { agentId, kind: "status" });
+      if (!channel) return;
+      const prefix = msg.level === "error" ? "**[ERROR]**" : msg.level === "warn" ? "**[WARN]**" : "";
+      const text = prefix ? `${prefix} ${msg.text}` : msg.text;
+      for (const chunk of splitMessage(text)) {
+        try { await channel.send(chunk); } catch (err) {
+          log.error({ err: err.message, agentId, channelId: statusChannelId }, "Failed to send status to Discord");
         }
       }
       return;
     }
 
     if (msg.type === "response") {
-      const channel = client.channels.cache.get(msg.channelId);
-      if (channel) {
-        for (const chunk of splitMessage(msg.text)) {
-          try {
-            if (msg.replyTo) {
-              const original = await channel.messages.fetch(msg.replyTo).catch(() => null);
-              if (original) { await original.reply(chunk); continue; }
-            }
-            await channel.send(chunk);
-          } catch (err) {
-            log.error({ err: err.message, agentId }, "Failed to send response to Discord");
+      const channel = await resolveBridgeChannel(msg.channelId, { agentId, kind: "response" });
+      if (!channel) return;
+      for (const chunk of splitMessage(msg.text)) {
+        try {
+          if (msg.replyTo) {
+            const original = await channel.messages.fetch(msg.replyTo).catch(() => null);
+            if (original) { await original.reply(chunk); continue; }
           }
+          await channel.send(chunk);
+        } catch (err) {
+          log.error({ err: err.message, agentId, channelId: msg.channelId }, "Failed to send response to Discord");
         }
       }
       return;
     }
 
     if (msg.type === "typing") {
+      // Cosmetic, and deliberately not routed through resolveBridgeChannel: an
+      // unreachable channel is already reported by the response that follows,
+      // and typing fires often enough to bury that line in duplicates.
       const channel = client.channels.cache.get(msg.channelId);
       if (channel) {
         try { await channel.sendTyping(); } catch { /* ignore */ }
