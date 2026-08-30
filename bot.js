@@ -188,6 +188,28 @@ function shadowedCommands() {
   return hits;
 }
 
+/**
+ * Repo-level system-prompt overrides — instructions that must beat the harness
+ * defaults they contradict. Read from CLAUDE_CWD, so each bot picks up the
+ * overrides of the repo it serves and a repo without the file is unaffected.
+ *
+ * These ride at the HEAD of the system prompt, never the tail: clampArgs()
+ * truncates an oversized argument from the end, so anything appended last is
+ * exactly what gets cut. --append-system-prompt-file would keep this out of
+ * argv entirely, but the CLI refuses that flag alongside
+ * --append-system-prompt, which this spawn already uses.
+ */
+function systemPromptOverrides() {
+  const file = join(CLAUDE_CWD, ".claude", "system-prompt-overrides.md");
+  if (!existsSync(file)) return "";
+  try {
+    return readFileSync(file, "utf8").trim() + "\n\n";
+  } catch (err) {
+    log.warn({ err, file }, "Could not read system-prompt overrides; continuing without them");
+    return "";
+  }
+}
+
 // --- Summarization coverage ---
 // SUMMARIZE_CHANNELS defaults to MONITOR_CHANNELS, which answers the wrong
 // question. "Where do I reply unprompted?" and "what is worth remembering?" are
@@ -1708,16 +1730,18 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "--- End commands ---",
     ].join("\n");
 
+    const overrides = systemPromptOverrides();
+
     let systemPrompt;
     if (resumeSessionId) {
       // Resumed sessions already have the full context — only inject time and channel focus
-      systemPrompt = `${basePrompt}${channelContext}${fileTransferContext}`;
+      systemPrompt = `${overrides}${basePrompt}${channelContext}${fileTransferContext}`;
       reqLog.info("Resume mode: skipping buffer/summary re-injection");
     } else {
       const context = buildContextPrompt(reqLog);
       systemPrompt = context
-        ? `${basePrompt}${channelContext}${fileTransferContext}\n\n${context}`
-        : `${basePrompt}${channelContext}${fileTransferContext}`;
+        ? `${overrides}${basePrompt}${channelContext}${fileTransferContext}\n\n${context}`
+        : `${overrides}${basePrompt}${channelContext}${fileTransferContext}`;
     }
 
     const args = [
