@@ -5,6 +5,77 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] — 2026-08-30
+
+### Added
+
+- **Follow-ups a bot can actually keep.** The scheduler could only answer "every day at
+  7". "I'll check back in twenty minutes" had to be translated into a wall-clock cron
+  minute plus a matching `expires` — and an expiry landing one tick early DELETED the job
+  before it fired, so the promise evaporated with no error anywhere. The alternative was a
+  background sleep, which dies when the reply is sent.
+
+  A wake job carries an instant instead of a cron: `wake --in 20m`, no clock arithmetic
+  and no timezone to get wrong. It can CARRY the conversation that set it, because a
+  follow-up with no memory of what it was following up on is a stranger asking a question
+  — bounded by `BOT_WAKE_CARRY_MAX_MS` (default: the session idle timeout), since an
+  unbounded chain of carried looks is the 2.2.1 incident wearing a different hat. When
+  carry expires the run is TOLD, so it works from its note rather than referring to what
+  it cannot see.
+
+  It does not recur. The run decides whether to look again and how long to wait, so a slow
+  deploy is checked patiently and a nearly-done one closely; its prompt carries the exact
+  re-arm command, pre-filled. `BOT_MAX_WAKE_ATTEMPTS` (default 12) and an optional
+  deadline are backstops, not the plan. A wake is claimed before it runs, so it fires **at
+  most once** — the same guarantee the resume path already makes, for the same reason:
+  these prompts merge PRs.
+
+- **Signals — tell a bot the thing it was waiting for happened.** A follow-up can name a
+  signal alongside its time: wake when `dev-deploy-done` fires, or in 30 minutes,
+  whichever comes first. Anything that can run a command fires one —
+  `npm run signal dev-deploy-done` at the end of a deploy script, a CI job, a git hook.
+
+  A sender passes a **name, never a prompt**. The words that run were written by the bot
+  in the conversation where it promised to look, and a signal can only release a follow-up
+  that bot already booked, in the channel it already chose — so this is safe to hand to a
+  CI job. Attached text arrives fenced and labelled untrusted: evidence to read, never
+  orders to follow. Names are opaque to the harness; there are no built-in integrations to
+  configure and nothing to register.
+
+  **The timeout is still there.** A signal that never arrives costs nothing — the
+  follow-up fires exactly when it always would have — so nobody can depend on a notifier
+  they have not wired up. Signals are the one bridge message gated by a credential,
+  because they start a run rather than posting text: loopback is trusted as it always has
+  been, and a bridge bound anywhere else must set `BRIDGE_TOKEN`. The handshake now
+  advertises its capabilities, so a notifier can tell an older harness from a silent drop.
+  A signal arriving seconds BEFORE its follow-up is booked is remembered for
+  `BRIDGE_SIGNAL_MEMORY_MS` (bounded, consumed on use).
+
+- **Repo-level system-prompt overrides.** Instructions that must beat the harness defaults
+  they contradict, read from `.claude/system-prompt-overrides.md` in the repo each bot
+  serves. They ride at the HEAD of the system prompt, never the tail, because an oversized
+  argument is truncated from the end — anything appended last is exactly what a clamp
+  eats, and a silently dropped override is worse than no override. A repo without the file
+  is unaffected; a read error warns and continues rather than taking the bot down for a
+  missing optional file. Each load is logged, because "the overrides are live" should not
+  have to be argued from the file merely existing.
+
+### Fixed
+
+- **A dropped bridge message now names the channel it was dropped for.** Every bridge send
+  resolved its destination with `channels.cache.get()` inside a bare `if (channel)`. A
+  channel the bot cannot access is simply absent from that cache, so the message was
+  discarded on an else branch that did not exist. The Foreman published status for hours
+  while the logs stayed clean and a missing permission looked like a cache bug. Sends now
+  fall back to a fetch — which also covers the moment after a gateway reconnect when the
+  cache is briefly empty — and say so loudly when even that fails.
+
+- **A scheduler tick no longer saves a stale copy of the schedules file.** A run can create
+  a job while it is running — that is how a watch re-arms itself — and the tick's
+  in-memory array predates that write. Every write inside a tick now re-reads the file
+  first, so a follow-up the run just scheduled is not silently deleted by the tick that
+  fired it.
+
 ## [2.4.0] — 2026-08-18
 
 ### Added

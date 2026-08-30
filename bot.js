@@ -203,7 +203,12 @@ function systemPromptOverrides() {
   const file = join(CLAUDE_CWD, ".claude", "system-prompt-overrides.md");
   if (!existsSync(file)) return "";
   try {
-    return readFileSync(file, "utf8").trim() + "\n\n";
+    const text = readFileSync(file, "utf8").trim();
+    // Logged on every load, not once at startup: the file is re-read per request
+    // (that is what lets a context change land without a restart), and a silently
+    // dropped override is indistinguishable from one that never existed.
+    log.info({ file, bytes: text.length }, "System-prompt overrides loaded");
+    return text + "\n\n";
   } catch (err) {
     log.warn({ err, file }, "Could not read system-prompt overrides; continuing without them");
     return "";
