@@ -125,15 +125,16 @@ check("the run is TOLD when it is not carrying", () => {
 
 console.log("\nA follow-up fires at most once");
 
-check("the job is deleted BEFORE it runs, not after", () => {
+check("the job is claimed BEFORE it runs, not after", () => {
   // Same guarantee as the resume path: a prompt that may have merged a PR is
   // never re-fired because the run outlived the tick or the process died holding
-  // it. Deleting afterwards would leave a window where a restart re-fires it.
+  // it. Claiming afterwards would leave a window where a restart re-fires it —
+  // and would let the minute tick and an early signal both fire the same job.
   const fn = bot.slice(bot.indexOf("async function runWakeJob("), bot.indexOf("async function runScheduledJobs("));
-  const removedAt = fn.indexOf("removeScheduledJob(job.id);\n\n  const chainStarted");
+  const claimedAt = fn.indexOf("if (!claimWakeJob(job.id)) return false;");
   const ranAt = fn.indexOf("await runClaude(");
-  assert.ok(removedAt > -1, "the pre-run removal moved or changed shape");
-  assert.ok(removedAt < ranAt, "a wake job must be removed before its run starts, or a crash re-fires it");
+  assert.ok(claimedAt > -1, "the pre-run claim moved or changed shape");
+  assert.ok(claimedAt < ranAt, "a wake job must be claimed before its run starts, or a crash re-fires it");
 });
 
 check("a tick never saves a stale copy of the schedules file", () => {

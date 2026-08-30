@@ -12,6 +12,7 @@ const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/a
 const { resolvePermissionMode, VALID_MODES } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
+const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
 
 // --- Logger ---
 const log = pino({
@@ -463,6 +464,30 @@ const WS_HEARTBEAT_MS = envInt("WS_HEARTBEAT_MS", 30000, { min: 1000 });
 const WS_HEARTBEAT_MAX_MISSES = envInt("WS_HEARTBEAT_MAX_MISSES", 3, { min: 1 });
 const connectedAgents = new Map(); // agentId → { ws, discordBotId, channels }
 
+/**
+ * Signals — "the thing you were waiting for just happened".
+ *
+ * A bot books a follow-up for 30 minutes out AND names a signal; whatever
+ * finishes first fires it. That is the difference between checking a deploy
+ * every minute and being told the moment it lands.
+ *
+ * The caller sends a NAME, never a prompt. The prompt that runs was written by
+ * the bot itself, in the conversation where it promised to look — so a signal
+ * cannot put words in the bot's mouth or instructions in its context, and can
+ * only ever release work the bot had already scheduled for a channel it had
+ * already chosen. That is the whole security model, and it is why this is safe
+ * to expose to a CI job or a git hook.
+ *
+ * Signals are the ONE bridge message gated by a credential, because they start a
+ * Claude run rather than posting text. Loopback is trusted as it always has been;
+ * a bridge bound anywhere else must set BRIDGE_TOKEN or signals are refused. The
+ * existing message types are deliberately left ungated — tightening them would
+ * break every agent already connected, which is a different decision than this
+ * one.
+ */
+const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || "";
+const SIGNAL_DATA_MAX = envInt("BRIDGE_SIGNAL_DATA_MAX", 2000, { min: 0 });
+
 // A channel the bot has no access to is simply ABSENT from channels.cache, and
 // every bridge send below used to sit inside a bare `if (channel)`. So a message
 // to a channel the bot could not see vanished with no log line anywhere: the
@@ -527,7 +552,42 @@ wss.on("connection", (ws) => {
         type: "handshake_ack",
         success: true,
         connectedAgents: Array.from(connectedAgents.keys()),
+        // Additive, and the only way a notifier can tell a harness that
+        // understands signals from one that silently ignores them. An older
+        // client simply never reads the field.
+        capabilities: ["status", "response", "typing", "signal"],
       }));
+      return;
+    }
+
+    // Deliberately ahead of the handshake gate: a deploy script or a git hook
+    // fires one signal and disconnects. Making it register as an agent first
+    // would buy no safety — the boundary is the token or loopback, below — and
+    // would cost every user a concept they do not need.
+    if (msg.type === "signal") {
+      const refusal = signalRefusal({ token: msg.token, host: WS_HOST, expectedToken: BRIDGE_TOKEN });
+      if (refusal) {
+        log.warn({ agentId, name: msg.name, host: WS_HOST }, refusal);
+        try { ws.send(JSON.stringify({ type: "signal_ack", ok: false, message: refusal })); } catch { /* ignore */ }
+        return;
+      }
+      const signal = normalizeSignal(msg, { max: SIGNAL_DATA_MAX });
+      if (signal.error) {
+        log.warn({ agentId, name: msg.name }, signal.error);
+        try { ws.send(JSON.stringify({ type: "signal_ack", ok: false, message: signal.error })); } catch { /* ignore */ }
+        return;
+      }
+      const { waiting, released } = await releaseSignal(signal.name, signal.data, agentId);
+      try {
+        ws.send(JSON.stringify({
+          type: "signal_ack", ok: true, released, waiting,
+          message: released
+            ? `woke ${released} waiting follow-up(s)`
+            : waiting
+              ? `${waiting} follow-up(s) were waiting but could not be woken right now — remembered, and the next tick will retry`
+              : `nothing was waiting for "${signal.name}" — remembered for ${Math.round(SIGNAL_MEMORY_MS / 1000)}s in case one is booked in the next moment`,
+        }));
+      } catch { /* ignore */ }
       return;
     }
 
@@ -2219,6 +2279,88 @@ function stampLastRun(id, key) {
  */
 const WAKE_CARRY_MAX_MS = envInt("BOT_WAKE_CARRY_MAX_MS", SESSION_TIMEOUT_MS, { min: 0 });
 
+/**
+ * Take a wake job off the file and hand it back — or null if it is already gone.
+ *
+ * Two things can fire the same follow-up in the same instant: the minute tick
+ * that finds it due, and a signal releasing it early. Node runs one at a time and
+ * there is no await between the read and the write here, so whichever arrives
+ * second finds nothing and does nothing. Without it, a deploy that finishes
+ * exactly on the minute gets reported twice.
+ */
+function claimWakeJob(id) {
+  const current = loadSchedules();
+  const job = current.find((j) => j.id === id);
+  if (!job) return null;
+  saveSchedules(current.filter((j) => j.id !== id));
+  return job;
+}
+
+/**
+ * Signals that arrived with nothing waiting.
+ *
+ * The race is real and fast: a build finishes, fires its signal, and the bot is
+ * still composing the reply that books the follow-up. Without a short memory the
+ * signal lands on an empty file and the follow-up then waits out its full
+ * timeout — the exact latency this feature exists to remove. A remembered signal
+ * is consumed the first time it releases something, so it can never fire twice.
+ */
+const recentSignals = new Map(); // name → { at, data }
+const SIGNAL_MEMORY_MS = envInt("BRIDGE_SIGNAL_MEMORY_MS", 300_000, { min: 0 });
+const SIGNAL_MEMORY_MAX = 100;
+
+function rememberSignal(name, data) {
+  if (SIGNAL_MEMORY_MS <= 0) return;
+  // Bounded: a notifier looping on a signal nobody waits for must not grow the map.
+  if (recentSignals.size >= SIGNAL_MEMORY_MAX && !recentSignals.has(name)) {
+    recentSignals.delete(recentSignals.keys().next().value);
+  }
+  recentSignals.set(name, { at: Date.now(), data });
+}
+
+function peekRememberedSignal(name) {
+  const hit = recentSignals.get(name);
+  if (!hit) return null;
+  if (Date.now() - hit.at > SIGNAL_MEMORY_MS) {
+    recentSignals.delete(name);
+    return null;
+  }
+  return hit;
+}
+
+/**
+ * Release every follow-up waiting on this name.
+ *
+ * Reports what was waiting AND what actually fired, because those differ in a
+ * way the sender needs to know: "nothing was listening" is a wiring mistake to
+ * go and fix, while "something was listening but could not be woken yet" is a
+ * transient the next tick will finish. Collapsing them into one number sent a CI
+ * job away thinking its signal was pointless.
+ */
+async function releaseSignal(name, data, agentId) {
+  const sLog = log.child({ component: "scheduler", signal: name, agentId });
+  const waiting = loadSchedules().filter((j) => isWakeJob(j) && j.waitFor === name);
+  if (!waiting.length) {
+    rememberSignal(name, data);
+    sLog.info("Signal arrived with nothing waiting — remembered in case a follow-up is booked in the next moment");
+    return { waiting: 0, released: 0 };
+  }
+  let released = 0;
+  for (const job of waiting) {
+    const fired = await runWakeJob(job, sLog, { kind: "signal", name, data });
+    if (fired) released++;
+  }
+  // Something was waiting but could not be woken — most likely the channel is
+  // briefly unresolvable after a gateway reconnect. Remember it so the next tick
+  // finishes the job, rather than making the follow-up wait out a timeout it no
+  // longer needs.
+  if (!released) {
+    rememberSignal(name, data);
+    sLog.warn({ waiting: waiting.length }, "Signal matched waiting follow-ups but none could be woken — remembered for the next tick");
+  }
+  return { waiting: waiting.length, released };
+}
+
 
 function recordJobExecution(job, startTime, durationMs, success, error) {
   const record = {
@@ -2365,14 +2507,25 @@ function jobChannelSender(channel, jobLog, jobId) {
  *     look itself — which is what makes the cadence the model's decision rather
  *     than a fixed poll that keeps firing long after anyone cares.
  */
-async function runWakeJob(job, sLog) {
+async function runWakeJob(job, sLog, explicitRelease = null) {
   const due = Date.parse(job.runAt);
   if (!Number.isFinite(due)) {
     sLog.error({ id: job.id, runAt: job.runAt }, "Wake job has an unreadable runAt — removing rather than retrying it every tick");
     removeScheduledJob(job.id);
-    return;
+    return false;
   }
-  if (Date.now() < due) return;
+
+  // A signal released it early, or one arrived moments before it was booked.
+  let release = explicitRelease;
+  if (!release && job.waitFor) {
+    const remembered = peekRememberedSignal(job.waitFor);
+    if (remembered) release = { kind: "signal", name: job.waitFor, data: remembered.data };
+  }
+
+  // runAt is the FALLBACK, always. A signal that never comes costs nothing but
+  // the wait the bot chose anyway, which is what makes this safe to depend on:
+  // the worst case is exactly the behaviour before signals existed.
+  if (!release && Date.now() < due) return false;
 
   // Out of time. Drop it silently: the run that set the deadline already decided
   // what "too late" means, and announcing the expiry here would be exactly the
@@ -2380,7 +2533,7 @@ async function runWakeJob(job, sLog) {
   if (job.deadline && Date.now() > Date.parse(job.deadline)) {
     sLog.info({ id: job.id, deadline: job.deadline }, "Wake job passed its deadline before firing, removing");
     removeScheduledJob(job.id);
-    return;
+    return false;
   }
 
   // Same reason as the cron path: channels.cache is briefly empty after a gateway
@@ -2388,15 +2541,17 @@ async function runWakeJob(job, sLog) {
   const channel = client.channels.cache.get(job.channel);
   if (!channel) {
     sLog.warn({ id: job.id, channel: job.channel }, "Wake job channel not found — leaving it queued so the next tick retries");
-    return;
+    return false;
   }
 
-  // Remove BEFORE the run, never after. A wake fires once by construction, and
+  // Claim it BEFORE the run, never after. A wake fires once by construction, and
   // the standing guarantee here is at-most-once: a prompt that merges a PR must
   // not be re-fired because the run outlived the tick or the process died holding
-  // it. Re-arming is the RUN's job — it has the schedule skill and the exact
-  // command in its prompt.
-  removeScheduledJob(job.id);
+  // it. Claiming also settles the race between the tick and a signal. Re-arming
+  // is the RUN's job — it has the schedule skill and the exact command in its
+  // prompt.
+  if (!claimWakeJob(job.id)) return false;
+  if (release?.kind === "signal") recentSignals.delete(release.name);
 
   const chainStarted = Date.parse(job.chainStartedAt || job.createdAt || job.runAt);
   const carried = Boolean(job.carry)
@@ -2405,7 +2560,7 @@ async function runWakeJob(job, sLog) {
 
   const jobLog = log.child({ component: "scheduler", jobId: job.id });
   sLog.info(
-    { id: job.id, runAt: job.runAt, attempt: job.attempt || 1, carried, prompt: String(job.prompt).substring(0, 80) },
+    { id: job.id, runAt: job.runAt, attempt: job.attempt || 1, carried, releasedBy: release ? `signal:${release.name}` : "timeout", prompt: String(job.prompt).substring(0, 80) },
     "Firing wake job"
   );
 
@@ -2413,7 +2568,7 @@ async function runWakeJob(job, sLog) {
   const startTime = new Date();
   try {
     await runClaude(
-      buildWakePrompt(job, { carried }),
+      buildWakePrompt(job, { carried, release }),
       job.channel, jobLog, sendToChannel, {},
       channel.name || job.channel, null,
       // Carrying resumes this channel's conversation; not carrying is the same
@@ -2432,6 +2587,7 @@ async function runWakeJob(job, sLog) {
     recordJobExecution(job, startTime, durationMs, false, err.message);
     await sendToChannel(`The follow-up I scheduled ("${job.id}") failed and will not retry: ${err.message}`);
   }
+  return true;
 }
 
 async function runScheduledJobs() {

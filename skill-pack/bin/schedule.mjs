@@ -17,7 +17,7 @@
  * Usage:
  *   schedule.mjs list
  *   schedule.mjs add --cron "0 7 * * 1,2,3,4,5" --prompt "..." --by <user> [--channel <id>] [--expires <iso>]
- *   schedule.mjs wake --in 20m --prompt "..." [--note "..."] [--carry] [--deadline <iso>] [--max-attempts N]
+ *   schedule.mjs wake --in 20m --prompt "..." [--note "..."] [--carry] [--wait-for <signal>] [--deadline <iso>]
  *   schedule.mjs remove <id>
  *   schedule.mjs history [id]
  */
@@ -144,6 +144,7 @@ if (cmd === "list") {
       console.log(`- **${j.id}** — one-shot wake-up${j.attempt > 1 ? `, look ${j.attempt}` : ""}`);
       console.log(`  fires: ${Number.isFinite(at) ? j.runAt.slice(0, 16).replace("T", " ") + " UTC" : "NEVER — unreadable runAt"}${overdue ? " (overdue — next tick)" : ""}`);
       console.log(`  posts to channel ${j.channel}${j.createdBy ? `, created by ${j.createdBy}` : ""}${j.deadline ? `, gives up ${j.deadline}` : ""}${j.carry ? ", carries the conversation" : ""}`);
+      if (j.waitFor) console.log(`  or sooner, on the signal: ${j.waitFor}`);
       if (j.note) console.log(`  note: ${String(j.note).slice(0, 160)}`);
       console.log(`  prompt: ${String(j.prompt).slice(0, 160)}\n`);
       continue;
@@ -222,6 +223,14 @@ if (cmd === "list") {
     die(`This watch has already looked ${attempt - 1} times, which is its limit (${maxAttempts}). Report what you have and stop — do not schedule another look. If it genuinely needs more, raise --max-attempts deliberately and say why.`);
   }
 
+  // A signal name the harness never interprets: whatever fires it decides what it
+  // means. The wake-up still has its own time, because a signal that never comes
+  // must cost nothing more than the wait the bot had already chosen.
+  const waitFor = flag("wait-for");
+  if (waitFor && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(waitFor)) {
+    die(`"${waitFor}" is not a usable signal name — use 1-64 characters of letters, digits, dot, dash, underscore or colon.`);
+  }
+
   const deadline = flag("deadline");
   if (deadline) {
     const dl = Date.parse(deadline);
@@ -251,6 +260,7 @@ if (cmd === "list") {
     maxAttempts,
     chainStartedAt,
     ...(flag("note") ? { note: flag("note") } : {}),
+    ...(waitFor ? { waitFor } : {}),
     ...(argv.includes("--carry") ? { carry: true } : {}),
     ...(deadline ? { deadline } : {}),
     createdBy: flag("by") || "unknown",
@@ -270,6 +280,9 @@ if (cmd === "list") {
   console.log(written.carry
     ? "It continues this conversation if the session is still warm, and falls back to the note if it is not."
     : "It runs on its own, with no conversation around it — the prompt and the note are all it will have.");
+  if (written.waitFor) {
+    console.log(`Wakes as soon as the signal "${written.waitFor}" fires, or at the time above — whichever comes first.`);
+  }
   console.log(`Posts to channel ${written.channel}.`);
 } else if (cmd === "remove") {
   const id = argv[1];
@@ -295,7 +308,8 @@ if (cmd === "list") {
   schedule.mjs list
   schedule.mjs add  --cron "<m h d mo dow>" --prompt "<what to do>" --by <user> [--channel <id>] [--expires <iso>]
   schedule.mjs wake --in <20m|2h|1h30m> --prompt "<what to do>" [--note "<carry forward>"] [--carry]
-                    [--at <iso>] [--deadline <iso>] [--max-attempts <n>] [--attempt <n>] [--chain-started <iso>]
+                    [--wait-for <signal>] [--at <iso>] [--deadline <iso>]
+                    [--max-attempts <n>] [--attempt <n>] [--chain-started <iso>]
   schedule.mjs remove <id>
   schedule.mjs history [id]
 

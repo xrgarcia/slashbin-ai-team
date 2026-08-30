@@ -108,6 +108,8 @@ Keep it under 100 lines. Claude loads the full `CLAUDE.md` on every message — 
 
 **Follow-ups it keeps** — *"I'll check back in twenty minutes"* is a job on disk, not an intention. A bot can set its own one-shot wake-up, carry forward what it already knows, and keep watching something across as many looks as it needs — choosing the gap each time, staying silent while nothing changes, and stopping the moment it has an answer. Nothing survives on hope: the run that promises the follow-up schedules it in the same breath.
 
+**Tell it the moment something happens** — a follow-up can name a signal alongside its timeout: *wake when `dev-deploy-done` fires, or in 30 minutes, whichever comes first.* Anything that can run a command fires one (`npm run signal dev-deploy-done`) — a CI step, a git hook, the last line of a deploy script. The sender passes a **name**, never a prompt: the words that run are the bot's own, written when it made the promise. The timeout is always there, so a signal that never arrives costs nothing.
+
 **Triggers** — a DM, an @mention, any message in a monitored channel, or an emoji reaction.
 
 **Files, any type, both directions** — attach anything and the bot opens it; reply to a message that has one and ask about it. Bots hand files back via an outbox or a marker. Oversized files are reported, never silently dropped.
@@ -137,6 +139,7 @@ In your shell (add `-- --name <bot>` to target one instance):
 | `npm run setup` | Interactive configuration, validated as you go |
 | `npm run doctor` | Check an existing install; exits non-zero on failure |
 | `npm run doctor:fleet` | Check **every** bot in `ecosystem.config.js` in one pass — tokens, schedules, stale processes |
+| `npm run signal <name>` | Tell a bot something happened, waking any follow-up that was waiting for it |
 | `npm run advise` | Read an existing install and list what to do **before** upgrading. `--json` for an agent; `--dir` to point at any checkout |
 | `npm start` / `stop` / `restart` | Manage the bot |
 | `npm run status` | Is it running — and is it *connected*? |
@@ -322,6 +325,9 @@ Two busy weeks of summaries will reach it. The default is also a cost decision �
 | `WS_HOST` | `127.0.0.1` | Bind address; it accepts commands, so widen deliberately |
 | `WS_HEARTBEAT_MS` | `30000` | Ping interval |
 | `WS_HEARTBEAT_MAX_MISSES` | `3` | Missed pings before disconnect |
+| `BRIDGE_TOKEN` | — | Required to send a signal when the bridge is not on loopback |
+| `BRIDGE_SIGNAL_MEMORY_MS` | `300000` | How long a signal with nothing waiting is remembered |
+| `BRIDGE_SIGNAL_DATA_MAX` | `2000` | Characters of signal text kept before truncation |
 
 ### Misc
 | Variable | Default | Description |
@@ -437,6 +443,43 @@ A **wake-up** lives in the same file and carries `runAt` instead of `cron`:
 It is deleted before it runs, so it fires **at most once** — a follow-up that
 crashed is never silently repeated, and a watch continues only because the run
 booked the next one.
+
+</details>
+
+<details>
+<summary>Waking a bot the moment something finishes</summary>
+
+Polling a deploy every minute is wasteful and slow. Give the follow-up a signal
+name as well as its time:
+
+> *"check back when the deploy finishes, or in 30 minutes"*
+
+```bash
+# at the end of your deploy script, CI job, git hook — anything that already knows
+npm run signal dev-deploy-done
+npm run signal ci:build --data "exit 0, 4m12s"
+```
+
+The name is **yours**. The harness never interprets it — `nightly-etl`,
+`invoice-run-finished`, whatever the sender and the bot agree on. There are no
+built-in integrations to configure and nothing to register.
+
+What a sender can and cannot do:
+
+- It sends a **name**, never a prompt. The words that run were written by the bot
+  when it promised to look, so a signal cannot put instructions in its context.
+- It can only release a follow-up **that bot already booked**, in the channel that
+  follow-up already named. A signal nobody is waiting for does nothing (it is
+  remembered for five minutes, in case the follow-up is booked a second later).
+- Attached `--data` reaches the bot fenced and labelled as untrusted text —
+  evidence to read, never instructions to obey.
+- The **timeout still applies.** A signal that never arrives means the follow-up
+  fires when it always would have. Nothing new can fail.
+
+Signals are the one bridge message that needs a credential, because they start a
+run rather than posting text: on loopback (the default) they are accepted, and a
+bridge bound anywhere else must set `BRIDGE_TOKEN`. Each bot has its own bridge
+port, so signal the bot you mean — `npm run signal <name> -- --port 9801`.
 
 </details>
 
