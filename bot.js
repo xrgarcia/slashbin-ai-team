@@ -11,6 +11,8 @@ const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
 const { resolvePermissionMode, VALID_MODES } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
+const { isWakeJob, buildWakePrompt } = require("./lib/wake");
+const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
 
 // --- Logger ---
 const log = pino({
@@ -184,6 +186,33 @@ function shadowedCommands() {
     }
   }
   return hits;
+}
+
+/**
+ * Repo-level system-prompt overrides — instructions that must beat the harness
+ * defaults they contradict. Read from CLAUDE_CWD, so each bot picks up the
+ * overrides of the repo it serves and a repo without the file is unaffected.
+ *
+ * These ride at the HEAD of the system prompt, never the tail: clampArgs()
+ * truncates an oversized argument from the end, so anything appended last is
+ * exactly what gets cut. --append-system-prompt-file would keep this out of
+ * argv entirely, but the CLI refuses that flag alongside
+ * --append-system-prompt, which this spawn already uses.
+ */
+function systemPromptOverrides() {
+  const file = join(CLAUDE_CWD, ".claude", "system-prompt-overrides.md");
+  if (!existsSync(file)) return "";
+  try {
+    const text = readFileSync(file, "utf8").trim();
+    // Logged on every load, not once at startup: the file is re-read per request
+    // (that is what lets a context change land without a restart), and a silently
+    // dropped override is indistinguishable from one that never existed.
+    log.info({ file, bytes: text.length }, "System-prompt overrides loaded");
+    return text + "\n\n";
+  } catch (err) {
+    log.warn({ err, file }, "Could not read system-prompt overrides; continuing without them");
+    return "";
+  }
 }
 
 // --- Summarization coverage ---
@@ -462,6 +491,56 @@ const WS_HEARTBEAT_MS = envInt("WS_HEARTBEAT_MS", 30000, { min: 1000 });
 const WS_HEARTBEAT_MAX_MISSES = envInt("WS_HEARTBEAT_MAX_MISSES", 3, { min: 1 });
 const connectedAgents = new Map(); // agentId → { ws, discordBotId, channels }
 
+/**
+ * Signals — "the thing you were waiting for just happened".
+ *
+ * A bot books a follow-up for 30 minutes out AND names a signal; whatever
+ * finishes first fires it. That is the difference between checking a deploy
+ * every minute and being told the moment it lands.
+ *
+ * The caller sends a NAME, never a prompt. The prompt that runs was written by
+ * the bot itself, in the conversation where it promised to look — so a signal
+ * cannot put words in the bot's mouth or instructions in its context, and can
+ * only ever release work the bot had already scheduled for a channel it had
+ * already chosen. That is the whole security model, and it is why this is safe
+ * to expose to a CI job or a git hook.
+ *
+ * Signals are the ONE bridge message gated by a credential, because they start a
+ * Claude run rather than posting text. Loopback is trusted as it always has been;
+ * a bridge bound anywhere else must set BRIDGE_TOKEN or signals are refused. The
+ * existing message types are deliberately left ungated — tightening them would
+ * break every agent already connected, which is a different decision than this
+ * one.
+ */
+const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || "";
+const SIGNAL_DATA_MAX = envInt("BRIDGE_SIGNAL_DATA_MAX", 2000, { min: 0 });
+
+// A channel the bot has no access to is simply ABSENT from channels.cache, and
+// every bridge send below used to sit inside a bare `if (channel)`. So a message
+// to a channel the bot could not see vanished with no log line anywhere: the
+// Foreman published status for hours while the logs stayed clean, and the
+// missing permission looked like a message-cache bug (2026-08-26). Fetch as a
+// fallback — that also covers the moment after a gateway reconnect when the
+// cache is briefly empty — and when even the fetch fails, say so loudly. A drop
+// must always name the channel it was dropped for.
+async function resolveBridgeChannel(channelId, ctx) {
+  if (!channelId) return null;
+  const cached = client.channels.cache.get(channelId);
+  if (cached) return cached;
+  try {
+    const fetched = await client.channels.fetch(channelId);
+    if (fetched) {
+      log.warn({ ...ctx, channelId }, "Channel not in cache, resolved by fetch");
+      return fetched;
+    }
+    log.error({ ...ctx, channelId }, "Discord knows no such channel — message dropped");
+  } catch (err) {
+    log.error({ ...ctx, channelId, err: err.message },
+      "Cannot reach Discord channel (bot lacks access?) — message dropped");
+  }
+  return null;
+}
+
 const wss = new WebSocketServer({ port: WS_PORT, host: WS_HOST });
 log.info({ port: WS_PORT }, "WebSocket bridge listening");
 
@@ -500,7 +579,42 @@ wss.on("connection", (ws) => {
         type: "handshake_ack",
         success: true,
         connectedAgents: Array.from(connectedAgents.keys()),
+        // Additive, and the only way a notifier can tell a harness that
+        // understands signals from one that silently ignores them. An older
+        // client simply never reads the field.
+        capabilities: ["status", "response", "typing", "signal"],
       }));
+      return;
+    }
+
+    // Deliberately ahead of the handshake gate: a deploy script or a git hook
+    // fires one signal and disconnects. Making it register as an agent first
+    // would buy no safety — the boundary is the token or loopback, below — and
+    // would cost every user a concept they do not need.
+    if (msg.type === "signal") {
+      const refusal = signalRefusal({ token: msg.token, host: WS_HOST, expectedToken: BRIDGE_TOKEN });
+      if (refusal) {
+        log.warn({ agentId, name: msg.name, host: WS_HOST }, refusal);
+        try { ws.send(JSON.stringify({ type: "signal_ack", ok: false, message: refusal })); } catch { /* ignore */ }
+        return;
+      }
+      const signal = normalizeSignal(msg, { max: SIGNAL_DATA_MAX });
+      if (signal.error) {
+        log.warn({ agentId, name: msg.name }, signal.error);
+        try { ws.send(JSON.stringify({ type: "signal_ack", ok: false, message: signal.error })); } catch { /* ignore */ }
+        return;
+      }
+      const { waiting, released } = await releaseSignal(signal.name, signal.data, agentId);
+      try {
+        ws.send(JSON.stringify({
+          type: "signal_ack", ok: true, released, waiting,
+          message: released
+            ? `woke ${released} waiting follow-up(s)`
+            : waiting
+              ? `${waiting} follow-up(s) were waiting but could not be woken right now — remembered, and the next tick will retry`
+              : `nothing was waiting for "${signal.name}" — remembered for ${Math.round(SIGNAL_MEMORY_MS / 1000)}s in case one is booked in the next moment`,
+        }));
+      } catch { /* ignore */ }
       return;
     }
 
@@ -511,40 +625,44 @@ wss.on("connection", (ws) => {
 
     if (msg.type === "status") {
       const agent = connectedAgents.get(agentId);
-      if (agent?.channels?.status) {
-        const channel = client.channels.cache.get(agent.channels.status);
-        if (channel) {
-          const prefix = msg.level === "error" ? "**[ERROR]**" : msg.level === "warn" ? "**[WARN]**" : "";
-          const text = prefix ? `${prefix} ${msg.text}` : msg.text;
-          for (const chunk of splitMessage(text)) {
-            try { await channel.send(chunk); } catch (err) {
-              log.error({ err: err.message, agentId }, "Failed to send status to Discord");
-            }
-          }
+      const statusChannelId = agent?.channels?.status;
+      if (!statusChannelId) {
+        log.warn({ agentId }, "Agent sent status but has no status channel configured — dropped");
+        return;
+      }
+      const channel = await resolveBridgeChannel(statusChannelId, { agentId, kind: "status" });
+      if (!channel) return;
+      const prefix = msg.level === "error" ? "**[ERROR]**" : msg.level === "warn" ? "**[WARN]**" : "";
+      const text = prefix ? `${prefix} ${msg.text}` : msg.text;
+      for (const chunk of splitMessage(text)) {
+        try { await channel.send(chunk); } catch (err) {
+          log.error({ err: err.message, agentId, channelId: statusChannelId }, "Failed to send status to Discord");
         }
       }
       return;
     }
 
     if (msg.type === "response") {
-      const channel = client.channels.cache.get(msg.channelId);
-      if (channel) {
-        for (const chunk of splitMessage(msg.text)) {
-          try {
-            if (msg.replyTo) {
-              const original = await channel.messages.fetch(msg.replyTo).catch(() => null);
-              if (original) { await original.reply(chunk); continue; }
-            }
-            await channel.send(chunk);
-          } catch (err) {
-            log.error({ err: err.message, agentId }, "Failed to send response to Discord");
+      const channel = await resolveBridgeChannel(msg.channelId, { agentId, kind: "response" });
+      if (!channel) return;
+      for (const chunk of splitMessage(msg.text)) {
+        try {
+          if (msg.replyTo) {
+            const original = await channel.messages.fetch(msg.replyTo).catch(() => null);
+            if (original) { await original.reply(chunk); continue; }
           }
+          await channel.send(chunk);
+        } catch (err) {
+          log.error({ err: err.message, agentId, channelId: msg.channelId }, "Failed to send response to Discord");
         }
       }
       return;
     }
 
     if (msg.type === "typing") {
+      // Cosmetic, and deliberately not routed through resolveBridgeChannel: an
+      // unreachable channel is already reported by the response that follows,
+      // and typing fires often enough to bury that line in duplicates.
       const channel = client.channels.cache.get(msg.channelId);
       if (channel) {
         try { await channel.sendTyping(); } catch { /* ignore */ }
@@ -1617,16 +1735,18 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "--- End commands ---",
     ].join("\n");
 
+    const overrides = systemPromptOverrides();
+
     let systemPrompt;
     if (resumeSessionId) {
       // Resumed sessions already have the full context — only inject time and channel focus
-      systemPrompt = `${basePrompt}${channelContext}${fileTransferContext}`;
+      systemPrompt = `${overrides}${basePrompt}${channelContext}${fileTransferContext}`;
       reqLog.info("Resume mode: skipping buffer/summary re-injection");
     } else {
       const context = buildContextPrompt(reqLog);
       systemPrompt = context
-        ? `${basePrompt}${channelContext}${fileTransferContext}\n\n${context}`
-        : `${basePrompt}${channelContext}${fileTransferContext}`;
+        ? `${overrides}${basePrompt}${channelContext}${fileTransferContext}\n\n${context}`
+        : `${overrides}${basePrompt}${channelContext}${fileTransferContext}`;
     }
 
     const args = [
@@ -2155,11 +2275,129 @@ function saveSchedules(schedules) {
   writeFileSync(SCHEDULES_FILE, JSON.stringify(schedules, null, 2) + "\n");
 }
 
+/**
+ * Every write inside a tick re-reads the file first.
+ *
+ * A run can CREATE a job while it is running — that is exactly how a self-paced
+ * watch re-arms itself — and the scheduler's in-memory array predates that
+ * write. Saving the stale array would delete the follow-up the run just
+ * scheduled, and the watch would end without anyone noticing it had stopped.
+ */
+function removeScheduledJob(id) {
+  saveSchedules(loadSchedules().filter((j) => j.id !== id));
+}
+
+function stampLastRun(id, key) {
+  const current = loadSchedules();
+  const job = current.find((j) => j.id === id);
+  if (!job) return;
+  job._lastRun = key;
+  saveSchedules(current);
+}
+
+/**
+ * How long a chain of wake-ups may keep resuming the channel's conversation.
+ *
+ * Carrying the conversation is the point of a follow-up — the run that promised
+ * "I'll check back" should not wake up amnesiac. But an unbounded chain of
+ * carried wake-ups is the 2.2.1 incident wearing a different hat: a session that
+ * is never idle never rotates, and every look re-sends the whole history. So
+ * carry has a wall-clock ceiling, defaulted to the session idle timeout. Past
+ * it the wake still fires — it just fires clean, and is TOLD it is running
+ * clean, so it works from the note instead of referring to what it cannot see.
+ */
+const WAKE_CARRY_MAX_MS = envInt("BOT_WAKE_CARRY_MAX_MS", SESSION_TIMEOUT_MS, { min: 0 });
+
+/**
+ * Take a wake job off the file and hand it back — or null if it is already gone.
+ *
+ * Two things can fire the same follow-up in the same instant: the minute tick
+ * that finds it due, and a signal releasing it early. Node runs one at a time and
+ * there is no await between the read and the write here, so whichever arrives
+ * second finds nothing and does nothing. Without it, a deploy that finishes
+ * exactly on the minute gets reported twice.
+ */
+function claimWakeJob(id) {
+  const current = loadSchedules();
+  const job = current.find((j) => j.id === id);
+  if (!job) return null;
+  saveSchedules(current.filter((j) => j.id !== id));
+  return job;
+}
+
+/**
+ * Signals that arrived with nothing waiting.
+ *
+ * The race is real and fast: a build finishes, fires its signal, and the bot is
+ * still composing the reply that books the follow-up. Without a short memory the
+ * signal lands on an empty file and the follow-up then waits out its full
+ * timeout — the exact latency this feature exists to remove. A remembered signal
+ * is consumed the first time it releases something, so it can never fire twice.
+ */
+const recentSignals = new Map(); // name → { at, data }
+const SIGNAL_MEMORY_MS = envInt("BRIDGE_SIGNAL_MEMORY_MS", 300_000, { min: 0 });
+const SIGNAL_MEMORY_MAX = 100;
+
+function rememberSignal(name, data) {
+  if (SIGNAL_MEMORY_MS <= 0) return;
+  // Bounded: a notifier looping on a signal nobody waits for must not grow the map.
+  if (recentSignals.size >= SIGNAL_MEMORY_MAX && !recentSignals.has(name)) {
+    recentSignals.delete(recentSignals.keys().next().value);
+  }
+  recentSignals.set(name, { at: Date.now(), data });
+}
+
+function peekRememberedSignal(name) {
+  const hit = recentSignals.get(name);
+  if (!hit) return null;
+  if (Date.now() - hit.at > SIGNAL_MEMORY_MS) {
+    recentSignals.delete(name);
+    return null;
+  }
+  return hit;
+}
+
+/**
+ * Release every follow-up waiting on this name.
+ *
+ * Reports what was waiting AND what actually fired, because those differ in a
+ * way the sender needs to know: "nothing was listening" is a wiring mistake to
+ * go and fix, while "something was listening but could not be woken yet" is a
+ * transient the next tick will finish. Collapsing them into one number sent a CI
+ * job away thinking its signal was pointless.
+ */
+async function releaseSignal(name, data, agentId) {
+  const sLog = log.child({ component: "scheduler", signal: name, agentId });
+  const waiting = loadSchedules().filter((j) => isWakeJob(j) && j.waitFor === name);
+  if (!waiting.length) {
+    rememberSignal(name, data);
+    sLog.info("Signal arrived with nothing waiting — remembered in case a follow-up is booked in the next moment");
+    return { waiting: 0, released: 0 };
+  }
+  let released = 0;
+  for (const job of waiting) {
+    const fired = await runWakeJob(job, sLog, { kind: "signal", name, data });
+    if (fired) released++;
+  }
+  // Something was waiting but could not be woken — most likely the channel is
+  // briefly unresolvable after a gateway reconnect. Remember it so the next tick
+  // finishes the job, rather than making the follow-up wait out a timeout it no
+  // longer needs.
+  if (!released) {
+    rememberSignal(name, data);
+    sLog.warn({ waiting: waiting.length }, "Signal matched waiting follow-ups but none could be woken — remembered for the next tick");
+  }
+  return { waiting: waiting.length, released };
+}
+
 
 function recordJobExecution(job, startTime, durationMs, success, error) {
   const record = {
     id: job.id,
-    cron: job.cron,
+    // One of the two, never a hollow `cron: undefined` — the history file is read
+    // to answer "did that follow-up ever fire", and a missing schedule field
+    // reads as a corrupt row rather than a different kind of job.
+    ...(job.cron ? { cron: job.cron } : { runAt: job.runAt, attempt: job.attempt || 1 }),
     scheduledFor: startTime.toISOString(),
     firedAt: new Date().toISOString(),
     durationMs,
@@ -2263,6 +2501,124 @@ function shouldRunNow(cron, lastRunKey, tz = BOT_TIMEZONE) {
 // longer than the check interval would otherwise stack overlapping ticks.
 let schedulerRunning = false;
 
+/**
+ * Post a job's output. The suppression is here rather than in the caller because
+ * the decision is deterministic and must apply to every kind of scheduled run.
+ */
+function jobChannelSender(channel, jobLog, jobId) {
+  return async (content) => {
+    try {
+      if (typeof content === "object" && content.files) {
+        await channel.send(content);
+        return;
+      }
+      if (isNothingToReport(content)) {
+        jobLog.info({ id: jobId, preview: String(content ?? "").slice(0, 40) }, "Suppressed empty scheduled-job reply");
+        return;
+      }
+      for (const chunk of splitMessage(content)) {
+        await channel.send(chunk);
+      }
+    } catch (err) {
+      jobLog.error({ err: err.message }, "Failed to send scheduled message");
+    }
+  };
+}
+
+/**
+ * A one-shot wake-up — the "I'll check back in twenty minutes" a bot could not
+ * previously keep. It differs from a cron job in three ways that matter:
+ *
+ *  1. It fires at an INSTANT, so nothing has to be expressed as a clock time.
+ *  2. It may CARRY the conversation that set it, because a follow-up with no
+ *     memory of what it was following up on is just a stranger asking a question.
+ *  3. It does not recur. If the answer is not final, the run schedules the next
+ *     look itself — which is what makes the cadence the model's decision rather
+ *     than a fixed poll that keeps firing long after anyone cares.
+ */
+async function runWakeJob(job, sLog, explicitRelease = null) {
+  const due = Date.parse(job.runAt);
+  if (!Number.isFinite(due)) {
+    sLog.error({ id: job.id, runAt: job.runAt }, "Wake job has an unreadable runAt — removing rather than retrying it every tick");
+    removeScheduledJob(job.id);
+    return false;
+  }
+
+  // A signal released it early, or one arrived moments before it was booked.
+  let release = explicitRelease;
+  if (!release && job.waitFor) {
+    const remembered = peekRememberedSignal(job.waitFor);
+    if (remembered) release = { kind: "signal", name: job.waitFor, data: remembered.data };
+  }
+
+  // runAt is the FALLBACK, always. A signal that never comes costs nothing but
+  // the wait the bot chose anyway, which is what makes this safe to depend on:
+  // the worst case is exactly the behaviour before signals existed.
+  if (!release && Date.now() < due) return false;
+
+  // Out of time. Drop it silently: the run that set the deadline already decided
+  // what "too late" means, and announcing the expiry here would be exactly the
+  // heartbeat noise a quiet scheduler exists to avoid.
+  if (job.deadline && Date.now() > Date.parse(job.deadline)) {
+    sLog.info({ id: job.id, deadline: job.deadline }, "Wake job passed its deadline before firing, removing");
+    removeScheduledJob(job.id);
+    return false;
+  }
+
+  // Same reason as the cron path: channels.cache is briefly empty after a gateway
+  // reconnect, and runAt stays in the past, so leaving it alone retries next tick.
+  const channel = client.channels.cache.get(job.channel);
+  if (!channel) {
+    sLog.warn({ id: job.id, channel: job.channel }, "Wake job channel not found — leaving it queued so the next tick retries");
+    return false;
+  }
+
+  // Claim it BEFORE the run, never after. A wake fires once by construction, and
+  // the standing guarantee here is at-most-once: a prompt that merges a PR must
+  // not be re-fired because the run outlived the tick or the process died holding
+  // it. Claiming also settles the race between the tick and a signal. Re-arming
+  // is the RUN's job — it has the schedule skill and the exact command in its
+  // prompt.
+  if (!claimWakeJob(job.id)) return false;
+  if (release?.kind === "signal") recentSignals.delete(release.name);
+
+  const chainStarted = Date.parse(job.chainStartedAt || job.createdAt || job.runAt);
+  const carried = Boolean(job.carry)
+    && Number.isFinite(chainStarted)
+    && (Date.now() - chainStarted) <= WAKE_CARRY_MAX_MS;
+
+  const jobLog = log.child({ component: "scheduler", jobId: job.id });
+  sLog.info(
+    { id: job.id, runAt: job.runAt, attempt: job.attempt || 1, carried, releasedBy: release ? `signal:${release.name}` : "timeout", prompt: String(job.prompt).substring(0, 80) },
+    "Firing wake job"
+  );
+
+  const sendToChannel = jobChannelSender(channel, jobLog, job.id);
+  const startTime = new Date();
+  try {
+    await runClaude(
+      buildWakePrompt(job, { carried, release }),
+      job.channel, jobLog, sendToChannel, {},
+      channel.name || job.channel, null,
+      // Carrying resumes this channel's conversation; not carrying is the same
+      // isolated run a cron job gets.
+      { ephemeral: !carried },
+    );
+    const durationMs = Date.now() - startTime.getTime();
+    sLog.info({ id: job.id, durationMs }, "Wake job completed");
+    recordJobExecution(job, startTime, durationMs, true);
+  } catch (err) {
+    const durationMs = Date.now() - startTime.getTime();
+    // No retry, and none is coming: the job is already gone. Say that in the log,
+    // because "the follow-up never happened" is otherwise indistinguishable from
+    // "the follow-up found nothing" — both are silence in the channel.
+    sLog.error({ id: job.id, err: err.message, durationMs }, "Wake job failed — it fires at most once, so nothing will re-fire it");
+    recordJobExecution(job, startTime, durationMs, false, err.message);
+    await sendToChannel(`The follow-up I scheduled ("${job.id}") failed and will not retry: ${err.message}`);
+  }
+  return true;
+}
+
 async function runScheduledJobs() {
   if (schedulerRunning) return;
   schedulerRunning = true;
@@ -2275,16 +2631,19 @@ async function runScheduledJobs() {
     const sLog = log.child({ component: "scheduler" });
 
     // Second Way: log what we found on every cycle
-    const pending = schedules.filter(j => !j._remove);
-    sLog.debug({ jobs: pending.length, ids: pending.map(j => j.id) }, "Scheduler check");
+    sLog.debug({ jobs: schedules.length, ids: schedules.map(j => j.id) }, "Scheduler check");
 
     for (const job of schedules) {
+      if (isWakeJob(job)) {
+        await runWakeJob(job, sLog);
+        continue;
+      }
+
       // Check if job should run (current minute or missed in last 5 minutes)
       if (!shouldRunNow(job.cron, job._lastRun, job.tz || BOT_TIMEZONE)) {
         // Only expire jobs that didn't need to run
         if (job.expires && new Date(job.expires) < now) {
-          job._remove = true;
-          saveSchedules(schedules.filter(j => !j._remove));
+          removeScheduledJob(job.id);
           sLog.info({ id: job.id, expires: job.expires, cron: describeCron(job.cron) }, "Scheduled job expired without firing, removing");
         }
         continue;
@@ -2310,29 +2669,13 @@ async function runScheduledJobs() {
       const nk = zonedParts(now, BOT_TIMEZONE);
       const nowKey = `${nk.month}-${nk.day}-${nk.hour}-${nk.min}`;
       job._lastRun = nowKey;
-      saveSchedules(schedules.filter(j => !j._remove));
+      stampLastRun(job.id, nowKey);
 
       // First Way: validate before executing
       sLog.info({ id: job.id, cron: job.cron, humanTime: describeCron(job.cron), prompt: job.prompt.substring(0, 80) }, "Firing scheduled job");
 
       const jobLog = log.child({ component: "scheduler", jobId: job.id });
-      const sendToChannel = async (content) => {
-        try {
-          if (typeof content === "object" && content.files) {
-            await channel.send(content);
-          } else {
-            if (isNothingToReport(content)) {
-              jobLog.info({ id: job.id, preview: String(content ?? "").slice(0, 40) }, "Suppressed empty scheduled-job reply");
-              return;
-            }
-            for (const chunk of splitMessage(content)) {
-              await channel.send(chunk);
-            }
-          }
-        } catch (err) {
-          jobLog.error({ err: err.message }, "Failed to send scheduled message");
-        }
-      };
+      const sendToChannel = jobChannelSender(channel, jobLog, job.id);
 
       // Third Way: record execution for learning
       const startTime = new Date();
@@ -2351,8 +2694,7 @@ async function runScheduledJobs() {
 
       // Expire one-time jobs after successful execution
       if (job.expires) {
-        job._remove = true;
-        saveSchedules(schedules.filter(j => !j._remove));
+        removeScheduledJob(job.id);
         sLog.info({ id: job.id }, "One-time job completed, removing");
       }
     }
@@ -2369,6 +2711,14 @@ function validateSchedulesOnStartup() {
     return;
   }
   for (const job of schedules) {
+    if (isWakeJob(job)) {
+      const at = Date.parse(job.runAt);
+      log.info(
+        { id: job.id, fires: job.runAt, attempt: job.attempt || 1, carry: Boolean(job.carry), overdue: Number.isFinite(at) && at < Date.now(), prompt: String(job.prompt).substring(0, 60) },
+        "Wake-up loaded"
+      );
+      continue;
+    }
     const fields = (job.cron || "").split(/\s+/);
     if (fields.length !== 5) {
       log.warn({ id: job.id, cron: job.cron }, "Invalid cron format — expected 5 fields");

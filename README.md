@@ -106,6 +106,10 @@ Keep it under 100 lines. Claude loads the full `CLAUDE.md` on every message — 
 
 **Work that happens without you** — *"every weekday at 7am, post the customer reach numbers"*. Just ask; the bot schedules it, reads the job back, and tells you when it will next fire. Times are in **your** timezone, not the server's. Runs missed during a restart are recovered rather than skipped.
 
+**Follow-ups it keeps** — *"I'll check back in twenty minutes"* is a job on disk, not an intention. A bot can set its own one-shot wake-up, carry forward what it already knows, and keep watching something across as many looks as it needs — choosing the gap each time, staying silent while nothing changes, and stopping the moment it has an answer. Nothing survives on hope: the run that promises the follow-up schedules it in the same breath.
+
+**Tell it the moment something happens** — a follow-up can name a signal alongside its timeout: *wake when `dev-deploy-done` fires, or in 30 minutes, whichever comes first.* Anything that can run a command fires one (`npm run signal dev-deploy-done`) — a CI step, a git hook, the last line of a deploy script. The sender passes a **name**, never a prompt: the words that run are the bot's own, written when it made the promise. The timeout is always there, so a signal that never arrives costs nothing.
+
 **Triggers** — a DM, an @mention, any message in a monitored channel, or an emoji reaction.
 
 **Files, any type, both directions** — attach anything and the bot opens it; reply to a message that has one and ask about it. Bots hand files back via an outbox or a marker. Oversized files are reported, never silently dropped.
@@ -135,6 +139,7 @@ In your shell (add `-- --name <bot>` to target one instance):
 | `npm run setup` | Interactive configuration, validated as you go |
 | `npm run doctor` | Check an existing install; exits non-zero on failure |
 | `npm run doctor:fleet` | Check **every** bot in `ecosystem.config.js` in one pass — tokens, schedules, stale processes |
+| `npm run signal <name>` | Tell a bot something happened, waking any follow-up that was waiting for it |
 | `npm run advise` | Read an existing install and list what to do **before** upgrading. `--json` for an agent; `--dir` to point at any checkout |
 | `npm start` / `stop` / `restart` | Manage the bot |
 | `npm run status` | Is it running — and is it *connected*? |
@@ -310,6 +315,8 @@ Two busy weeks of summaries will reach it. The default is also a cost decision �
 | `BOT_SCHEDULE_CHECK_MS` | `60000` | How often schedules are evaluated |
 | `BOT_SCHEDULE_LOOKBACK_MINUTES` | `5` | How far back a missed run is recovered |
 | `BOT_MAX_SCHEDULED_JOBS` | `25` | Cap on jobs per bot |
+| `BOT_MAX_WAKE_ATTEMPTS` | `12` | How many times a self-re-arming follow-up may look before it must stop |
+| `BOT_WAKE_CARRY_MAX_MS` | `SESSION_TIMEOUT_MS` | How long a chain of follow-ups may keep resuming the conversation that started it |
 
 ### WebSocket bridge
 | Variable | Default | Description |
@@ -318,6 +325,9 @@ Two busy weeks of summaries will reach it. The default is also a cost decision �
 | `WS_HOST` | `127.0.0.1` | Bind address; it accepts commands, so widen deliberately |
 | `WS_HEARTBEAT_MS` | `30000` | Ping interval |
 | `WS_HEARTBEAT_MAX_MISSES` | `3` | Missed pings before disconnect |
+| `BRIDGE_TOKEN` | — | Required to send a signal when the bridge is not on loopback |
+| `BRIDGE_SIGNAL_MEMORY_MS` | `300000` | How long a signal with nothing waiting is remembered |
+| `BRIDGE_SIGNAL_DATA_MAX` | `2000` | Characters of signal text kept before truncation |
 
 ### Misc
 | Variable | Default | Description |
@@ -366,6 +376,21 @@ Next run: 2026-08-10 12:00 UTC. Posts here.
 Then *"list my scheduled jobs"* or *"remove job-msm37m2z"*. Ask what ran with
 *"did the standup job fire?"*.
 
+**A follow-up is the other half.** When a bot says it will check back, it books a
+one-shot wake-up for that instant — not a clock time, and not a background sleep
+that dies when the reply is sent:
+
+```
+Wake-up wake-mtfyyczy set for 2026-08-30 15:53 UTC — in 20 minutes.
+It continues this conversation if the session is still warm.
+```
+
+It fires once. If the answer is not final, the run that wakes up books the next
+look itself and decides how long to wait, so a slow deploy is checked patiently
+and a nearly-done one closely. It stays silent while nothing changes, and stops
+as soon as it has an answer or hits something you need to decide. Twelve looks
+and an optional deadline are the backstops.
+
 A job is a **stored prompt** that runs unattended with the bot's normal tool
 access, so write it to stand alone — *"post the reach numbers with the change
 since last week"*, not *"tell me the reach"*. The bot will ask before scheduling
@@ -398,6 +423,63 @@ would fire on Mondays alone. The tooling rejects a range rather than accepting o
 
 Add `"expires": "2026-12-31T00:00:00Z"` for a one-shot. Every run is appended to
 `job-history.jsonl`. A run missed during a restart or a gateway blip is recovered.
+
+A **wake-up** lives in the same file and carries `runAt` instead of `cron`:
+
+```json
+{
+  "id": "wake-mtfyyczy",
+  "runAt": "2026-08-30T15:53:20.590Z",
+  "channel": "123456789012345678",
+  "prompt": "Check whether the promotion PR merged. Report only if it changed.",
+  "note": "PR #218 approved at 10:04",
+  "carry": true,
+  "attempt": 1,
+  "maxAttempts": 12,
+  "chainStartedAt": "2026-08-30T15:33:20.590Z"
+}
+```
+
+It is deleted before it runs, so it fires **at most once** — a follow-up that
+crashed is never silently repeated, and a watch continues only because the run
+booked the next one.
+
+</details>
+
+<details>
+<summary>Waking a bot the moment something finishes</summary>
+
+Polling a deploy every minute is wasteful and slow. Give the follow-up a signal
+name as well as its time:
+
+> *"check back when the deploy finishes, or in 30 minutes"*
+
+```bash
+# at the end of your deploy script, CI job, git hook — anything that already knows
+npm run signal dev-deploy-done
+npm run signal ci:build --data "exit 0, 4m12s"
+```
+
+The name is **yours**. The harness never interprets it — `nightly-etl`,
+`invoice-run-finished`, whatever the sender and the bot agree on. There are no
+built-in integrations to configure and nothing to register.
+
+What a sender can and cannot do:
+
+- It sends a **name**, never a prompt. The words that run were written by the bot
+  when it promised to look, so a signal cannot put instructions in its context.
+- It can only release a follow-up **that bot already booked**, in the channel that
+  follow-up already named. A signal nobody is waiting for does nothing (it is
+  remembered for five minutes, in case the follow-up is booked a second later).
+- Attached `--data` reaches the bot fenced and labelled as untrusted text —
+  evidence to read, never instructions to obey.
+- The **timeout still applies.** A signal that never arrives means the follow-up
+  fires when it always would have. Nothing new can fail.
+
+Signals are the one bridge message that needs a credential, because they start a
+run rather than posting text: on loopback (the default) they are accepted, and a
+bridge bound anywhere else must set `BRIDGE_TOKEN`. Each bot has its own bridge
+port, so signal the bot you mean — `npm run signal <name> -- --port 9801`.
 
 </details>
 
