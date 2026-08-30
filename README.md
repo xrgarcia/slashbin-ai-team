@@ -106,6 +106,8 @@ Keep it under 100 lines. Claude loads the full `CLAUDE.md` on every message — 
 
 **Work that happens without you** — *"every weekday at 7am, post the customer reach numbers"*. Just ask; the bot schedules it, reads the job back, and tells you when it will next fire. Times are in **your** timezone, not the server's. Runs missed during a restart are recovered rather than skipped.
 
+**Follow-ups it keeps** — *"I'll check back in twenty minutes"* is a job on disk, not an intention. A bot can set its own one-shot wake-up, carry forward what it already knows, and keep watching something across as many looks as it needs — choosing the gap each time, staying silent while nothing changes, and stopping the moment it has an answer. Nothing survives on hope: the run that promises the follow-up schedules it in the same breath.
+
 **Triggers** — a DM, an @mention, any message in a monitored channel, or an emoji reaction.
 
 **Files, any type, both directions** — attach anything and the bot opens it; reply to a message that has one and ask about it. Bots hand files back via an outbox or a marker. Oversized files are reported, never silently dropped.
@@ -310,6 +312,8 @@ Two busy weeks of summaries will reach it. The default is also a cost decision �
 | `BOT_SCHEDULE_CHECK_MS` | `60000` | How often schedules are evaluated |
 | `BOT_SCHEDULE_LOOKBACK_MINUTES` | `5` | How far back a missed run is recovered |
 | `BOT_MAX_SCHEDULED_JOBS` | `25` | Cap on jobs per bot |
+| `BOT_MAX_WAKE_ATTEMPTS` | `12` | How many times a self-re-arming follow-up may look before it must stop |
+| `BOT_WAKE_CARRY_MAX_MS` | `SESSION_TIMEOUT_MS` | How long a chain of follow-ups may keep resuming the conversation that started it |
 
 ### WebSocket bridge
 | Variable | Default | Description |
@@ -366,6 +370,21 @@ Next run: 2026-08-10 12:00 UTC. Posts here.
 Then *"list my scheduled jobs"* or *"remove job-msm37m2z"*. Ask what ran with
 *"did the standup job fire?"*.
 
+**A follow-up is the other half.** When a bot says it will check back, it books a
+one-shot wake-up for that instant — not a clock time, and not a background sleep
+that dies when the reply is sent:
+
+```
+Wake-up wake-mtfyyczy set for 2026-08-30 15:53 UTC — in 20 minutes.
+It continues this conversation if the session is still warm.
+```
+
+It fires once. If the answer is not final, the run that wakes up books the next
+look itself and decides how long to wait, so a slow deploy is checked patiently
+and a nearly-done one closely. It stays silent while nothing changes, and stops
+as soon as it has an answer or hits something you need to decide. Twelve looks
+and an optional deadline are the backstops.
+
 A job is a **stored prompt** that runs unattended with the bot's normal tool
 access, so write it to stand alone — *"post the reach numbers with the change
 since last week"*, not *"tell me the reach"*. The bot will ask before scheduling
@@ -398,6 +417,26 @@ would fire on Mondays alone. The tooling rejects a range rather than accepting o
 
 Add `"expires": "2026-12-31T00:00:00Z"` for a one-shot. Every run is appended to
 `job-history.jsonl`. A run missed during a restart or a gateway blip is recovered.
+
+A **wake-up** lives in the same file and carries `runAt` instead of `cron`:
+
+```json
+{
+  "id": "wake-mtfyyczy",
+  "runAt": "2026-08-30T15:53:20.590Z",
+  "channel": "123456789012345678",
+  "prompt": "Check whether the promotion PR merged. Report only if it changed.",
+  "note": "PR #218 approved at 10:04",
+  "carry": true,
+  "attempt": 1,
+  "maxAttempts": 12,
+  "chainStartedAt": "2026-08-30T15:33:20.590Z"
+}
+```
+
+It is deleted before it runs, so it fires **at most once** — a follow-up that
+crashed is never silently repeated, and a watch continues only because the run
+booked the next one.
 
 </details>
 

@@ -11,6 +11,7 @@ const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
 const { resolvePermissionMode, VALID_MODES } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
+const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 
 // --- Logger ---
 const log = pino({
@@ -2185,11 +2186,47 @@ function saveSchedules(schedules) {
   writeFileSync(SCHEDULES_FILE, JSON.stringify(schedules, null, 2) + "\n");
 }
 
+/**
+ * Every write inside a tick re-reads the file first.
+ *
+ * A run can CREATE a job while it is running — that is exactly how a self-paced
+ * watch re-arms itself — and the scheduler's in-memory array predates that
+ * write. Saving the stale array would delete the follow-up the run just
+ * scheduled, and the watch would end without anyone noticing it had stopped.
+ */
+function removeScheduledJob(id) {
+  saveSchedules(loadSchedules().filter((j) => j.id !== id));
+}
+
+function stampLastRun(id, key) {
+  const current = loadSchedules();
+  const job = current.find((j) => j.id === id);
+  if (!job) return;
+  job._lastRun = key;
+  saveSchedules(current);
+}
+
+/**
+ * How long a chain of wake-ups may keep resuming the channel's conversation.
+ *
+ * Carrying the conversation is the point of a follow-up — the run that promised
+ * "I'll check back" should not wake up amnesiac. But an unbounded chain of
+ * carried wake-ups is the 2.2.1 incident wearing a different hat: a session that
+ * is never idle never rotates, and every look re-sends the whole history. So
+ * carry has a wall-clock ceiling, defaulted to the session idle timeout. Past
+ * it the wake still fires — it just fires clean, and is TOLD it is running
+ * clean, so it works from the note instead of referring to what it cannot see.
+ */
+const WAKE_CARRY_MAX_MS = envInt("BOT_WAKE_CARRY_MAX_MS", SESSION_TIMEOUT_MS, { min: 0 });
+
 
 function recordJobExecution(job, startTime, durationMs, success, error) {
   const record = {
     id: job.id,
-    cron: job.cron,
+    // One of the two, never a hollow `cron: undefined` — the history file is read
+    // to answer "did that follow-up ever fire", and a missing schedule field
+    // reads as a corrupt row rather than a different kind of job.
+    ...(job.cron ? { cron: job.cron } : { runAt: job.runAt, attempt: job.attempt || 1 }),
     scheduledFor: startTime.toISOString(),
     firedAt: new Date().toISOString(),
     durationMs,
@@ -2293,6 +2330,110 @@ function shouldRunNow(cron, lastRunKey, tz = BOT_TIMEZONE) {
 // longer than the check interval would otherwise stack overlapping ticks.
 let schedulerRunning = false;
 
+/**
+ * Post a job's output. The suppression is here rather than in the caller because
+ * the decision is deterministic and must apply to every kind of scheduled run.
+ */
+function jobChannelSender(channel, jobLog, jobId) {
+  return async (content) => {
+    try {
+      if (typeof content === "object" && content.files) {
+        await channel.send(content);
+        return;
+      }
+      if (isNothingToReport(content)) {
+        jobLog.info({ id: jobId, preview: String(content ?? "").slice(0, 40) }, "Suppressed empty scheduled-job reply");
+        return;
+      }
+      for (const chunk of splitMessage(content)) {
+        await channel.send(chunk);
+      }
+    } catch (err) {
+      jobLog.error({ err: err.message }, "Failed to send scheduled message");
+    }
+  };
+}
+
+/**
+ * A one-shot wake-up — the "I'll check back in twenty minutes" a bot could not
+ * previously keep. It differs from a cron job in three ways that matter:
+ *
+ *  1. It fires at an INSTANT, so nothing has to be expressed as a clock time.
+ *  2. It may CARRY the conversation that set it, because a follow-up with no
+ *     memory of what it was following up on is just a stranger asking a question.
+ *  3. It does not recur. If the answer is not final, the run schedules the next
+ *     look itself — which is what makes the cadence the model's decision rather
+ *     than a fixed poll that keeps firing long after anyone cares.
+ */
+async function runWakeJob(job, sLog) {
+  const due = Date.parse(job.runAt);
+  if (!Number.isFinite(due)) {
+    sLog.error({ id: job.id, runAt: job.runAt }, "Wake job has an unreadable runAt — removing rather than retrying it every tick");
+    removeScheduledJob(job.id);
+    return;
+  }
+  if (Date.now() < due) return;
+
+  // Out of time. Drop it silently: the run that set the deadline already decided
+  // what "too late" means, and announcing the expiry here would be exactly the
+  // heartbeat noise a quiet scheduler exists to avoid.
+  if (job.deadline && Date.now() > Date.parse(job.deadline)) {
+    sLog.info({ id: job.id, deadline: job.deadline }, "Wake job passed its deadline before firing, removing");
+    removeScheduledJob(job.id);
+    return;
+  }
+
+  // Same reason as the cron path: channels.cache is briefly empty after a gateway
+  // reconnect, and runAt stays in the past, so leaving it alone retries next tick.
+  const channel = client.channels.cache.get(job.channel);
+  if (!channel) {
+    sLog.warn({ id: job.id, channel: job.channel }, "Wake job channel not found — leaving it queued so the next tick retries");
+    return;
+  }
+
+  // Remove BEFORE the run, never after. A wake fires once by construction, and
+  // the standing guarantee here is at-most-once: a prompt that merges a PR must
+  // not be re-fired because the run outlived the tick or the process died holding
+  // it. Re-arming is the RUN's job — it has the schedule skill and the exact
+  // command in its prompt.
+  removeScheduledJob(job.id);
+
+  const chainStarted = Date.parse(job.chainStartedAt || job.createdAt || job.runAt);
+  const carried = Boolean(job.carry)
+    && Number.isFinite(chainStarted)
+    && (Date.now() - chainStarted) <= WAKE_CARRY_MAX_MS;
+
+  const jobLog = log.child({ component: "scheduler", jobId: job.id });
+  sLog.info(
+    { id: job.id, runAt: job.runAt, attempt: job.attempt || 1, carried, prompt: String(job.prompt).substring(0, 80) },
+    "Firing wake job"
+  );
+
+  const sendToChannel = jobChannelSender(channel, jobLog, job.id);
+  const startTime = new Date();
+  try {
+    await runClaude(
+      buildWakePrompt(job, { carried }),
+      job.channel, jobLog, sendToChannel, {},
+      channel.name || job.channel, null,
+      // Carrying resumes this channel's conversation; not carrying is the same
+      // isolated run a cron job gets.
+      { ephemeral: !carried },
+    );
+    const durationMs = Date.now() - startTime.getTime();
+    sLog.info({ id: job.id, durationMs }, "Wake job completed");
+    recordJobExecution(job, startTime, durationMs, true);
+  } catch (err) {
+    const durationMs = Date.now() - startTime.getTime();
+    // No retry, and none is coming: the job is already gone. Say that in the log,
+    // because "the follow-up never happened" is otherwise indistinguishable from
+    // "the follow-up found nothing" — both are silence in the channel.
+    sLog.error({ id: job.id, err: err.message, durationMs }, "Wake job failed — it fires at most once, so nothing will re-fire it");
+    recordJobExecution(job, startTime, durationMs, false, err.message);
+    await sendToChannel(`The follow-up I scheduled ("${job.id}") failed and will not retry: ${err.message}`);
+  }
+}
+
 async function runScheduledJobs() {
   if (schedulerRunning) return;
   schedulerRunning = true;
@@ -2305,16 +2446,19 @@ async function runScheduledJobs() {
     const sLog = log.child({ component: "scheduler" });
 
     // Second Way: log what we found on every cycle
-    const pending = schedules.filter(j => !j._remove);
-    sLog.debug({ jobs: pending.length, ids: pending.map(j => j.id) }, "Scheduler check");
+    sLog.debug({ jobs: schedules.length, ids: schedules.map(j => j.id) }, "Scheduler check");
 
     for (const job of schedules) {
+      if (isWakeJob(job)) {
+        await runWakeJob(job, sLog);
+        continue;
+      }
+
       // Check if job should run (current minute or missed in last 5 minutes)
       if (!shouldRunNow(job.cron, job._lastRun, job.tz || BOT_TIMEZONE)) {
         // Only expire jobs that didn't need to run
         if (job.expires && new Date(job.expires) < now) {
-          job._remove = true;
-          saveSchedules(schedules.filter(j => !j._remove));
+          removeScheduledJob(job.id);
           sLog.info({ id: job.id, expires: job.expires, cron: describeCron(job.cron) }, "Scheduled job expired without firing, removing");
         }
         continue;
@@ -2340,29 +2484,13 @@ async function runScheduledJobs() {
       const nk = zonedParts(now, BOT_TIMEZONE);
       const nowKey = `${nk.month}-${nk.day}-${nk.hour}-${nk.min}`;
       job._lastRun = nowKey;
-      saveSchedules(schedules.filter(j => !j._remove));
+      stampLastRun(job.id, nowKey);
 
       // First Way: validate before executing
       sLog.info({ id: job.id, cron: job.cron, humanTime: describeCron(job.cron), prompt: job.prompt.substring(0, 80) }, "Firing scheduled job");
 
       const jobLog = log.child({ component: "scheduler", jobId: job.id });
-      const sendToChannel = async (content) => {
-        try {
-          if (typeof content === "object" && content.files) {
-            await channel.send(content);
-          } else {
-            if (isNothingToReport(content)) {
-              jobLog.info({ id: job.id, preview: String(content ?? "").slice(0, 40) }, "Suppressed empty scheduled-job reply");
-              return;
-            }
-            for (const chunk of splitMessage(content)) {
-              await channel.send(chunk);
-            }
-          }
-        } catch (err) {
-          jobLog.error({ err: err.message }, "Failed to send scheduled message");
-        }
-      };
+      const sendToChannel = jobChannelSender(channel, jobLog, job.id);
 
       // Third Way: record execution for learning
       const startTime = new Date();
@@ -2381,8 +2509,7 @@ async function runScheduledJobs() {
 
       // Expire one-time jobs after successful execution
       if (job.expires) {
-        job._remove = true;
-        saveSchedules(schedules.filter(j => !j._remove));
+        removeScheduledJob(job.id);
         sLog.info({ id: job.id }, "One-time job completed, removing");
       }
     }
@@ -2399,6 +2526,14 @@ function validateSchedulesOnStartup() {
     return;
   }
   for (const job of schedules) {
+    if (isWakeJob(job)) {
+      const at = Date.parse(job.runAt);
+      log.info(
+        { id: job.id, fires: job.runAt, attempt: job.attempt || 1, carry: Boolean(job.carry), overdue: Number.isFinite(at) && at < Date.now(), prompt: String(job.prompt).substring(0, 60) },
+        "Wake-up loaded"
+      );
+      continue;
+    }
     const fields = (job.cron || "").split(/\s+/);
     if (fields.length !== 5) {
       log.warn({ id: job.id, cron: job.cron }, "Invalid cron format — expected 5 fields");
