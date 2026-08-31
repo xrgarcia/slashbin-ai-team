@@ -5,6 +5,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.1] — 2026-08-31
+
+### Fixed
+
+- **The `signal --data` example in the README dropped its payload.** Written as
+  `npm run signal ci:build --data "..."`, npm eats the flag NAME and forwards only its
+  value as a bare positional, so `scripts/signal.mjs` — which reads `--data` off
+  `process.argv` — received the signal name and nothing else. The signal fired; the
+  evidence it was supposed to carry silently did not. No error, no warning, exit 0.
+
+  The separator is required: `npm run signal ci:build -- --data "..."`. The README
+  already used the correct form for `--port` twenty lines further down, so this was the
+  one example out of step with the rest of the file.
+
+  Reported by @webbrain-one. Docs only — no harness behaviour changed.
+
 ## [2.5.0] — 2026-08-30
 
 ### Added
