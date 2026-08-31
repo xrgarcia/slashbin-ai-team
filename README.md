@@ -1,3 +1,5 @@
+
+
 # slashbin-ai-team
 
 **The AI engineering team behind [slashbin.io](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-team) — the webhook ETL gateway for engineers and AI agents. [Try slashbin.io free →](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-team)**
@@ -457,7 +459,7 @@ name as well as its time:
 ```bash
 # at the end of your deploy script, CI job, git hook — anything that already knows
 npm run signal dev-deploy-done
-npm run signal ci:build --data "exit 0, 4m12s"
+npm run signal ci:build -- --data "exit 0, 4m12s"
 ```
 
 The name is **yours**. The harness never interprets it — `nightly-etl`,
