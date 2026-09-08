@@ -1504,13 +1504,26 @@ function createSendQueue(msg, reqLog) {
 
 // --- Context building (buffer + summaries) ---
 
+// A summary is written as `YYYY-MM-DD-<channel>.md` (lib/summarize-core.js).
+// The window below is a LEXICAL compare against a date string, which is only a
+// date compare for filenames that actually start with one — every letter sorts
+// after every digit, so `acme-report-v3-FULL.md` reads as newer than any date
+// and is admitted unconditionally. That is not hypothetical: on 2026-06-19 two
+// 64KB and 51KB pasted docs landed here and took the EM bot fully offline with
+// `spawn E2BIG` . The argv budget (lib/argv-budget.js) has since made
+// the crash unreachable, which turned this from an outage into something worse
+// to diagnose: the intruder sorts LAST, so it survives the budget while the
+// real summaries — genuinely older — are the ones dropped. The bot stays up and
+// quietly forgets. Require the date shape so only a summary can be a summary.
+const SUMMARY_FILENAME = /^\d{4}-\d{2}-\d{2}/;
+
 function loadRecentSummaries() {
   const cutoffMs = Date.now() - SUMMARY_LOOKBACK_HOURS * 3600000;
   const cutoffDate = new Date(cutoffMs).toISOString().split("T")[0];
 
   try {
     const files = readdirSync(HISTORY_DIR)
-      .filter((f) => f.endsWith(".md") && !f.startsWith("."))
+      .filter((f) => f.endsWith(".md") && SUMMARY_FILENAME.test(f))
       .sort()
       .filter((f) => f >= cutoffDate);
 
