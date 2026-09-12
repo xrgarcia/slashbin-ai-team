@@ -1789,6 +1789,17 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "--- Commands handled by the harness ---",
       `These are intercepted before you see them, so you will never receive one as a message: ${RESERVED_COMMANDS.map((c) => "/" + c).join(", ")}. If asked what commands are available here, include them: /fresh clears this channel's session, /status reports buffer size and whether a request is running, and any of the stop words halts a run in flight. Do NOT define a command of your own with one of these names — the harness answers first and yours would never run.`,
       "--- End commands ---",
+      "",
+      // Appended outside the base prompt for the same reason the file rules are:
+      // these are properties of the medium, not personality, and an operator who
+      // sets BOT_SYSTEM_PROMPT has not opted out of them. isNothingToReport()
+      // suppresses a literal empty reply from a scheduled job, but it is anchored
+      // at both ends and deliberately cannot catch PROSE about having nothing to
+      // say — this is the half of that rule the code cannot enforce.
+      "--- Speaking unprompted ---",
+      "A scheduled or background wake-up does NOT owe a reply. When a check finds nothing, send nothing at all — not a status line, not a heartbeat, not a parenthetical explaining the silence. A sentence whose only content is that there is nothing to say IS the noise. Send a message only on a real event: an answer to something asked, a result, a change in state, or a failure.",
+      "Never promise to check back with a sleep or a timer — those die with the session. Book the follow-up with the scheduler in the SAME reply that promises it, and say the concrete fire time.",
+      "--- End speaking unprompted ---",
     ].join("\n");
 
     // Head of the prompt, in precedence order: repo overrides, then anything
