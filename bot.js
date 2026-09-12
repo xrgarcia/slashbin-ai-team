@@ -215,6 +215,49 @@ function systemPromptOverrides() {
   }
 }
 
+/**
+ * Channel-scoped instructions, layered on top of the repo overrides.
+ *
+ * One bot serves several audiences — the owner in #engineering, a customer in
+ * #jerky-em — and the repo-level overrides are written for exactly one of them.
+ * Read unamended in the other channel they are wrong in the way that matters
+ * most: they name who you are talking to. This file rebinds that per channel.
+ *
+ * Keyed by channel ID first, because a rename is a Discord UI action that must
+ * not silently detach a channel from its instructions; the name file exists so
+ * a human can find it. Read per request like the overrides above, so an edit
+ * lands on the next message with no restart.
+ *
+ * Rides at the HEAD with the overrides, for the truncation reason given there.
+ */
+function channelPrompt(channelId, channelName) {
+  const dir = join(CLAUDE_CWD, ".claude", "channel-prompts");
+  const candidates = [channelId && `${channelId}.md`, channelName && `${channelName}.md`].filter(Boolean);
+  for (const candidate of candidates) {
+    const file = join(dir, candidate);
+    if (!existsSync(file)) continue;
+    try {
+      const text = readFileSync(file, "utf8").trim();
+      if (!text) return "";
+      log.info({ file, bytes: text.length, channelId, channelName }, "Channel prompt loaded");
+      return [
+        `--- Instructions for this channel (#${channelName}) ---`,
+        "Scoped to THIS channel. Where they conflict with anything above — including who",
+        "you are addressing and how you are expected to sound — these win.",
+        "",
+        text,
+        "--- End instructions for this channel ---",
+        "",
+        "",
+      ].join("\n");
+    } catch (err) {
+      log.warn({ err, file }, "Could not read channel prompt; continuing without it");
+      return "";
+    }
+  }
+  return "";
+}
+
 // --- Summarization coverage ---
 // SUMMARIZE_CHANNELS defaults to MONITOR_CHANNELS, which answers the wrong
 // question. "Where do I reply unprompted?" and "what is worth remembering?" are
@@ -1748,18 +1791,20 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "--- End commands ---",
     ].join("\n");
 
-    const overrides = systemPromptOverrides();
+    // Head of the prompt, in precedence order: repo overrides, then anything
+    // this channel narrows or contradicts. Both are re-read per request.
+    const head = `${systemPromptOverrides()}${channelPrompt(channelId, channelName)}`;
 
     let systemPrompt;
     if (resumeSessionId) {
       // Resumed sessions already have the full context — only inject time and channel focus
-      systemPrompt = `${overrides}${basePrompt}${channelContext}${fileTransferContext}`;
+      systemPrompt = `${head}${basePrompt}${channelContext}${fileTransferContext}`;
       reqLog.info("Resume mode: skipping buffer/summary re-injection");
     } else {
       const context = buildContextPrompt(reqLog);
       systemPrompt = context
-        ? `${overrides}${basePrompt}${channelContext}${fileTransferContext}\n\n${context}`
-        : `${overrides}${basePrompt}${channelContext}${fileTransferContext}`;
+        ? `${head}${basePrompt}${channelContext}${fileTransferContext}\n\n${context}`
+        : `${head}${basePrompt}${channelContext}${fileTransferContext}`;
     }
 
     const args = [
