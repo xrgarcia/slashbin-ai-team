@@ -66,7 +66,12 @@ module.exports = {
 
         CLAUDE_MODEL: 'claude-opus-5',
         SUMMARIZE_MODEL: 'claude-haiku-4-5-20251001',  // a cheaper model is fine here
-        CLAUDE_TIMEOUT_MS: '1200000',
+        // 45 minutes. Node's child_process timeout sends SIGTERM at this mark
+        // (bot.js spawn), which surfaces to the user as "exited with code 143".
+        // Raised from 20m on 2026-09-23: adversarial spec passes and gate runs
+        // routinely need 25-35m, and a kill mid-run costs the whole turn. Still
+        // bounded on purpose - a wedged run must not hold a channel forever.
+        CLAUDE_TIMEOUT_MS: '2700000',
         BOT_TIMEZONE: 'America/Chicago',               // the bot's sense of "today"
 
         WS_PORT: '9801',                               // MUST be unique per bot
@@ -102,7 +107,12 @@ module.exports = {
 
         CLAUDE_MODEL: 'claude-opus-5',
         SUMMARIZE_MODEL: 'claude-haiku-4-5-20251001',
-        CLAUDE_TIMEOUT_MS: '1200000',
+        // 45 minutes. Node's child_process timeout sends SIGTERM at this mark
+        // (bot.js spawn), which surfaces to the user as "exited with code 143".
+        // Raised from 20m on 2026-09-23: adversarial spec passes and gate runs
+        // routinely need 25-35m, and a kill mid-run costs the whole turn. Still
+        // bounded on purpose - a wedged run must not hold a channel forever.
+        CLAUDE_TIMEOUT_MS: '2700000',
         BOT_TIMEZONE: 'America/Chicago',
 
         WS_PORT: '9802',
