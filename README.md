@@ -258,6 +258,26 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `BOT_SYSTEM_PROMPT` | *(built-in)* | Override the harness prompt |
 | `BOT_TIMEZONE` | host zone | IANA name; the bot's sense of "today" |
 
+#### Prompt layering
+
+Two optional files under the bot's `CLAUDE_CWD` are added to the front of every
+request's system prompt. Both are read per message, so an edit lands on the next
+message with no restart, and a missing file simply contributes nothing.
+
+| File | Scope | For |
+|---|---|---|
+| `.claude/system-prompt-overrides.md` | the whole repo | Instructions that must beat the harness defaults they contradict |
+| `.claude/channel-prompts/<channel-id>.md` | one channel | What changes per audience — who the bot is addressing, what that person needs, what it must not say to them |
+
+A channel file may be named for the channel instead (`<channel-name>.md`), but
+the ID is preferred and wins if both exist: renaming a channel in Discord must
+not silently detach it from its instructions.
+
+They layer in that order — repo first, channel second — so the narrower file is
+the later word on anything both touch. Both ride at the **head** of the prompt,
+never the tail: the whole prompt is one argv string against a kernel size
+ceiling, and the clamp that keeps it under cuts from the end.
+
 ### Memory
 | Variable | Default | Description |
 |---|---|---|
@@ -384,6 +404,12 @@ that dies when the reply is sent:
 Wake-up wake-mtfyyczy set for 2026-08-30 15:53 UTC — in 20 minutes.
 It continues this conversation if the session is still warm.
 ```
+
+**Or the moment a job finishes.** Give the follow-up `--wait-for <name>` and make
+`scripts/signal.mjs <name>` the last step of a detached job: the bot wakes when it
+ends, like a task notification in the Claude Code terminal. A plain
+`run_in_background` call would die with the reply, so the skill pack's hook blocks
+it and prints this path instead.
 
 It fires once. If the answer is not final, the run that wakes up books the next
 look itself and decides how long to wait, so a slow deploy is checked patiently

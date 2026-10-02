@@ -16,10 +16,16 @@ import { createRequire } from "module";
 
 const run = promisify(execFile);
 
-export const PASS = "pass", FAIL = "fail", WARN = "warn";
+export const PASS = "pass", FAIL = "fail", WARN = "warn", SKIP = "skip";
 const ok = (name, detail) => ({ name, status: PASS, detail });
 const bad = (name, detail, fix) => ({ name, status: FAIL, detail, fix });
 const warn = (name, detail, fix) => ({ name, status: WARN, detail, fix });
+// Not applicable HERE — distinct from passing. A host that runs its bots from
+// ecosystem.config.js gives each one its own DISCORD_TOKEN and CLAUDE_CWD, so
+// the ambient shell carries neither; asking process.env there is asking a
+// question with no answer, and reporting that as FAIL trains operators to
+// ignore the gate. Skips never count toward the exit code.
+const skip = (name, detail, fix) => ({ name, status: SKIP, detail, fix });
 
 export async function checkNode() {
   const major = Number(process.versions.node.split(".")[0]);
@@ -257,16 +263,20 @@ export function checkEcosystem(file, sourceDir) {
   return out;
 }
 
+export { skip };
+
 export function render(results) {
-  const icon = { [PASS]: "PASS", [FAIL]: "FAIL", [WARN]: "WARN" };
-  let failed = 0, warned = 0;
+  const icon = { [PASS]: "PASS", [FAIL]: "FAIL", [WARN]: "WARN", [SKIP]: "SKIP" };
+  let failed = 0, warned = 0, skipped = 0;
   for (const r of results) {
     if (r.status === FAIL) failed++;
     if (r.status === WARN) warned++;
+    if (r.status === SKIP) skipped++;
     console.log(`  [${icon[r.status]}] ${r.name}: ${r.detail}`);
     if (r.fix && r.status !== PASS) console.log(`         -> ${r.fix}`);
   }
-  console.log(`\n  ${results.length - failed - warned} passed, ${warned} warning(s), ${failed} failed`);
+  const passed = results.length - failed - warned - skipped;
+  console.log(`\n  ${passed} passed, ${warned} warning(s), ${failed} failed${skipped ? `, ${skipped} skipped` : ""}`);
   return failed;
 }
 
@@ -365,15 +375,37 @@ export function parseFleet(file) {
   if (!existsSync(file)) return [];
   const text = readFileSync(file, "utf8");
   const bots = [];
+  // Top-level `const NAME = '...'` declarations, so a template literal in an app
+  // block can be resolved back to a real path.
+  const consts = {};
+  for (const m of text.matchAll(/^\s*const\s+(\w+)\s*=\s*['"]([^'"]*)['"]\s*;?\s*$/gm)) {
+    consts[m[1]] = m[2];
+  }
   // Split on BOT_NAME, which every app must set uniquely (checkEcosystem enforces).
   const blocks = text.split(/^\s*\{\s*$/m);
   for (const block of blocks) {
     const name = /^\s*BOT_NAME:\s*['"]([^'"]+)['"]/m.exec(block);
     if (!name) continue;
     const tokenRef = /^\s*DISCORD_TOKEN:\s*process\.env\.([A-Z0-9_]+)/m.exec(block);
+    // Values may be plain strings OR template literals built from top-level
+    // consts — `BOT_STATE_DIR: `${BOT_DATA}/engineering-manager``. Matching only
+    // quotes silently returned null for those, so checkStateDir fell back to the
+    // harness `.bot-history` and warned about a directory the bot never uses.
+    // A check that reports the wrong path is worse than no check.
     const pick = (key) => {
-      const m = new RegExp(`^\\s*${key}:\\s*['"]([^'"]*)['"]`, "m").exec(block);
-      return m ? m[1] : null;
+      const q = new RegExp(`^\\s*${key}:\\s*['"]([^'"]*)['"]`, "m").exec(block);
+      if (q) return q[1];
+      const t = new RegExp(`^\\s*${key}:\\s*\`([^\`]*)\``, "m").exec(block);
+      if (t) return t[1].replace(/\$\{(\w+)\}/g, (whole, name) => consts[name] ?? whole);
+      // A BARE const reference — `CLAUDE_CWD: EM_REPO,`. Both bots on the
+      // original host wrote it this way, so this returned null and checkFleet's
+      // `b.claudeCwd && !existsSync(...)` guard skipped the existence check
+      // entirely: a dead check that looked alive. process.env.X is deliberately
+      // NOT resolved here — that is a credential, and tokenVar already carries
+      // the NAME for the caller to look up.
+      const ident = new RegExp(`^\\s*${key}:\\s*([A-Za-z_$][\\w$]*)\\s*,?\\s*$`, "m").exec(block);
+      if (ident && Object.prototype.hasOwnProperty.call(consts, ident[1])) return consts[ident[1]];
+      return null;
     };
     bots.push({
       name: name[1],
@@ -383,6 +415,7 @@ export function parseFleet(file) {
       permissionMode: pick("BOT_PERMISSION_MODE"),
       stateDir: pick("BOT_STATE_DIR"),
       historyDir: pick("BOT_HISTORY_DIR"),
+      allowedUsers: pick("ALLOWED_USERS"),
       sessionTimeoutMs: Number(pick("SESSION_TIMEOUT_MS")) || null,
     });
   }
@@ -430,6 +463,8 @@ export async function checkFleet(file, harnessDir, env = process.env) {
         "This bot starts in `restricted` and cannot write files or run commands. Set BOT_PERMISSION_MODE_DEFAULT once for the host, or BOT_PERMISSION_MODE on this bot."));
     }
 
+    out.push({ ...checkAllowlist(b.allowedUsers), name: `${label}: ALLOWED_USERS` });
+    out.push({ ...checkStateDir(b.stateDir, b.historyDir, harnessDir), name: `${label}: state dir` });
     out.push({
       ...checkScheduleCadence(b.stateDir, b.historyDir, harnessDir, b.sessionTimeoutMs || Number(env.SESSION_TIMEOUT_MS) || 30 * 60 * 1000),
       name: `${label}: schedules`,
