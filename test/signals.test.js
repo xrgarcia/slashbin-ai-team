@@ -201,5 +201,19 @@ check("a released job is claimed, so tick and signal cannot double-fire it", () 
   assert.match(fn, /if \(!claimWakeJob\(job\.id\)\) return false;/);
 });
 
+check("a signal is acknowledged when claimed, not when the run ends", () => {
+  // The ack waited out the whole Claude run, so the sender's 5s timeout said
+  // "is it running?" about a signal that had landed. A deploy step under set -e
+  // would have failed on a success.
+  const fn = bot.slice(bot.indexOf("async function releaseSignal("));
+  assert.match(fn.slice(0, 1600), /\{ detach: true \}/);
+  assert.match(bot, /if \(!detach\) await run;/);
+});
+
+check("the background gate ships in the plugin, so every bot gets it", () => {
+  const hooks = JSON.parse(readFileSync(join(__dirname, "..", "skill-pack", "hooks", "hooks.json"), "utf8"));
+  assert.match(JSON.stringify(hooks.hooks.PreToolUse), /bot_background_gate\.py/);
+});
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
