@@ -2445,7 +2445,7 @@ async function releaseSignal(name, data, agentId) {
   }
   let released = 0;
   for (const job of waiting) {
-    const fired = await runWakeJob(job, sLog, { kind: "signal", name, data });
+    const fired = await runWakeJob(job, sLog, { kind: "signal", name, data }, { detach: true });
     if (fired) released++;
   }
   // Something was waiting but could not be woken — most likely the channel is
@@ -2605,7 +2605,10 @@ function jobChannelSender(channel, jobLog, jobId) {
  *     look itself — which is what makes the cadence the model's decision rather
  *     than a fixed poll that keeps firing long after anyone cares.
  */
-async function runWakeJob(job, sLog, explicitRelease = null) {
+// `detach` returns as soon as the job is claimed and leaves the run going. The
+// signal path needs it: the sender's ack waited out the whole Claude run, so a
+// notifier's 5s timeout reported "is it running?" on a signal that had landed.
+async function runWakeJob(job, sLog, explicitRelease = null, { detach = false } = {}) {
   const due = Date.parse(job.runAt);
   if (!Number.isFinite(due)) {
     sLog.error({ id: job.id, runAt: job.runAt }, "Wake job has an unreadable runAt — removing rather than retrying it every tick");
@@ -2664,7 +2667,7 @@ async function runWakeJob(job, sLog, explicitRelease = null) {
 
   const sendToChannel = jobChannelSender(channel, jobLog, job.id);
   const startTime = new Date();
-  try {
+  const run = (async () => { try {
     await runClaude(
       buildWakePrompt(job, { carried, release }),
       job.channel, jobLog, sendToChannel, {},
@@ -2684,7 +2687,8 @@ async function runWakeJob(job, sLog, explicitRelease = null) {
     sLog.error({ id: job.id, err: err.message, durationMs }, "Wake job failed — it fires at most once, so nothing will re-fire it");
     recordJobExecution(job, startTime, durationMs, false, err.message);
     await sendToChannel(`The follow-up I scheduled ("${job.id}") failed and will not retry: ${err.message}`);
-  }
+  } })();
+  if (!detach) await run;
   return true;
 }
 
