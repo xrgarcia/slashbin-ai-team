@@ -215,6 +215,49 @@ function systemPromptOverrides() {
   }
 }
 
+/**
+ * Channel-scoped instructions, layered on top of the repo overrides.
+ *
+ * One bot serves several audiences — the owner in #engineering, a customer in
+ * #acme-support — and the repo-level overrides are written for exactly one of them.
+ * Read unamended in the other channel they are wrong in the way that matters
+ * most: they name who you are talking to. This file rebinds that per channel.
+ *
+ * Keyed by channel ID first, because a rename is a Discord UI action that must
+ * not silently detach a channel from its instructions; the name file exists so
+ * a human can find it. Read per request like the overrides above, so an edit
+ * lands on the next message with no restart.
+ *
+ * Rides at the HEAD with the overrides, for the truncation reason given there.
+ */
+function channelPrompt(channelId, channelName) {
+  const dir = join(CLAUDE_CWD, ".claude", "channel-prompts");
+  const candidates = [channelId && `${channelId}.md`, channelName && `${channelName}.md`].filter(Boolean);
+  for (const candidate of candidates) {
+    const file = join(dir, candidate);
+    if (!existsSync(file)) continue;
+    try {
+      const text = readFileSync(file, "utf8").trim();
+      if (!text) return "";
+      log.info({ file, bytes: text.length, channelId, channelName }, "Channel prompt loaded");
+      return [
+        `--- Instructions for this channel (#${channelName}) ---`,
+        "Scoped to THIS channel. Where they conflict with anything above — including who",
+        "you are addressing and how you are expected to sound — these win.",
+        "",
+        text,
+        "--- End instructions for this channel ---",
+        "",
+        "",
+      ].join("\n");
+    } catch (err) {
+      log.warn({ err, file }, "Could not read channel prompt; continuing without it");
+      return "";
+    }
+  }
+  return "";
+}
+
 // --- Summarization coverage ---
 // SUMMARIZE_CHANNELS defaults to MONITOR_CHANNELS, which answers the wrong
 // question. "Where do I reply unprompted?" and "what is worth remembering?" are
@@ -1504,13 +1547,26 @@ function createSendQueue(msg, reqLog) {
 
 // --- Context building (buffer + summaries) ---
 
+// A summary is written as `YYYY-MM-DD-<channel>.md` (lib/summarize-core.js).
+// The window below is a LEXICAL compare against a date string, which is only a
+// date compare for filenames that actually start with one — every letter sorts
+// after every digit, so `acme-report-v3-FULL.md` reads as newer than any date
+// and is admitted unconditionally. That is not hypothetical: on 2026-06-19 two
+// 64KB and 51KB pasted docs landed here and took the EM bot fully offline with
+// `spawn E2BIG` . The argv budget (lib/argv-budget.js) has since made
+// the crash unreachable, which turned this from an outage into something worse
+// to diagnose: the intruder sorts LAST, so it survives the budget while the
+// real summaries — genuinely older — are the ones dropped. The bot stays up and
+// quietly forgets. Require the date shape so only a summary can be a summary.
+const SUMMARY_FILENAME = /^\d{4}-\d{2}-\d{2}/;
+
 function loadRecentSummaries() {
   const cutoffMs = Date.now() - SUMMARY_LOOKBACK_HOURS * 3600000;
   const cutoffDate = new Date(cutoffMs).toISOString().split("T")[0];
 
   try {
     const files = readdirSync(HISTORY_DIR)
-      .filter((f) => f.endsWith(".md") && !f.startsWith("."))
+      .filter((f) => f.endsWith(".md") && SUMMARY_FILENAME.test(f))
       .sort()
       .filter((f) => f >= cutoffDate);
 
@@ -1733,20 +1789,33 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "--- Commands handled by the harness ---",
       `These are intercepted before you see them, so you will never receive one as a message: ${RESERVED_COMMANDS.map((c) => "/" + c).join(", ")}. If asked what commands are available here, include them: /fresh clears this channel's session, /status reports buffer size and whether a request is running, and any of the stop words halts a run in flight. Do NOT define a command of your own with one of these names — the harness answers first and yours would never run.`,
       "--- End commands ---",
+      "",
+      // Appended outside the base prompt for the same reason the file rules are:
+      // these are properties of the medium, not personality, and an operator who
+      // sets BOT_SYSTEM_PROMPT has not opted out of them. isNothingToReport()
+      // suppresses a literal empty reply from a scheduled job, but it is anchored
+      // at both ends and deliberately cannot catch PROSE about having nothing to
+      // say — this is the half of that rule the code cannot enforce.
+      "--- Speaking unprompted ---",
+      "A scheduled or background wake-up does NOT owe a reply. When a check finds nothing, send nothing at all — not a status line, not a heartbeat, not a parenthetical explaining the silence. A sentence whose only content is that there is nothing to say IS the noise. Send a message only on a real event: an answer to something asked, a result, a change in state, or a failure.",
+      "Never promise to check back with a sleep or a timer — those die with the session. Book the follow-up with the scheduler in the SAME reply that promises it, and say the concrete fire time.",
+      "--- End speaking unprompted ---",
     ].join("\n");
 
-    const overrides = systemPromptOverrides();
+    // Head of the prompt, in precedence order: repo overrides, then anything
+    // this channel narrows or contradicts. Both are re-read per request.
+    const head = `${systemPromptOverrides()}${channelPrompt(channelId, channelName)}`;
 
     let systemPrompt;
     if (resumeSessionId) {
       // Resumed sessions already have the full context — only inject time and channel focus
-      systemPrompt = `${overrides}${basePrompt}${channelContext}${fileTransferContext}`;
+      systemPrompt = `${head}${basePrompt}${channelContext}${fileTransferContext}`;
       reqLog.info("Resume mode: skipping buffer/summary re-injection");
     } else {
       const context = buildContextPrompt(reqLog);
       systemPrompt = context
-        ? `${overrides}${basePrompt}${channelContext}${fileTransferContext}\n\n${context}`
-        : `${overrides}${basePrompt}${channelContext}${fileTransferContext}`;
+        ? `${head}${basePrompt}${channelContext}${fileTransferContext}\n\n${context}`
+        : `${head}${basePrompt}${channelContext}${fileTransferContext}`;
     }
 
     const args = [
@@ -2376,7 +2445,7 @@ async function releaseSignal(name, data, agentId) {
   }
   let released = 0;
   for (const job of waiting) {
-    const fired = await runWakeJob(job, sLog, { kind: "signal", name, data });
+    const fired = await runWakeJob(job, sLog, { kind: "signal", name, data }, { detach: true });
     if (fired) released++;
   }
   // Something was waiting but could not be woken — most likely the channel is
@@ -2536,7 +2605,10 @@ function jobChannelSender(channel, jobLog, jobId) {
  *     look itself — which is what makes the cadence the model's decision rather
  *     than a fixed poll that keeps firing long after anyone cares.
  */
-async function runWakeJob(job, sLog, explicitRelease = null) {
+// `detach` returns as soon as the job is claimed and leaves the run going. The
+// signal path needs it: the sender's ack waited out the whole Claude run, so a
+// notifier's 5s timeout reported "is it running?" on a signal that had landed.
+async function runWakeJob(job, sLog, explicitRelease = null, { detach = false } = {}) {
   const due = Date.parse(job.runAt);
   if (!Number.isFinite(due)) {
     sLog.error({ id: job.id, runAt: job.runAt }, "Wake job has an unreadable runAt — removing rather than retrying it every tick");
@@ -2595,7 +2667,7 @@ async function runWakeJob(job, sLog, explicitRelease = null) {
 
   const sendToChannel = jobChannelSender(channel, jobLog, job.id);
   const startTime = new Date();
-  try {
+  const run = (async () => { try {
     await runClaude(
       buildWakePrompt(job, { carried, release }),
       job.channel, jobLog, sendToChannel, {},
@@ -2615,7 +2687,8 @@ async function runWakeJob(job, sLog, explicitRelease = null) {
     sLog.error({ id: job.id, err: err.message, durationMs }, "Wake job failed — it fires at most once, so nothing will re-fire it");
     recordJobExecution(job, startTime, durationMs, false, err.message);
     await sendToChannel(`The follow-up I scheduled ("${job.id}") failed and will not retry: ${err.message}`);
-  }
+  } })();
+  if (!detach) await run;
   return true;
 }
 

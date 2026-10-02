@@ -14,7 +14,7 @@ import {
   checkNode, checkClaudeCli, checkDiscordToken, checkMessageContentIntent,
   checkClaudeCwd, checkPortFree, checkAllowlist, checkEcosystem, checkStateDir,
   checkReservedCommands, checkScheduleCadence, checkRunningCodeFresh,
-  checkBillingKeyAbsent, checkFleet, parseFleet, render,
+  checkBillingKeyAbsent, checkFleet, parseFleet, render, skip,
 } from "./lib/checks.mjs";
 
 const HARNESS = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -22,18 +22,42 @@ const ECOSYSTEM = join(HARNESS, "ecosystem.config.js");
 const FLEET = process.argv.includes("--fleet");
 const SESSION_TIMEOUT_MS = Number(process.env.SESSION_TIMEOUT_MS) || 30 * 60 * 1000;
 
+// A host that launches its bots from ecosystem.config.js gives each one its OWN
+// DISCORD_TOKEN and CLAUDE_CWD. The ambient shell carries neither, so the
+// single-bot checks below have no subject — they are not failing, they are
+// asking about a bot that does not exist at this level. Reporting that as FAIL
+// is how a real failure gets ignored: `npm run doctor` was permanently red on
+// the 2-bot host with nothing wrong, so the gate stopped being read.
+// `--fleet` checks each bot properly, against its own token and its own cwd.
+const FLEET_BOTS = parseFleet(ECOSYSTEM);
+const PER_BOT_ENV = FLEET_BOTS.length > 0 && !process.env.DISCORD_TOKEN && !process.env.CLAUDE_CWD;
+const DEFER = `This host runs ${FLEET_BOTS.length} bot(s) from ecosystem.config.js, each with its own credentials. Run \`npm run doctor:fleet\` — it checks every bot against its own token and CLAUDE_CWD.`;
+
 console.log(`\nslashbin-ai-team doctor${FLEET ? " — fleet" : ""}\n`);
 
 const results = [];
 results.push(await checkNode());
 results.push(await checkClaudeCli());
-results.push(await checkDiscordToken(process.env.DISCORD_TOKEN));
-results.push(await checkMessageContentIntent(process.env.DISCORD_TOKEN));
-results.push(await checkClaudeCwd(process.env.CLAUDE_CWD || process.cwd(), HARNESS));
+if (PER_BOT_ENV) {
+  results.push(skip("Discord token", "per-bot — not set at host level", DEFER));
+  results.push(skip("Message Content Intent", "per-bot — needs a bot's own token", DEFER));
+  results.push(skip("CLAUDE_CWD", "per-bot — each app sets its own", DEFER));
+} else {
+  results.push(await checkDiscordToken(process.env.DISCORD_TOKEN));
+  results.push(await checkMessageContentIntent(process.env.DISCORD_TOKEN));
+  results.push(await checkClaudeCwd(process.env.CLAUDE_CWD || process.cwd(), HARNESS));
+}
 results.push(await checkPortFree(process.env.WS_PORT || 9800));
 results.push(checkReservedCommands(process.env.CLAUDE_CWD || process.cwd(), process.env.BOT_STOP_WORDS));
-results.push(checkStateDir(process.env.BOT_STATE_DIR, process.env.BOT_HISTORY_DIR, HARNESS));
-results.push(checkAllowlist(process.env.ALLOWED_USERS));
+if (PER_BOT_ENV) {
+  // Same reason as the token: each app sets its own in ecosystem.config.js.
+  // checkFleet verifies both per bot, so nothing is lost by deferring here.
+  results.push(skip("State directory", "per-bot — each app sets BOT_STATE_DIR", DEFER));
+  results.push(skip("ALLOWED_USERS", "per-bot — each app sets its own", DEFER));
+} else {
+  results.push(checkStateDir(process.env.BOT_STATE_DIR, process.env.BOT_HISTORY_DIR, HARNESS));
+  results.push(checkAllowlist(process.env.ALLOWED_USERS));
+}
 // Upgrade readiness — what bites on the next restart, which is the question an
 // operator actually has and the one nothing used to answer.
 results.push(checkBillingKeyAbsent(process.env));
