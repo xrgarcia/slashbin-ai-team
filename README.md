@@ -405,6 +405,12 @@ Wake-up wake-mtfyyczy set for 2026-08-30 15:53 UTC — in 20 minutes.
 It continues this conversation if the session is still warm.
 ```
 
+**Or the moment a job finishes.** Give the follow-up `--wait-for <name>` and make
+`scripts/signal.mjs <name>` the last step of a detached job: the bot wakes when it
+ends, like a task notification in the Claude Code terminal. A plain
+`run_in_background` call would die with the reply, so the skill pack's hook blocks
+it and prints this path instead.
+
 It fires once. If the answer is not final, the run that wakes up books the next
 look itself and decides how long to wait, so a slow deploy is checked patiently
 and a nearly-done one closely. It stays silent while nothing changes, and stops
