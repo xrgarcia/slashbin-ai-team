@@ -32,6 +32,7 @@ def main():
         return 0
     root = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sched = os.path.join(root, "bin", "schedule.mjs")
+    port = os.environ.get("WS_PORT", "9800")
     sig = os.path.normpath(os.path.join(root, "..", "scripts", "signal.mjs"))
     sys.stderr.write((
         "[bot-background-gate] BLOCKED: under the Discord harness this reply is one\n"
@@ -41,11 +42,11 @@ def main():
         "       node {sched} wake --in <timeout> --wait-for <name> --carry --prompt \"...\"\n"
         "  2. Detach the job and have its last step fire the signal:\n"
         "       setsid nohup sh -c '<cmd> > /tmp/<name>.out 2>&1; \\\n"
-        "         node {sig} <name> --data \"exit $?\"' \\\n"
+        "         node {sig} <name> --port {port} --data \"exit $?\"' \\\n"
         "         >/dev/null 2>&1 </dev/null &\n"
-        "     (WS_PORT is already this bot's bridge port.)\n"
+        "     (--port is this bot's bridge; a job outside the bot's env loses WS_PORT.)\n"
         "  3. Tell the person it reports back on completion, and the timeout time.\n"
-    ).format(sched=sched, sig=sig))
+    ).format(sched=sched, sig=sig, port=port))
     return 2
 
 
