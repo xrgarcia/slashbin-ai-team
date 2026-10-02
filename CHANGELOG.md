@@ -5,6 +5,43 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] — 2026-10-02
+
+### Added
+
+- **A background job can call the bot back — and a bot can no longer lose one.**
+  Each Discord reply is one `claude -p` process, so a Bash call with
+  `run_in_background` was killed the moment the reply was sent, and any "I'll post
+  here when it finishes" went with it. The skill pack now ships a `PreToolUse` hook
+  that blocks that call under the harness and prints the path that works: book a
+  follow-up with `--wait-for <name>`, detach the job, and make its last step
+  `scripts/signal.mjs <name>`. The bot wakes the moment the job ends — the Claude
+  Code terminal's task notification, over Discord. It ships in the plugin, so every
+  bot gets it with no per-repo setup.
+- **Per-channel system prompt.** `.claude/channel-prompts/<channel-id>.md` in
+  `CLAUDE_CWD` layers over the repo-level overrides, so one bot can address
+  different audiences in different channels without sharing one set of instructions.
+- **Silence and scheduling rules in the always-appended prompt.** A scheduled check
+  that finds nothing now sends nothing — not a status line about having nothing to
+  say — and a promise to check back must be booked with the scheduler, never a sleep.
+  These ride with the medium, so a custom `BOT_SYSTEM_PROMPT` keeps them.
+
+### Fixed
+
+- **`signal.mjs` reported a delivered signal as a failure.** The bridge acknowledged a
+  signal only after the follow-up it woke had finished its whole Claude run, so the
+  sender's 5-second wait printed *"No answer from the bot … is it running?"* about a
+  signal that had landed. A deploy step under `set -e` would fail on success. The
+  ack now goes out as soon as the follow-up is claimed.
+- **Summaries: only a dated file is loaded as one.** Any `.md` in the history dir
+  whose name began with a letter sorted after today's date and was injected
+  unconditionally, crowding out the real summaries under the argv budget.
+- **`npm run doctor` on a multi-bot host.** Single-bot checks read the ambient env
+  that a per-bot `ecosystem.config.js` never sets, and reported FAIL on a healthy
+  host. They now report SKIP there.
+- **`ecosystem.config.example.js` sets a 45-minute per-request ceiling**, up from 20,
+  which killed long-but-healthy turns with exit 143.
+
 ## [2.5.1] — 2026-08-31
 
 ### Fixed
