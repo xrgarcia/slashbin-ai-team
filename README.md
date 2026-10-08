@@ -245,6 +245,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `BOT_PERMISSION_MODE_DEFAULT` | — | Host-wide default for bots that set no `BOT_PERMISSION_MODE` |
 | `BOT_ALLOWED_TOOLS` | `Read,Glob,Grep,WebFetch,WebSearch,TodoWrite` | Built-ins exposed in `restricted` |
 | `BOT_PERMISSION_ALLOW` | *(none)* | `restricted` only: comma-separated permission rules pre-approved in `dontAsk` mode, e.g. `mcp__my-db,Bash(gh issue list:*)` |
+| `BOT_PERMISSION_DENY` | *(none)* | `restricted` only: comma-separated permission rules always denied; deny beats allow, e.g. `Bash(gh *--repo*)` to keep an allowed `gh` command on one repo |
 | `BOT_SUMMARIZER_TOOLS` | `Read` | Tools the summarizer may use |
 
 ### Claude

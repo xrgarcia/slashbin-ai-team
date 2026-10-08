@@ -128,6 +128,10 @@ const ALLOWED_TOOLS = process.env.BOT_ALLOWED_TOOLS || DEFAULT_ALLOWED_TOOLS;
 // list: permission rules such as `mcp__some-server`, `mcp__srv__one_tool` or
 // `Bash(gh issue list:*)`. Built-in read tools inside CLAUDE_CWD need no rule.
 const PERMISSION_ALLOW = (process.env.BOT_PERMISSION_ALLOW || "").trim();
+// BOT_PERMISSION_DENY carves exceptions out of an allow rule (deny wins), e.g. a
+// bot allowed `Bash(gh issue edit:*)` on its own repo but denied `Bash(gh *--repo*)`
+// so it cannot point the same command at another one.
+const PERMISSION_DENY = (process.env.BOT_PERMISSION_DENY || "").trim();
 // Summarisation reads a transcript that is already in its prompt. It never needs
 // to write, edit or execute anything.
 const SUMMARIZER_TOOLS = process.env.BOT_SUMMARIZER_TOOLS || "Read";
@@ -146,6 +150,7 @@ function permissionArgs(kind = "session") {
     "--tools", ALLOWED_TOOLS,
     "--permission-mode", "dontAsk",
     ...(PERMISSION_ALLOW ? ["--allowedTools", PERMISSION_ALLOW] : []),
+    ...(PERMISSION_DENY ? ["--disallowedTools", PERMISSION_DENY] : []),
   ];
 }
 
