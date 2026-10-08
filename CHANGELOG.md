@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.7.0] — 2026-10-08
 
 ### Security
 
@@ -17,11 +17,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which denies anything not pre-approved. `BOT_PERMISSION_ALLOW` is the
   pre-approval list. **Upgrading:** a restricted bot that relied on MCP tools must
   name them in `BOT_PERMISSION_ALLOW`. `bypass` bots are unchanged.
+- **Mail gate.** A permission rule sees a tool's name, never its arguments, so
+  allowing Gmail's `send_message` allowed mail to anyone. With
+  `BOT_MAIL_ALLOWED_RECIPIENTS` set, the skill pack's `PreToolUse` gate requires
+  every `to`/`cc`/`bcc` address to be on the list, refuses draft sends, replies and
+  unknown arguments, and enforces `BOT_MAIL_SUBJECT_PREFIX` when set. It fails
+  closed. Bots that set neither variable are untouched.
+- **Calendar gate.** With `BOT_CALENDAR_NO_ATTENDEES` set, a bot's calendar writes
+  invite nobody: attendees on create, added attendees on update, any calendar but
+  `primary`, unknown arguments, and an update or delete without
+  `notificationLevel: "NONE"` are refused. It fails closed. Bots without the
+  setting are untouched.
 
 ### Added
 
 - **`MCP_CONFIG_STRICT=true`** loads only the servers in `MCP_CONFIG`
   (`--strict-mcp-config`), so a bot cannot see the host's other MCP servers.
+- **`MCP_CONFIG_EXTRA`** — a second `--mcp-config` (a path or inline JSON) that
+  strict mode still honours, so a bot can keep strict on and name the one
+  claude.ai connector it needs as a `claudeai-proxy` server.
+- **`BOT_PERMISSION_DENY`** maps to `--disallowedTools` (deny beats allow), so a
+  restricted bot can be pre-approved a command but stopped from aiming it
+  elsewhere — e.g. allowed on its own board, denied any `--repo`, `-R` or URL
+  naming another repo.
+- **`REPLY_FINAL_TEXT_ONLY=true`** posts only the text written after the last tool
+  call, so a working note written before a tool call never reaches the channel.
+  Off by default; every bot that does not set it replies exactly as before.
+
+### Fixed
+
+- **The background-job gate prints the bot's bridge port.** A job launched outside
+  the bot's env (systemd-run, cron) has no `WS_PORT`, so `signal.mjs` defaulted to
+  9800 and missed a bot on another port. The gate now prints `--port` explicitly.
 
 ## [2.6.0] — 2026-10-02
 
