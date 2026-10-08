@@ -359,6 +359,16 @@ Two busy weeks of summaries will reach it. The default is also a cost decision �
 | `BRIDGE_SIGNAL_MEMORY_MS` | `300000` | How long a signal with nothing waiting is remembered |
 | `BRIDGE_SIGNAL_DATA_MAX` | `2000` | Characters of signal text kept before truncation |
 
+### Paperclip
+Answer tasks assigned to this bot on a [Paperclip](https://paperclip.ing) board. Paperclip accepts an agent's comment only inside a run it opened, so the agent's command on the board must hold its run open until a comment lands under it; the bot polls its inbox, answers through the same run path as Discord (same tools, permissions and settings), and posts the reply under the run. The Discord conversation buffer is never shown to a Paperclip run, and each task keeps its own session.
+
+| Variable | Default | Description |
+|---|---|---|
+| `PAPERCLIP_URL` | — | Board origin, e.g. `https://board.example.com`. Off unless this and the key are set |
+| `PAPERCLIP_API_KEY` | — | The agent's API key. Removed from the environment Claude runs in |
+| `PAPERCLIP_PROMPT_CHANNEL` | — | Channel id whose `.claude/channel-prompts/` file applies to board replies — use the channel with the same audience as the board |
+| `PAPERCLIP_POLL_MS` | `15000` | How often the inbox is checked |
+
 ### Misc
 | Variable | Default | Description |
 |---|---|---|

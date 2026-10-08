@@ -1,0 +1,92 @@
+/**
+ * Paperclip — a board task is answered once, through the bot's own run path,
+ * and never sees the Discord conversation buffer.
+ */
+const assert = require("assert");
+const { readFileSync, mkdtempSync } = require("fs");
+const { join } = require("path");
+const { tmpdir } = require("os");
+const { pickOpenRun, alreadyAnswered, buildTaskPrompt, createPaperclipPoller, FALLBACK_REPLY } = require("../lib/paperclip");
+
+const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+let pass = 0, fail = 0;
+async function check(label, fn) {
+  try { await fn(); console.log(`  ok   ${label}`); pass++; }
+  catch (e) { console.log(`  FAIL ${label}\n       ${e.message}`); fail++; }
+}
+const silent = { info() {}, warn() {}, error() {}, child() { return silent; } };
+const ME = { id: "agent-1", name: "Bot" };
+
+function board({ runs, comments = [], wakeCommentId }) {
+  const writes = [];
+  const routes = {
+    "GET /agents/me": ME,
+    "GET /agents/me/inbox-lite": [{ id: "iss-1" }],
+    "GET /issues/iss-1/runs": runs,
+    "GET /issues/iss-1": { id: "iss-1", identifier: "T-1", title: "A question", createdAt: "2026-01-01T00:00:00Z" },
+    "GET /issues/iss-1/comments": comments,
+    "GET /heartbeat-runs/run-1": { contextSnapshot: { wakeCommentId } },
+  };
+  const fetch = async (url, init) => {
+    const key = `${init.method} ${url.replace(/^.*\/api/, "")}`;
+    if (init.method === "PATCH") { writes.push({ key, body: JSON.parse(init.body), runId: init.headers["x-paperclip-run-id"] }); return { ok: true, text: async () => "{}" }; }
+    if (!(key in routes)) return { ok: false, status: 404, text: async () => "" };
+    return { ok: true, text: async () => JSON.stringify(routes[key]) };
+  };
+  return { fetch, writes };
+}
+const running = [{ id: "run-1", agentId: ME.id, status: "running" }];
+const poller = (b, answer) => createPaperclipPoller({
+  url: "https://board.example.com", apiKey: "k", stateFile: join(mkdtempSync(join(tmpdir(), "pc-")), "s.json"),
+  answer, log: silent, fetch: b.fetch,
+});
+
+(async () => {
+  await check("only this agent's running, unhandled run is picked", () => {
+    const runs = [{ id: "a", agentId: "other", status: "running" }, { id: "b", agentId: ME.id, status: "succeeded" },
+      { id: "c", agentId: ME.id, status: "running" }];
+    assert.strictEqual(pickOpenRun(runs, ME.id, new Set()).id, "c");
+    assert.strictEqual(pickOpenRun(runs, ME.id, new Set(["c"])), null);
+  });
+
+  await check("a run whose wake the agent already replied to is not answered again", () => {
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "1" }, { id: "r", authorAgentId: ME.id, createdAt: "2" }];
+    assert.strictEqual(alreadyAnswered(comments, "w", ME.id, "0"), true);
+    assert.strictEqual(alreadyAnswered([comments[0]], "w", ME.id, "0"), false);
+  });
+
+  await check("the prompt carries the task and its thread", () => {
+    const p = buildTaskPrompt({ identifier: "T-1", title: "Q", description: "details" },
+      [{ authorAgentId: null, createdAt: "1", body: "first ask" }], ME, "https://board.example.com");
+    assert.match(p, /T-1: Q/); assert.match(p, /details/); assert.match(p, /first ask/);
+  });
+
+  await check("the answer is posted under the open run and the task closed", async () => {
+    const b = board({ runs: running });
+    await poller(b, async () => "the answer").tick();
+    assert.deepStrictEqual(b.writes, [{ key: "PATCH /issues/iss-1", body: { status: "done", comment: "the answer" }, runId: "run-1" }]);
+  });
+
+  await check("a failed run still ends the wait, with the fallback", async () => {
+    const b = board({ runs: running });
+    await poller(b, async () => { throw new Error("boom"); }).tick();
+    assert.strictEqual(b.writes[0].body.comment, FALLBACK_REPLY);
+  });
+
+  await check("a run is answered once across ticks", async () => {
+    const b = board({ runs: running });
+    let calls = 0;
+    const p = poller(b, async () => { calls++; return "x"; });
+    await p.tick(); await p.tick();
+    assert.strictEqual(calls, 1);
+  });
+
+  await check("bot.js: board runs never see the buffer, and the key never reaches Claude", () => {
+    assert.match(bot, /noBufferContext: true/);
+    assert.match(bot, /opts\.noBufferContext \? "" : buildContextPrompt/);
+    assert.match(bot, /delete cleanEnv\.PAPERCLIP_API_KEY/);
+  });
+
+  console.log(`\n${pass} passed, ${fail} failed`);
+  process.exit(fail ? 1 : 0);
+})();

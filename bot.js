@@ -13,6 +13,7 @@ const { resolvePermissionMode, VALID_MODES } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
+const { createPaperclipPoller } = require("./lib/paperclip");
 
 // --- Logger ---
 const log = pino({
@@ -1865,7 +1866,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 
     // Head of the prompt, in precedence order: repo overrides, then anything
     // this channel narrows or contradicts. Both are re-read per request.
-    const head = `${systemPromptOverrides()}${channelPrompt(channelId, channelName)}`;
+    // A run that is not from a Discord channel (a Paperclip task) can borrow a
+    // channel's instructions with opts.promptChannel.
+    const head = `${systemPromptOverrides()}${channelPrompt(opts.promptChannel ?? channelId, channelName)}`;
 
     let systemPrompt;
     if (resumeSessionId) {
@@ -1873,7 +1876,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       systemPrompt = `${head}${basePrompt}${channelContext}${fileTransferContext}`;
       reqLog.info("Resume mode: skipping buffer/summary re-injection");
     } else {
-      const context = buildContextPrompt(reqLog);
+      // The buffer holds every channel's conversation. A run whose reply lands
+      // somewhere else (a Paperclip board) must not see it.
+      const context = opts.noBufferContext ? "" : buildContextPrompt(reqLog);
       systemPrompt = context
         ? `${head}${basePrompt}${channelContext}${fileTransferContext}\n\n${context}`
         : `${head}${basePrompt}${channelContext}${fileTransferContext}`;
@@ -1929,6 +1934,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     cleanEnv.BOT_CHANNEL_ID = String(channelId);
 
     delete cleanEnv.CLAUDECODE;
+    delete cleanEnv.PAPERCLIP_API_KEY;
     delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
     delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
     delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
@@ -2871,6 +2877,34 @@ validateSchedulesOnStartup();
 
 // Start scheduler check loop
 setInterval(runScheduledJobs, SCHEDULE_CHECK_MS);
+
+// --- Paperclip ---
+// Tasks assigned to this bot on a Paperclip board, answered through the same
+// run path as Discord (see lib/paperclip.js). Off unless both are set.
+const PAPERCLIP_URL = process.env.PAPERCLIP_URL;
+const PAPERCLIP_API_KEY = process.env.PAPERCLIP_API_KEY;
+if (PAPERCLIP_URL && PAPERCLIP_API_KEY) {
+  const pLog = log.child({ component: "paperclip" });
+  const promptChannel = process.env.PAPERCLIP_PROMPT_CHANNEL || undefined;
+  const poller = createPaperclipPoller({
+    url: PAPERCLIP_URL,
+    apiKey: PAPERCLIP_API_KEY,
+    stateFile: join(STATE_DIR, "paperclip.json"),
+    log: pLog,
+    // One session per task, so a reply on the task continues its conversation.
+    answer: (prompt, issue) => {
+      const parts = [];
+      const collect = (m) => { if (typeof m === "string") parts.push(m); };
+      return runClaude(prompt, `paperclip-${issue.identifier}`, pLog.child({ paperclipTask: issue.identifier }),
+        collect, {}, "paperclip", null, { promptChannel, noBufferContext: true })
+        .then(() => parts.join("\n\n"));
+    },
+  });
+  setInterval(poller.tick, envInt("PAPERCLIP_POLL_MS", 15000, { min: 5000 }));
+  pLog.info({ url: PAPERCLIP_URL, promptChannel: promptChannel ?? null }, "Paperclip connector on");
+} else if (PAPERCLIP_URL || PAPERCLIP_API_KEY) {
+  log.warn("Paperclip connector off — PAPERCLIP_URL and PAPERCLIP_API_KEY must both be set");
+}
 
 // --- Process error handlers ---
 process.on("unhandledRejection", (reason) => {
