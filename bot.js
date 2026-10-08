@@ -65,6 +65,12 @@ const ALLOWED_CHANNELS = process.env.ALLOWED_CHANNELS
   ? process.env.ALLOWED_CHANNELS.split(",").filter(Boolean)
   : [];
 const MAX_BOT_EXCHANGES = parseInt(process.env.MAX_BOT_EXCHANGES, 10) || 2;
+// Post only the text written after the run's LAST tool call. Off by default, so
+// every bot that does not set it replies exactly as before. A bot that talks in a
+// channel its customer reads turns it on: anything said before a tool call is
+// the model talking to itself ("Grep the file for titles…"), and when it was
+// joined onto the answer it reached the customer .
+const REPLY_FINAL_TEXT_ONLY = process.env.REPLY_FINAL_TEXT_ONLY === "true";
 const SUMMARIZE_INTERVAL_MS = parseInt(process.env.SUMMARIZE_INTERVAL_MS, 10) || 0;
 const SUMMARIZE_CHANNELS = process.env.SUMMARIZE_CHANNELS
   ? process.env.SUMMARIZE_CHANNELS.split(",").filter(Boolean)
@@ -2138,6 +2144,10 @@ function handleStreamEvent(event, reqLog, sendMessage, state) {
             // Track files Claude creates for Discord attachment
             // Only attach user-facing files (CSV, PDF, etc.), not config/internal files
             state.toolCalls++;
+            // Everything written so far was working notes, not the answer.
+            // Dropped from the reply AND from the returned response, so the
+            // conversation history records what was posted, not what was thought.
+            if (REPLY_FINAL_TEXT_ONLY) state.setTurnText("");
             state.progress?.tool(block.name, block.input);
             if (block.name === "Write" && block.input?.file_path) {
               const fp = block.input.file_path;

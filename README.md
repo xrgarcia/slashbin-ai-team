@@ -235,6 +235,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `ALLOWED_USERS` | *(empty = everyone)* | User IDs allowed to drive the bot |
 | `BOT_REQUIRE_ALLOWLIST` | `false` | Refuse to start when `ALLOWED_USERS` is empty |
 | `MONITOR_CHANNELS` | *(none)* | Channels answered without an @mention |
+| `REPLY_FINAL_TEXT_ONLY` | `false` | `true` posts only the text written after the run's last tool call; anything said before a tool call is dropped from the reply |
 | `ALLOWED_CHANNELS` | *(none)* | Restrict responses to these channels |
 | `ALLOWED_BOTS` | *(none)* | Peer bot IDs allowed to interact |
 | `MAX_BOT_EXCHANGES` | `2` | Consecutive bot-to-bot exchanges before stopping |
