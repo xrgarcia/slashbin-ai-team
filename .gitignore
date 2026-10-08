@@ -20,3 +20,6 @@ bot-history/
 bots/
 attachments/
 summarize.log
+
+# Operator-specific names checked by test/no-internal-names.test.js
+.internal-names

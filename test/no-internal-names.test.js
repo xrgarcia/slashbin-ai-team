@@ -8,9 +8,15 @@
  * customer it was for, the issue number that asked for it. Each one reads as
  * noise to everyone else, and an address or channel id is information nobody
  * meant to publish. This gate fails on the first one.
+ *
+ * The generic rules below catch what any operator would leak: a real address
+ * and a real Discord id. An operator's own names (people, customers, issue
+ * prefixes) are not listed here, because listing them publishes them. Put one
+ * regular expression per line in a gitignored `.internal-names` at the repo
+ * root and this gate checks those too.
  */
 const { execFileSync } = require("child_process");
-const { readFileSync } = require("fs");
+const { existsSync, readFileSync } = require("fs");
 const { join } = require("path");
 
 const REPO = join(__dirname, "..");
@@ -18,12 +24,15 @@ const SELF = "test/no-internal-names.test.js";
 
 // [pattern, what it catches, files where it is legitimate]
 const RULES = [
-  [/\bacme\b|acme[-_.]/i, "a customer name", []],
-  [/\bhank\b|\bdoug\b|\bray\b/i, "a person's name", ["CODE_OF_CONDUCT.md"]],
-  [/\bEM ?#\d+/, "an internal issue reference", []],
-  [/@slashbin\.io\b/i, "a real email address", ["CODE_OF_CONDUCT.md"]],
+  [/[\w.+-]+@(?!example\.(?:com|invalid)\b|users\.noreply\.github\.com\b)[\w-]+(?:\.[\w-]+)+/i, "a real email address", ["CODE_OF_CONDUCT.md"]],
   [/\b\d{17,20}\b/, "a real Discord id (use 123456789012345678)", []],
 ];
+const LOCAL = join(__dirname, "..", ".internal-names");
+if (existsSync(LOCAL)) {
+  for (const line of readFileSync(LOCAL, "utf8").split("\n")) {
+    if (line.trim() && !line.startsWith("#")) RULES.push([new RegExp(line.trim(), "i"), "a name listed in .internal-names", ["CODE_OF_CONDUCT.md"]]);
+  }
+}
 const PLACEHOLDER_ID = "123456789012345678";
 
 const files = execFileSync("git", ["ls-files"], { cwd: REPO, encoding: "utf8" })
