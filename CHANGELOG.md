@@ -5,6 +5,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **`restricted` now restricts MCP tools too.** `--tools` limits only the built-in
+  tools: every MCP server on the host stayed exposed, and a user-level
+  `defaultMode: bypassPermissions` ran each tool unasked. Measured 2026-10-08, a
+  restricted session could reach a shell-running MCP server and Klaviyo's send and
+  write tools. Restricted sessions (and the summarizer) now run in `dontAsk` mode,
+  which denies anything not pre-approved. `BOT_PERMISSION_ALLOW` is the
+  pre-approval list. **Upgrading:** a restricted bot that relied on MCP tools must
+  name them in `BOT_PERMISSION_ALLOW`. `bypass` bots are unchanged.
+
+### Added
+
+- **`MCP_CONFIG_STRICT=true`** loads only the servers in `MCP_CONFIG`
+  (`--strict-mcp-config`), so a bot cannot see the host's other MCP servers.
+
 ## [2.6.0] — 2026-10-02
 
 ### Added

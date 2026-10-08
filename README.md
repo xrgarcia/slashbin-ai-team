@@ -161,13 +161,13 @@ Put a `.mcp.json` in your project directory:
 }
 ```
 
-Any MCP server works. Connected MCP tools stay available in `restricted` mode — the tool allowlist governs the built-ins.
+Any MCP server works. In `restricted` mode an MCP tool runs only if `BOT_PERMISSION_ALLOW` names it (`mcp__server` for a whole server, `mcp__server__tool` for one tool). Set `MCP_CONFIG_STRICT=true` to load only the servers in `MCP_CONFIG` and none of the host's.
 
 ## Tool exposure
 
 | `BOT_PERMISSION_MODE` | Behaviour |
 |---|---|
-| `restricted` *(default)* | Only `BOT_ALLOWED_TOOLS` — read-only built-ins by default — plus connected MCP tools |
+| `restricted` *(default)* | Only `BOT_ALLOWED_TOOLS` — read-only built-ins by default. Runs in `dontAsk` mode: anything else, MCP tools included, is denied unless `BOT_PERMISSION_ALLOW` pre-approves it |
 | `bypass` | Every tool, no permission checks |
 
 **Use `bypass` only for a bot you intend to let write code and run commands, and only alongside a real `ALLOWED_USERS`.** In that configuration anyone who can reach the bot can run commands on your machine. It warns on every start.
@@ -224,6 +224,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `CLAUDE_CWD` | current dir | **Your** project repo — its `CLAUDE.md` is the bot's role |
 | `BOT_NAME` | `bot` | Instance name; scopes pid, log and session files |
 | `MCP_CONFIG` | *(none)* | Path to `.mcp.json` if not in `CLAUDE_CWD` |
+| `MCP_CONFIG_STRICT` | `false` | `true` loads ONLY the servers in `MCP_CONFIG` (`--strict-mcp-config`) |
 | `BOT_SKILL_PACK` | `<harness>/skill-pack` | Harness-owned skills loaded into every bot. Empty disables |
 | `BOT_EXTRA_SKILL_PACKS` | *(none)* | Additional plugin directories, comma-separated |
 
@@ -243,6 +244,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `BOT_PERMISSION_MODE` | `restricted` | `restricted` or `bypass`. This bot only |
 | `BOT_PERMISSION_MODE_DEFAULT` | — | Host-wide default for bots that set no `BOT_PERMISSION_MODE` |
 | `BOT_ALLOWED_TOOLS` | `Read,Glob,Grep,WebFetch,WebSearch,TodoWrite` | Built-ins exposed in `restricted` |
+| `BOT_PERMISSION_ALLOW` | *(none)* | `restricted` only: comma-separated permission rules pre-approved in `dontAsk` mode, e.g. `mcp__my-db,Bash(gh issue list:*)` |
 | `BOT_SUMMARIZER_TOOLS` | `Read` | Tools the summarizer may use |
 
 ### Claude

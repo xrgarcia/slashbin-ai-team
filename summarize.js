@@ -139,7 +139,7 @@ function summarizeWithClaude(channelName, date, messages) {
     // its prompt, so it needs no write or execute tools.
     permissionArgs: resolvePermissionMode().mode === "bypass"
       ? ["--allow-dangerously-skip-permissions", "--dangerously-skip-permissions"]
-      : ["--tools", process.env.BOT_SUMMARIZER_TOOLS || "Read"],
+      : ["--tools", process.env.BOT_SUMMARIZER_TOOLS || "Read", "--permission-mode", "dontAsk"],
   });
 }
 

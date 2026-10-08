@@ -120,6 +120,14 @@ const CHECKPOINT_FILE = join(STATE_DIR, ".checkpoints.json");
 const { mode: PERMISSION_MODE, source: PERMISSION_MODE_SOURCE } = resolvePermissionMode();
 const DEFAULT_ALLOWED_TOOLS = "Read,Glob,Grep,WebFetch,WebSearch,TodoWrite";
 const ALLOWED_TOOLS = process.env.BOT_ALLOWED_TOOLS || DEFAULT_ALLOWED_TOOLS;
+// --tools only limits the BUILT-IN tools. Every MCP tool the host can see is still
+// exposed, and a user-level `defaultMode: bypassPermissions` lets each one run
+// unasked — measured 2026-10-08: a "restricted" session reached a shell-runner MCP
+// and Klaviyo's send/write tools. So restricted sessions also run in dontAsk mode
+// (deny anything not pre-approved), and BOT_PERMISSION_ALLOW is the pre-approval
+// list: permission rules such as `mcp__some-server`, `mcp__srv__one_tool` or
+// `Bash(gh issue list:*)`. Built-in read tools inside CLAUDE_CWD need no rule.
+const PERMISSION_ALLOW = (process.env.BOT_PERMISSION_ALLOW || "").trim();
 // Summarisation reads a transcript that is already in its prompt. It never needs
 // to write, edit or execute anything.
 const SUMMARIZER_TOOLS = process.env.BOT_SUMMARIZER_TOOLS || "Read";
@@ -133,7 +141,23 @@ function permissionArgs(kind = "session") {
   if (PERMISSION_MODE === "bypass") {
     return ["--allow-dangerously-skip-permissions", "--dangerously-skip-permissions"];
   }
-  return ["--tools", kind === "summarizer" ? SUMMARIZER_TOOLS : ALLOWED_TOOLS];
+  if (kind === "summarizer") return ["--tools", SUMMARIZER_TOOLS, "--permission-mode", "dontAsk"];
+  return [
+    "--tools", ALLOWED_TOOLS,
+    "--permission-mode", "dontAsk",
+    ...(PERMISSION_ALLOW ? ["--allowedTools", PERMISSION_ALLOW] : []),
+  ];
+}
+
+// MCP_CONFIG adds servers; it does not remove the host's. MCP_CONFIG_STRICT=true
+// makes it the ONLY source (--strict-mcp-config), so a bot sees its own servers and
+// none of the user-level, plugin or claude.ai connectors on the same machine.
+function mcpArgs() {
+  if (!process.env.MCP_CONFIG) return [];
+  return [
+    "--mcp-config", process.env.MCP_CONFIG,
+    ...(process.env.MCP_CONFIG_STRICT === "true" ? ["--strict-mcp-config"] : []),
+  ];
 }
 
 // How often the "typing…" indicator is refreshed while a request runs.
@@ -1825,7 +1849,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "--verbose",
       "--max-turns", String(CLAUDE_MAX_TURNS),
       ...(process.env.CLAUDE_MODEL ? ["--model", process.env.CLAUDE_MODEL] : []),
-      ...(process.env.MCP_CONFIG ? ["--mcp-config", process.env.MCP_CONFIG] : []),
+      ...mcpArgs(),
       "--append-system-prompt", systemPrompt,
     ];
 

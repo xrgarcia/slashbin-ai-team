@@ -383,10 +383,27 @@ check("the resolved mode reports where it came from", () => {
 
 check("restriction uses --tools, which is the flag that actually restricts", () => {
   // Measured 2026-08-09: --allowedTools and --permission-mode plan restrict
-  // NOTHING in -p mode; only --tools changes the exposed tool set. Using
-  // --allowedTools here would be security theater.
+  // NOTHING in -p mode; only --tools changes the exposed tool set.
   assert.ok(/"--tools"/.test(bot), "must restrict via --tools");
-  assert.ok(!/"--allowedTools"/.test(bot), "--allowedTools does not restrict anything in -p mode");
+});
+
+check("restricted sessions deny what is not pre-approved, so MCP tools are gated too", () => {
+  // Measured 2026-10-08: --tools leaves every MCP tool exposed, and a user-level
+  // bypassPermissions default runs them unasked. dontAsk is the mode that denies;
+  // --allowedTools is only meaningful beside it, so it may never appear alone.
+  const guarded = /function permissionArgs[\s\S]*?\n}/.exec(bot)[0];
+  assert.ok((guarded.match(/"dontAsk"/g) || []).length >= 2,
+    "both the session and summarizer restricted paths must run in dontAsk");
+  assert.ok(/"--allowedTools", PERMISSION_ALLOW/.test(guarded), "BOT_PERMISSION_ALLOW must reach --allowedTools");
+  assert.ok(!/"--allowedTools"/.test(bot.replace(guarded, "")),
+    "--allowedTools outside permissionArgs() restricts nothing without dontAsk");
+  const sum = readFileSync(join(REPO, "summarize.js"), "utf8");
+  assert.ok(/"--permission-mode", "dontAsk"/.test(sum), "summarize.js restricted path must run in dontAsk");
+});
+
+check("MCP_CONFIG_STRICT makes MCP_CONFIG the only MCP source", () => {
+  assert.ok(/MCP_CONFIG_STRICT === "true" \? \["--strict-mcp-config"\]/.test(bot),
+    "MCP_CONFIG_STRICT=true must pass --strict-mcp-config");
 });
 
 check("summarizers never get write or execute tools when restricted", () => {
