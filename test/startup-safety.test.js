@@ -406,6 +406,11 @@ check("MCP_CONFIG_STRICT makes MCP_CONFIG the only MCP source", () => {
     "MCP_CONFIG_STRICT=true must pass --strict-mcp-config");
 });
 
+check("MCP_CONFIG_EXTRA is a second --mcp-config, still under strict", () => {
+  assert.ok(/MCP_CONFIG_EXTRA \? \["--mcp-config", process\.env\.MCP_CONFIG_EXTRA\]/.test(bot),
+    "MCP_CONFIG_EXTRA must reach a second --mcp-config");
+});
+
 check("summarizers never get write or execute tools when restricted", () => {
   assert.ok(/SUMMARIZER_TOOLS/.test(bot), "no separate summarizer tool set");
   assert.ok(/BOT_SUMMARIZER_TOOLS \|\| "Read"/.test(bot), "summarizer default should be read-only");

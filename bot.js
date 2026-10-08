@@ -157,10 +157,14 @@ function permissionArgs(kind = "session") {
 // MCP_CONFIG adds servers; it does not remove the host's. MCP_CONFIG_STRICT=true
 // makes it the ONLY source (--strict-mcp-config), so a bot sees its own servers and
 // none of the user-level, plugin or claude.ai connectors on the same machine.
+// MCP_CONFIG_EXTRA is a second --mcp-config (a path or an inline JSON string) for
+// servers that cannot live in the repo's .mcp.json, e.g. ONE claude.ai connector as
+// {"type":"claudeai-proxy","url":…,"id":…} — strict still drops every other one.
 function mcpArgs() {
   if (!process.env.MCP_CONFIG) return [];
   return [
     "--mcp-config", process.env.MCP_CONFIG,
+    ...(process.env.MCP_CONFIG_EXTRA ? ["--mcp-config", process.env.MCP_CONFIG_EXTRA] : []),
     ...(process.env.MCP_CONFIG_STRICT === "true" ? ["--strict-mcp-config"] : []),
   ];
 }
