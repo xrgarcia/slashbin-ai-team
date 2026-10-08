@@ -248,6 +248,8 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `BOT_ALLOWED_TOOLS` | `Read,Glob,Grep,WebFetch,WebSearch,TodoWrite` | Built-ins exposed in `restricted` |
 | `BOT_PERMISSION_ALLOW` | *(none)* | `restricted` only: comma-separated permission rules pre-approved in `dontAsk` mode, e.g. `mcp__my-db,Bash(gh issue list:*)` |
 | `BOT_PERMISSION_DENY` | *(none)* | `restricted` only: comma-separated permission rules always denied; deny beats allow, e.g. `Bash(gh *--repo*)` to keep an allowed `gh` command on one repo |
+| `BOT_MAIL_ALLOWED_RECIPIENTS` | *(none)* | With the claude.ai Gmail `send_message` tool allowed: the only addresses it may send to, in to, cc or bcc. Set, the pack's mail gate also refuses drafts, replies and unknown arguments, and fails closed. Unset, sends are not checked |
+| `BOT_MAIL_SUBJECT_PREFIX` | *(none)* | With `BOT_MAIL_ALLOWED_RECIPIENTS` set: every sent subject must start with this, e.g. `Bot:` |
 | `BOT_SUMMARIZER_TOOLS` | `Read` | Tools the summarizer may use |
 
 ### Claude

@@ -6,6 +6,12 @@
         "hooks": [
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bot_background_gate.py\"" }
         ]
+      },
+      {
+        "matcher": "mcp__claude_ai_Gmail__send_message",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bot_mail_gate.py\"" }
+        ]
       }
     ]
   }
