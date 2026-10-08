@@ -362,6 +362,8 @@ Two busy weeks of summaries will reach it. The default is also a cost decision �
 ### Paperclip
 Answer tasks assigned to this bot on a [Paperclip](https://paperclip.ing) board. Paperclip accepts an agent's comment only inside a run it opened, so the agent's command on the board must hold its run open until a comment lands under it; the bot polls its inbox, answers through the same run path as Discord (same tools, permissions and settings), and posts the reply under the run. The Discord conversation buffer is never shown to a Paperclip run, and each task keeps its own session.
 
+This connector is the inbound half only. For a bot to create, assign or comment on tasks itself, add Paperclip's own MCP server (`@paperclipai/mcp-server`) to that bot's MCP config and allow its tools. Give every agent its own key, used by both halves, and never share it between bots — the board's record of who did what is only as true as that.
+
 | Variable | Default | Description |
 |---|---|---|
 | `PAPERCLIP_URL` | — | Board origin, e.g. `https://board.example.com`. Off unless this and the key are set |
