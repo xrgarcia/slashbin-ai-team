@@ -12,6 +12,12 @@
         "hooks": [
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bot_mail_gate.py\"" }
         ]
+      },
+      {
+        "matcher": "mcp__claude_ai_Google_Calendar__(create|update|delete)_event",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bot_calendar_gate.py\"" }
+        ]
       }
     ]
   }
