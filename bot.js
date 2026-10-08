@@ -69,7 +69,7 @@ const MAX_BOT_EXCHANGES = parseInt(process.env.MAX_BOT_EXCHANGES, 10) || 2;
 // every bot that does not set it replies exactly as before. A bot that talks in a
 // channel its customer reads turns it on: anything said before a tool call is
 // the model talking to itself ("Grep the file for titles…"), and when it was
-// joined onto the answer it reached the customer .
+// joined onto the answer it reached the customer.
 const REPLY_FINAL_TEXT_ONLY = process.env.REPLY_FINAL_TEXT_ONLY === "true";
 const SUMMARIZE_INTERVAL_MS = parseInt(process.env.SUMMARIZE_INTERVAL_MS, 10) || 0;
 const SUMMARIZE_CHANNELS = process.env.SUMMARIZE_CHANNELS
@@ -1589,10 +1589,10 @@ function createSendQueue(msg, reqLog) {
 // A summary is written as `YYYY-MM-DD-<channel>.md` (lib/summarize-core.js).
 // The window below is a LEXICAL compare against a date string, which is only a
 // date compare for filenames that actually start with one — every letter sorts
-// after every digit, so `acme-report-v3-FULL.md` reads as newer than any date
+// after every digit, so `vendor-spec-v3-FULL.md` reads as newer than any date
 // and is admitted unconditionally. That is not hypothetical: on 2026-06-19 two
-// 64KB and 51KB pasted docs landed here and took the EM bot fully offline with
-// `spawn E2BIG` . The argv budget (lib/argv-budget.js) has since made
+// 64KB and 51KB pasted docs landed here and took a production bot fully offline with
+// `spawn E2BIG`. The argv budget (lib/argv-budget.js) has since made
 // the crash unreachable, which turned this from an outage into something worse
 // to diagnose: the intruder sorts LAST, so it survives the budget while the
 // real summaries — genuinely older — are the ones dropped. The bot stays up and
@@ -2768,7 +2768,7 @@ async function runScheduledJobs() {
       // Resolve the channel BEFORE stamping _lastRun. Stamping first marked a job
       // "ran" even when it was skipped for a missing channel — and channels.cache
       // is empty for a moment after a Discord reconnect, so a gateway blip at the
-      // scheduled minute silently burned the run for the day (acme-support, 2026-06-11).
+      // scheduled minute silently burned the run for the day (seen in production, 2026-06-11).
       // Leaving it unstamped keeps it eligible for the 5-minute lookback.
       const channel = client.channels.cache.get(job.channel);
       if (!channel) {

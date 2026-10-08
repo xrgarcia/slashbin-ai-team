@@ -6,7 +6,7 @@
  * sorts after every digit, so any `.md` starting with a letter reads as newer
  * than today and was admitted unconditionally, at whatever size it happened to
  * be. On 2026-06-19 two pasted docs (64KB and 51KB) landed in `bot-history/`
- * and took the EM bot fully offline with `spawn E2BIG` .
+ * and took a production bot fully offline with `spawn E2BIG`.
  *
  * lib/argv-budget.js has since made the crash unreachable, which is precisely
  * why this filter still matters and matters MORE: the intruder sorts last, so
@@ -69,8 +69,8 @@ check("the collision form summarize-core falls back to is admitted", () => {
 });
 
 check("the 2026-06-19 outage files are rejected", () => {
-  assert.strictEqual(admits("acme-report-resubmission-v3-FULL.md"), false);
-  assert.strictEqual(admits("acme-report-resubmission-v4-FULL.md"), false);
+  assert.strictEqual(admits("vendor-spec-resubmission-v3-FULL.md"), false);
+  assert.strictEqual(admits("vendor-spec-resubmission-v4-FULL.md"), false);
 });
 
 check("a letter-leading name sorts newer than any date — reject on shape, not order", () => {

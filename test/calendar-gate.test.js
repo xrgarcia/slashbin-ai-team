@@ -1,9 +1,9 @@
 /**
- * The calendar gate — a bot allowed to write Owner's calendar may never invite anyone.
+ * The calendar gate — a bot allowed to write its owner's calendar may never invite anyone.
  *
  * A permission rule sees a tool's name, never its arguments, so allowing
  * create_event allows an event with any guest list. bot_calendar_gate.py is the
- * argument check (the issue: Bot's "Bot:" events have no attendees). Every
+ * argument check: the bot's own events have no attendees. Every
  * refusal below is a case the permission system alone would have let through.
  */
 const { readFileSync } = require("fs");
@@ -32,8 +32,8 @@ function gate(tool, toolInput, env = BOT) {
 const ok = (tool, input, env) => { const r = gate(CAL + tool, input, env); assert.strictEqual(r.code, 0, r.err); };
 const no = (tool, input, env) => { const r = gate(CAL + tool, input, env); assert.strictEqual(r.code, 2, `allowed: ${tool} ${JSON.stringify(input)}`); };
 const event = (extra) => ({
-  summary: "Bot: samples due — the customer asked", startTime: "2026-10-20", endTime: "2026-10-21", allDay: true,
-  description: "the customer, #acme-po", ...extra,
+  summary: "Bot: samples due — customer asked", startTime: "2026-10-20", endTime: "2026-10-21", allDay: true,
+  description: "customer, #support", ...extra,
 });
 const change = (extra) => ({ eventId: "e1", notificationLevel: "NONE", ...extra });
 

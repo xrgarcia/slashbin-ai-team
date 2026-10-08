@@ -3,7 +3,7 @@
  *
  * A permission rule sees a tool's name, never its arguments, so allowing
  * send_message allows mail to anyone. bot_mail_gate.py is the argument check
- * (the issue: Bot emails Owner, and only Owner). Every refusal below is a case the
+ * (a bot that emails its owner, and only its owner). Every refusal below is a case the
  * permission system alone would have let through.
  */
 const { readFileSync } = require("fs");
@@ -36,9 +36,9 @@ const send = (extra) => ({ to: ["owner@example.com"], subject: "Bot: a question"
 
 console.log("\nMail gate");
 
-check("to Owner, cc Bot, subject 'Bot:' is allowed", () => ok(send({ cc: ["bot@example.com"] })));
+check("to the owner, cc the bot, subject 'Bot:' is allowed", () => ok(send({ cc: ["bot@example.com"] })));
 check("addresses compare case-insensitively", () => ok(send({ to: ["Owner@Example.COM"] })));
-check("an attachment to Owner is allowed", () => ok(send({ attachments: [{ content: "aGk=" }] })));
+check("an attachment to the owner is allowed", () => ok(send({ attachments: [{ content: "aGk=" }] })));
 check("an outside address in to is refused", () => no(send({ to: ["owner@example.com", "someone@example.invalid"] })));
 check("an outside address in cc is refused", () => no(send({ cc: ["someone@example.invalid"] })));
 check("an outside address in bcc is refused", () => no(send({ bcc: ["someone@example.invalid"] })));

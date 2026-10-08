@@ -56,7 +56,7 @@ The stored prompt runs with **no one watching and no conversation around it**.
 Write it to stand alone:
 
 - Bad: `"tell me the reach"` — no context, and "me" means nothing at 7am.
-- Good: `"Post the current customer reach numbers for acme.com, with the change since last week. Lead with the number."`
+- Good: `"Post the current customer reach numbers for Acme, with the change since last week. Lead with the number."`
 
 Include what to fetch, what to compare against, and how to present it. If the
 user's request is vague, ask **before** scheduling — a bad prompt scheduled daily
@@ -83,9 +83,9 @@ that has already been broken.
 
 ```bash
 node "$CLAUDE_PLUGIN_ROOT/bin/schedule.mjs" wake --in 20m \
-  --prompt "Check whether the promotion PR for acme_shipping merged and the prod deploy went green. Report only if it changed." \
+  --prompt "Check whether the promotion PR for acme-shipping merged and the prod deploy went green. Report only if it changed." \
   --note "PR #218 approved at 10:04, merge queued behind CI" \
-  --carry --by "Owner"
+  --carry --by "Alex"
 ```
 
 - `--in` takes `45s`, `20m`, `2h`, `1h30m`, `3d`. A bare number is rejected —

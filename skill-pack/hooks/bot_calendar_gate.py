@@ -7,8 +7,8 @@ A permission rule can allow or deny a TOOL; it cannot look at the tool's
 arguments. Allowing create_event therefore allows an event that invites anyone.
 This hook is the argument check: a bot that sets BOT_CALENDAR_NO_ATTENDEES may
 write only guest-free events to the primary calendar, and may not email anyone
-while doing it (the issue — Bot puts acme.com dates on Owner's calendar, and
-nobody else is ever invited).
+while doing it — for a bot that puts dates on its owner's calendar and must
+never invite anyone.
 
 Refused, with BOT_CALENDAR_NO_ATTENDEES set:
   - attendees / attendeeEmails on create_event
@@ -16,7 +16,7 @@ Refused, with BOT_CALENDAR_NO_ATTENDEES set:
   - a calendarId other than "primary"
   - notificationLevel other than "NONE" on update_event and delete_event. This
     hook cannot see the event an eventId names, so it cannot tell a guest-free
-    "Bot:" event from one of Owner's meetings; with NONE, a change to the wrong
+    bot-made event from one of the owner's meetings; with NONE, a change to the wrong
     event still emails nobody.
   - any argument this hook does not know, so a new connector field cannot carry
     a guest past it

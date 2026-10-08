@@ -1,8 +1,8 @@
 /**
  * REPLY_FINAL_TEXT_ONLY — only the text after the run's last tool call is posted.
  *
- * the issue: Bot's first answer in #acme-po, a channel acme.com reads, opened
- * with "Grep the file for titles/horizon/state." — a note he wrote to himself
+ * A bot's first answer in a channel its customer reads opened with
+ * "Grep the file for titles/horizon/state." — a note it wrote to itself
  * before a tool call, joined onto the answer because every text block of the run
  * accumulated into one reply. Off by default: every other bot must reply exactly
  * as it did before the flag existed.
@@ -55,13 +55,13 @@ const tool = (name) => ({ type: "assistant", message: { content: [{ type: "tool_
 const leaked = [
   text("Grep the file for titles/horizon/state."),
   tool("Grep"),
-  text("Owner, there are 11 acme.com items in flight."),
+  text("Alex, there are 11 items in flight."),
 ];
 
 // 1. Flag on: only the text after the last tool call survives.
 {
   const r = run(true, leaked);
-  assert.strictEqual(r.turnText, "Owner, there are 11 acme.com items in flight.");
+  assert.strictEqual(r.turnText, "Alex, there are 11 items in flight.");
   assert.ok(!r.turnText.includes("Grep the file"), "pre-tool-call text must not be posted");
   assert.strictEqual(r.toolCalls, 1);
 }
@@ -95,7 +95,7 @@ const leaked = [
   const r = run(false, leaked);
   assert.strictEqual(
     r.turnText,
-    "Grep the file for titles/horizon/state.Owner, there are 11 acme.com items in flight."
+    "Grep the file for titles/horizon/state.Alex, there are 11 items in flight."
   );
 }
 

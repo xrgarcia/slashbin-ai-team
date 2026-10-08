@@ -5,8 +5,8 @@ Bot Mail Gate — PreToolUse hook on the claude.ai Gmail connector's send_messag
 A permission rule can allow or deny a TOOL; it cannot look at the tool's
 arguments. Allowing send_message therefore allows mail to anyone. This hook is
 the argument check: a bot that sets BOT_MAIL_ALLOWED_RECIPIENTS may send a NEW
-message only when every address in to, cc and bcc is on that list (the issue —
-Bot emails Owner, and only Owner).
+message only when every address in to, cc and bcc is on that list — for a bot
+that may email its owner, and only its owner.
 
 Refused, with the list set:
   - any recipient not on the list, in to, cc or bcc
