@@ -358,6 +358,20 @@ check("no invocation hardcodes the skip-permissions flags", () => {
     "a call site still passes the skip flags directly, bypassing the mode");
 });
 
+check("bypass keeps BOT_PERMISSION_DENY", () => {
+  // A bypass bot with a deny list must not silently lose it: deny rules hold under
+  // --dangerously-skip-permissions, so the harness passes them on.
+  const fn = /function permissionArgs[\s\S]*?\n}/.exec(bot)[0];
+  const bypass = /if \(PERMISSION_MODE === "bypass"\) \{[\s\S]*?\n  \}/.exec(fn);
+  assert.ok(bypass, "bypass branch not found");
+  assert.ok(/PERMISSION_DENY \? \["--disallowedTools", PERMISSION_DENY\]/.test(bypass[0]),
+    "the bypass branch drops the deny list");
+});
+
+check("BOT_SETTINGS reaches every session", () => {
+  assert.ok(/\.\.\.settingsArgs\(\),/.test(bot), "the session argv never passes --settings");
+});
+
 check("restricted is the default, bypass must be asked for", () => {
   const perm = readFileSync(join(REPO, "lib/permission-mode.js"), "utf8");
   assert.ok(/return \{ mode: "restricted", source: "built-in default" \}/.test(perm),

@@ -168,7 +168,7 @@ Any MCP server works. In `restricted` mode an MCP tool runs only if `BOT_PERMISS
 | `BOT_PERMISSION_MODE` | Behaviour |
 |---|---|
 | `restricted` *(default)* | Only `BOT_ALLOWED_TOOLS` — read-only built-ins by default. Runs in `dontAsk` mode: anything else, MCP tools included, is denied unless `BOT_PERMISSION_ALLOW` pre-approves it |
-| `bypass` | Every tool, no permission checks |
+| `bypass` | Every tool, no permission prompts. `BOT_PERMISSION_DENY` still applies; pair it with a `BOT_SETTINGS` sandbox to keep the shell off the rest of the machine |
 
 **Use `bypass` only for a bot you intend to let write code and run commands, and only alongside a real `ALLOWED_USERS`.** In that configuration anyone who can reach the bot can run commands on your machine. It warns on every start.
 
@@ -247,7 +247,8 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `BOT_PERMISSION_MODE_DEFAULT` | — | Host-wide default for bots that set no `BOT_PERMISSION_MODE` |
 | `BOT_ALLOWED_TOOLS` | `Read,Glob,Grep,WebFetch,WebSearch,TodoWrite` | Built-ins exposed in `restricted` |
 | `BOT_PERMISSION_ALLOW` | *(none)* | `restricted` only: comma-separated permission rules pre-approved in `dontAsk` mode, e.g. `mcp__my-db,Bash(gh issue list:*)` |
-| `BOT_PERMISSION_DENY` | *(none)* | `restricted` only: comma-separated permission rules always denied; deny beats allow, e.g. `Bash(gh *--repo*)` to keep an allowed `gh` command on one repo |
+| `BOT_PERMISSION_DENY` | *(none)* | Comma-separated permission rules always denied; deny beats allow, e.g. `Bash(gh *--repo*)` to keep an allowed `gh` command on one repo. Honoured in `bypass` too: nothing prompts, but a denied tool or path stays denied |
+| `BOT_SETTINGS` | *(none)* | Claude Code settings (a path or inline JSON) passed to every session with `--settings`, which the repository's own settings cannot loosen. E.g. a shell sandbox for a `bypass` bot: `{"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"filesystem":{"denyRead":["~/"],"allowRead":["/srv/bot-repo"]}}}`. Invalid inline JSON stops the bot at startup |
 | `BOT_MAIL_ALLOWED_RECIPIENTS` | *(none)* | With the claude.ai Gmail `send_message` tool allowed: the only addresses it may send to, in to, cc or bcc. Set, the pack's mail gate also refuses drafts, replies and unknown arguments, and fails closed. Unset, sends are not checked |
 | `BOT_MAIL_SUBJECT_PREFIX` | *(none)* | With `BOT_MAIL_ALLOWED_RECIPIENTS` set: every sent subject must start with this, e.g. `Bot:` |
 | `BOT_CALENDAR_NO_ATTENDEES` | *(none)* | `true`: the pack's calendar gate checks the claude.ai Google Calendar `create_event`, `update_event` and `delete_event`. It refuses any attendee, any calendar but `primary`, unknown arguments, and an update or delete without `notificationLevel: "NONE"`, and fails closed. It cannot see an existing event's guests or title. Unset, calendar writes are not checked |

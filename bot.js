@@ -149,7 +149,12 @@ const SUMMARIZER_TOOLS = process.env.BOT_SUMMARIZER_TOOLS || "Read";
  */
 function permissionArgs(kind = "session") {
   if (PERMISSION_MODE === "bypass") {
-    return ["--allow-dangerously-skip-permissions", "--dangerously-skip-permissions"];
+    // Deny rules still hold under bypass (measured): nothing prompts, but a denied
+    // tool or path stays denied. Unset, the argv is the historical one.
+    return [
+      "--allow-dangerously-skip-permissions", "--dangerously-skip-permissions",
+      ...(PERMISSION_DENY ? ["--disallowedTools", PERMISSION_DENY] : []),
+    ];
   }
   if (kind === "summarizer") return ["--tools", SUMMARIZER_TOOLS, "--permission-mode", "dontAsk"];
   return [
@@ -158,6 +163,14 @@ function permissionArgs(kind = "session") {
     ...(PERMISSION_ALLOW ? ["--allowedTools", PERMISSION_ALLOW] : []),
     ...(PERMISSION_DENY ? ["--disallowedTools", PERMISSION_DENY] : []),
   ];
+}
+
+// BOT_SETTINGS layers Claude Code settings (a path or inline JSON) over every
+// session through --settings, e.g. a sandbox around the shell. Settings passed this
+// way are not loosened by the repository's own .claude/settings*.json.
+const SESSION_SETTINGS = (process.env.BOT_SETTINGS || "").trim();
+function settingsArgs() {
+  return SESSION_SETTINGS ? ["--settings", SESSION_SETTINGS] : [];
 }
 
 // MCP_CONFIG adds servers; it does not remove the host's. MCP_CONFIG_STRICT=true
@@ -466,6 +479,15 @@ if (!VALID_MODES.includes(PERMISSION_MODE)) {
     'Permission mode must be "restricted" (default — expose only BOT_ALLOWED_TOOLS) or "bypass" (all tools, no permission checks)'
   );
   process.exit(EXIT_CONFIG);
+}
+// A malformed inline BOT_SETTINGS would fail every session, one message at a time.
+if (SESSION_SETTINGS.startsWith("{")) {
+  try {
+    JSON.parse(SESSION_SETTINGS);
+  } catch (err) {
+    log.fatal({ err: err.message }, "BOT_SETTINGS is not valid JSON");
+    process.exit(EXIT_CONFIG);
+  }
 }
 // Name the SOURCE, not just the value. On a multi-bot host the question is never
 // "what mode is this bot in" — it is "why is this one different from its
@@ -1865,6 +1887,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "--max-turns", String(CLAUDE_MAX_TURNS),
       ...(process.env.CLAUDE_MODEL ? ["--model", process.env.CLAUDE_MODEL] : []),
       ...mcpArgs(),
+      ...settingsArgs(),
       "--append-system-prompt", systemPrompt,
     ];
 
