@@ -81,7 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allowed runs in Claude Code's sandbox confined to the working directory and
   the system folders (no stepping outside it; a host without the sandbox fails
   the run rather than running it open). Claude Code's project auto-memory,
-  shared with the Discord sessions in the same folder, is off for a board run.
+  shared with the Discord sessions in the same folder, is off for a board run,
+  and no settings file is read for one: an approval made for Discord sessions
+  (in `BOT_SETTINGS`, the repo's or the user's settings) does not carry over.
   The bot's
   Discord token and bridge token are withheld from a board run as well, and so is
   the whole harness folder (its `.env`, logs and default state): a bot whose

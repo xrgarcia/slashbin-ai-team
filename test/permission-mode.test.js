@@ -226,22 +226,29 @@ check("a board run is least privilege in every mode — never bypass", () => {
   assert.ok(board > -1 && board < bypass, "the board branch must come before the bypass branch");
   assert.match(src, /const BOARD_TOOLS = process\.env\.BOT_BOARD_TOOLS \|\| "Read,Glob,Grep";/);
   const args = boardArgs({ tools: "Read,Glob,Grep", allow: "", deny: ["Read(//state/buffer.txt)"] });
-  assert.deepStrictEqual(args, ["--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk", "--disallowedTools", "Read(//state/buffer.txt)"]);
+  assert.deepStrictEqual(args, ["--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk", "--setting-sources", "", "--disallowedTools", "Read(//state/buffer.txt)"]);
+  // Second pass on f2a7466: an approval in any settings file — the bot's, the
+  // repo's, the user's — was honored by dontAsk. None is read; CLAUDE.md still is.
+  assert.deepStrictEqual(boardArgs({ tools: "Read", cwd: "/repo" }).slice(4), ["--setting-sources", "", "--add-dir", "/repo"]);
+  assert.match(src, /boardArgs\(\{ tools: BOARD_TOOLS, allow: BOARD_PERMISSION_ALLOW, cwd: CLAUDE_CWD,/);
+  assert.match(src, /cleanEnv\.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";/, "a board run loses the repo's CLAUDE.md");
   assert.ok(!args.some((a) => /dangerously/.test(a)), "a board run must never skip permissions");
-  assert.deepStrictEqual(boardArgs({ tools: "Read", allow: "mcp__db" }).slice(4), ["--allowedTools", "mcp__db"]);
+  assert.deepStrictEqual(boardArgs({ tools: "Read", allow: "mcp__db" }).slice(6), ["--allowedTools", "mcp__db"]);
 });
 
 check("a board run's shell is sandboxed to the working directory, on top of the bot's own settings", () => {
   // Read deny rules do not bind the shell; an allowed shell must not read the home folder.
   const base = { model: "x", sandbox: { network: { allowedDomains: ["github.com"] }, filesystem: { denyRead: ["/etc/secret"], allowRead: ["/opt/tools"] } } };
   const s = boardSettings(base, ["/repo/bot-history/", "/state/buffer.txt"], "/repo");
-  assert.strictEqual(s.model, "x", "the bot's own settings were dropped");
+  assert.strictEqual(s.model, "x", "the bot's model was dropped");
+  const carried = boardSettings({ model: "m", permissions: { allow: ["mcp__shell"], defaultMode: "bypassPermissions" }, hooks: { PreToolUse: [] }, env: { A: "1" } }, [], "/repo");
+  assert.deepStrictEqual(Object.keys(carried).sort(), ["autoMemoryEnabled", "model", "sandbox"], "a board run inherits the bot's approvals, hooks or env");
   assert.deepStrictEqual(s.sandbox.network, { ...base.sandbox.network, allowAllUnixSockets: false }, "the bot's network rules were dropped");
   assert.strictEqual(s.sandbox.enabled, true);
   // Second pass on 09bb6cd: the CLI loads project auto-memory, shared with the
   // Discord sessions, at startup, before any sandbox or deny rule applies.
   assert.strictEqual(boardSettings({ autoMemoryEnabled: true }, [], "/repo").autoMemoryEnabled, false, "a board run loads Discord sessions' auto-memory");
-  assert.match(readFileSync(join(__dirname, "..", "bot.js"), "utf8"), /if \(opts\.noBufferContext\) \{[^}]*cleanEnv\.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";\s*\}/, "the board run's env leaves auto-memory on");
+  assert.match(readFileSync(join(__dirname, "..", "bot.js"), "utf8"), /if \(opts\.noBufferContext\) \{[^}]*cleanEnv\.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";[^}]*\}/, "the board run's env leaves auto-memory on");
   assert.strictEqual(s.sandbox.failIfUnavailable, true, "a host without the sandbox would run the board task open");
   assert.strictEqual(s.sandbox.allowUnsandboxedCommands, false, "a command could step outside the sandbox");
   assert.deepStrictEqual(s.sandbox.filesystem.denyRead, ["/etc/secret", "/", "/repo/bot-history", "/state/buffer.txt"]);

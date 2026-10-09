@@ -161,7 +161,7 @@ function permissionArgs(kind = "session") {
   // A board run answers people outside the bot's Discord channels: least
   // privilege in every mode, and no reach into Discord memory.
   if (kind === "board") {
-    return boardArgs({ tools: BOARD_TOOLS, allow: BOARD_PERMISSION_ALLOW,
+    return boardArgs({ tools: BOARD_TOOLS, allow: BOARD_PERMISSION_ALLOW, cwd: CLAUDE_CWD,
       deny: [PERMISSION_DENY, ...privateMemoryDeny(boardDeniedPaths())].filter(Boolean) });
   }
   if (PERMISSION_MODE === "bypass") {
@@ -1983,6 +1983,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       // the same CLAUDE_CWD and loads at startup, before any tool runs. Off here
       // and in boardSettings; the CLI reads this variable first.
       cleanEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
+      // No settings file is read for a board run (boardArgs); its CLAUDE.md
+      // comes in through --add-dir, which loads one only with this set.
+      cleanEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";
     }
 
     delete cleanEnv.CLAUDECODE;
