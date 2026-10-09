@@ -93,7 +93,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Paperclip key, the Discord and bridge tokens), so a credential inside an inline
   `BOT_SETTINGS` cannot be printed into a reply. Withheld as well is
   the whole harness folder (its `.env`, logs and default state): a bot whose
-  `CLAUDE_CWD` is the harness folder gives board runs nothing to read. An answer whose post fails is
+  `CLAUDE_CWD` is the harness or state folder (or inside one) keeps the connector
+  off and logs why, since the sandbox always opens its working directory. An answer whose post fails is
   kept (across a restart) and re-posted; the task is never run twice. A comment
   that lands while the bot is answering keeps the task open, so it is answered next;
   a re-wake of an answered task gets a short note under its run, never a second run.

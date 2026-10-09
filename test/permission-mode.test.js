@@ -5,7 +5,7 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, SYSTEM_READ } = require("../lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ } = require("../lib/permission-mode");
 const { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
@@ -114,6 +114,23 @@ check("a board run gets none of the bot's own configuration, but keeps what the 
   for (const name of read) {
     assert.ok(BOARD_BOT_ENV.includes(name) || PRIVATE_MEMORY_ENV.includes(name), `the skill pack reads ${name}: add it to BOARD_BOT_ENV or PRIVATE_MEMORY_ENV`);
   }
+});
+
+check("a bot whose CLAUDE_CWD is a denied folder answers no board", () => {
+  // Second pass on 1f20c66: the sandbox binds the working directory writable after
+  // its read denials, so a denied CLAUDE_CWD (the harness folder) was open to a
+  // board shell, secrets file included. Measured 2026-10-09: a denied subfolder
+  // of the working directory stays hidden; a denied working directory does not.
+  const denied = ["/harness", "/data/state"];
+  assert.ok(boardCwdDenied(denied, "/harness"));
+  assert.ok(boardCwdDenied(denied, "/harness/"));
+  assert.ok(boardCwdDenied(denied, "/data/state/sub"));
+  assert.ok(!boardCwdDenied(denied, "/repo"));
+  assert.ok(!boardCwdDenied(denied, "/harness-two"));
+  assert.ok(!boardCwdDenied(denied, "/data"), "a denied folder inside the working directory stays hidden");
+  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.match(src, /const PAPERCLIP_CWD_DENIED = boardCwdDenied\(boardDeniedPaths\(\), CLAUDE_CWD\);\nif \(PAPERCLIP_URL && PAPERCLIP_API_KEY && PAPERCLIP_CWD_DENIED\) \{\n  log\.error/);
+  assert.ok(src.indexOf("PAPERCLIP_CWD_DENIED) {") < src.indexOf("createPaperclipPoller({"), "the poller starts before the check");
 });
 
 console.log("\nPermission mode — a summary run is narrow in every mode");

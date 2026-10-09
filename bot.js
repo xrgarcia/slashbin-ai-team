@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -2944,7 +2944,14 @@ setInterval(runScheduledJobs, SCHEDULE_CHECK_MS);
 // run path as Discord (see lib/paperclip.js). Off unless both are set.
 const PAPERCLIP_URL = process.env.PAPERCLIP_URL;
 const PAPERCLIP_API_KEY = process.env.PAPERCLIP_API_KEY;
-if (PAPERCLIP_URL && PAPERCLIP_API_KEY) {
+// The sandbox binds the working directory writable over its read denials, so a
+// CLAUDE_CWD that is the harness or state folder (or inside one) would open the
+// harness secrets file and the Discord stores to a board shell. Such a bot
+// answers no board.
+const PAPERCLIP_CWD_DENIED = boardCwdDenied(boardDeniedPaths(), CLAUDE_CWD);
+if (PAPERCLIP_URL && PAPERCLIP_API_KEY && PAPERCLIP_CWD_DENIED) {
+  log.error({ cwd: CLAUDE_CWD }, "Paperclip connector off — CLAUDE_CWD is the harness or state folder, or inside one, which a board run cannot keep closed; point it at the folder board tasks should read");
+} else if (PAPERCLIP_URL && PAPERCLIP_API_KEY) {
   const pLog = log.child({ component: "paperclip" });
   const promptChannel = process.env.PAPERCLIP_PROMPT_CHANNEL || undefined;
   const poller = createPaperclipPoller({
