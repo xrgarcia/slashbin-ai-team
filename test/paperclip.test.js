@@ -82,6 +82,34 @@ const poller = (b, answer) => createPaperclipPoller({
       "the answer posts, but the task is not marked done over an ask it never saw");
   });
 
+  await check("a comment that lands as the task closes reopens it, for the answer and for a re-wake note", async () => {
+    // Second-pass review of 2.7.0: a comment between the last read and the close
+    // was closed over — the newer ask sat unanswered on a done task.
+    for (const rewake of [false, true]) {
+      const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "first ask" }];
+      let runs = running, landing = false;
+      const b = board({ runs, comments });
+      const fetch = async (url, init) => {
+        if (url.endsWith("/issues/iss-1/runs")) return { ok: true, text: async () => JSON.stringify(runs) };
+        if (init.method === "PATCH") {
+          comments.push({ id: `a${comments.length}`, authorAgentId: ME.id, createdByRunId: init.headers["x-paperclip-run-id"], createdAt: "2026-01-02T00:02:00Z", body: JSON.parse(init.body).comment ?? "" });
+          if (landing) { landing = false; comments.push({ id: "h2", authorAgentId: null, createdAt: "2026-01-02T00:03:00Z", body: "one more" }); }
+        }
+        return b.fetch(url, init);
+      };
+      const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+      const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+        answer: async () => "the answer" });
+      if (rewake) { await make().tick(); runs = [{ id: "run-2", agentId: ME.id, status: "running" }]; b.writes.length = 0; }
+      landing = true;
+      await make().tick();
+      const run = rewake ? "run-2" : "run-1";
+      assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body]),
+        [[run, { status: "done", comment: rewake ? ALREADY_ANSWERED : "the answer" }], [run, { status: "todo" }]],
+        `${rewake ? "re-wake note" : "answer"}: the newer ask was left on a done task`);
+    }
+  });
+
   await check("a failed run still ends the wait, with the fallback", async () => {
     const b = board({ runs: running });
     await poller(b, async () => { throw new Error("boom"); }).tick();
