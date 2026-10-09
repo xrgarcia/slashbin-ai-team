@@ -5,7 +5,7 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, privateMemoryDeny, boardSettings } = require("../lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, privateMemoryDeny, boardSettings } = require("../lib/permission-mode");
 const { readFileSync, writeFileSync, mkdtempSync, mkdirSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
@@ -191,7 +191,18 @@ check("a board run drops every memory variable and denies the path each one name
     assert.ok(m, `${name} is no longer published — update PRIVATE_MEMORY_ENV`);
     return m[1];
   }));
-  assert.match(src, /if \(opts\.noBufferContext\) for \(const name of PRIVATE_MEMORY_ENV\) delete cleanEnv\[name\];/);
+  assert.match(src, /if \(opts\.noBufferContext\) for \(const name of \[\.\.\.PRIVATE_MEMORY_ENV, \.\.\.DISCORD_CREDENTIAL_ENV\]\) delete cleanEnv\[name\];/);
+  // Second-pass review of 2.7.0: a bypass board run could print the bot's
+  // Discord token into its reply. Every credential the bot itself reads that
+  // gives Discord access must be withheld.
+  for (const name of ["DISCORD_TOKEN", "BRIDGE_TOKEN"]) {
+    assert.ok(DISCORD_CREDENTIAL_ENV.includes(name), `${name} reaches a board run`);
+    assert.ok(src.includes(`process.env.${name}`), `${name} is no longer read by the bot — revisit this list`);
+  }
+  // The withholding runs after every variable is set and before the spawn.
+  const at = (re) => src.search(re);
+  assert.ok(at(/cleanEnv\.BOT_CHANNEL_ID = /) < at(/DISCORD_CREDENTIAL_ENV\]\) delete/) && at(/DISCORD_CREDENTIAL_ENV\]\) delete/) < at(/spawn\(CLAUDE_BIN, safeArgs/),
+    "the credentials are removed before they are set, or after the spawn");
   assert.match(src, /permissionArgs\("session", opts\.noBufferContext \? privateMemoryDeny\(privateMemoryPaths\(\)\) : \[\]\)/);
   assert.match(src, /noBufferContext: true/, "the Paperclip run no longer marks itself as a board run");
 });

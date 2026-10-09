@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, privateMemoryDeny, boardSettings } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, privateMemoryDeny, boardSettings } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -1954,7 +1954,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     cleanEnv.BOT_JOB_HISTORY_FILE = JOB_HISTORY_FILE;
     cleanEnv.BOT_SCHEDULES_FILE = SCHEDULES_FILE;
     cleanEnv.BOT_CHANNEL_ID = String(channelId);
-    if (opts.noBufferContext) for (const name of PRIVATE_MEMORY_ENV) delete cleanEnv[name];
+    if (opts.noBufferContext) for (const name of [...PRIVATE_MEMORY_ENV, ...DISCORD_CREDENTIAL_ENV]) delete cleanEnv[name];
 
     delete cleanEnv.CLAUDECODE;
     delete cleanEnv.PAPERCLIP_API_KEY;

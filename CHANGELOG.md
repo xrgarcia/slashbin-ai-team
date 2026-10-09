@@ -75,7 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scheduled jobs) are left out of its environment, so recall reports them
   unavailable, each path carries a read deny rule in every permission mode, and the
   shell runs in Claude Code's sandbox with those paths unreadable (no stepping
-  outside it; a host without the sandbox fails the run rather than running it open). An answer whose post fails is
+  outside it; a host without the sandbox fails the run rather than running it open). The bot's
+  Discord token and bridge token are withheld from a board run as well. An answer whose post fails is
   kept (across a restart) and re-posted; the task is never run twice. A comment
   that lands while the bot is answering keeps the task open, so it is answered next;
   a re-wake of an answered task gets a short note under its run, never a second run.
