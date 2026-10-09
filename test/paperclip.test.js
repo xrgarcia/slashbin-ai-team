@@ -19,7 +19,7 @@ const ME = { id: "agent-1", name: "Bot" };
 
 function board({ runs, comments = [], wakeCommentId }) {
   const writes = [], activity = [];
-  let race = null, lose = 0;
+  let race = null, lose = 0, raceW = null, loseW = 0;
   const routes = {
     "GET /issues/iss-1/activity": activity,
     "GET /agents/me": ME,
@@ -37,6 +37,9 @@ function board({ runs, comments = [], wakeCommentId }) {
       const issue = routes["GET /issues/iss-1"];
       // A person's status change that lands just before this write, after the bot's last read.
       if (race && body.status === "done") { issue.status = race; race = null; }
+      // A person's status change that lands just before the bot's follow-up write.
+      const followUp = body.status && body.status !== "done";
+      if (raceW && followUp) { issue.status = raceW; raceW = null; }
       if (body.status) {
         // Paperclip records each update's from/to under the row lock, newest first.
         activity.unshift({ runId: init.headers["x-paperclip-run-id"], action: "issue.updated",
@@ -44,6 +47,7 @@ function board({ runs, comments = [], wakeCommentId }) {
         issue.status = body.status;
       }
       if (lose-- > 0) return { ok: false, status: 502, text: async () => "bad gateway" };
+      if (followUp && loseW-- > 0) return { ok: false, status: 502, text: async () => "bad gateway" };
       return { ok: true, text: async () => "{}" };
     }
     if (!(key in routes)) return { ok: false, status: 404, text: async () => "" };
@@ -51,7 +55,8 @@ function board({ runs, comments = [], wakeCommentId }) {
   };
   return { fetch, writes, setStatus: (st) => { routes["GET /issues/iss-1"].status = st; },
     status: () => routes["GET /issues/iss-1"].status,
-    raceClose: (st, { loseResponse = false } = {}) => { race = st; lose = loseResponse ? 1 : 0; } };
+    raceClose: (st, { loseResponse = false } = {}) => { race = st; lose = loseResponse ? 1 : 0; },
+    raceFollowUp: (st, { loseResponse = false } = {}) => { raceW = st; loseW = loseResponse ? 1 : 0; } };
 }
 const running = [{ id: "run-1", agentId: ME.id, status: "running" }];
 const poller = (b, answer) => createPaperclipPoller({
@@ -249,6 +254,35 @@ const poller = (b, answer) => createPaperclipPoller({
       assert.deepStrictEqual(b.writes.filter((w) => w.body.status).map((w) => [w.runId, w.body.status]),
         [[run, "done"], [run, decided]], `${label}: unexpected status writes`);
       assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).closing, {}, `${label}: the close was never settled`);
+    }
+  });
+
+  await check("a person's decision made as the bot reopens or puts back a task is put back in turn", async () => {
+    // Second-pass review of 2.7.0: the follow-up write after a close read the
+    // task, then wrote todo (or the status the close replaced) unconditionally,
+    // so a cancel landing between the two was lost and cancelled work resumed.
+    for (const decided of ["cancelled", "blocked"]) for (const path of ["reopen", "put back"]) for (const lost of [false, true]) {
+      const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+      const b = board({ runs: running, comments });
+      let landing = path === "reopen";
+      const fetch = async (url, init) => {
+        if (init.method === "PATCH" && landing) { landing = false; comments.push({ id: "h2", authorAgentId: null, createdAt: "2026-01-02T00:03:00Z", body: "one more" }); }
+        return b.fetch(url, init);
+      };
+      const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+      const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+        answer: async () => "the answer" });
+      const first = decided === "cancelled" ? "blocked" : "cancelled";
+      if (path === "put back") b.raceClose(first);
+      b.raceFollowUp(decided, { loseResponse: lost });
+      await make().tick();
+      if (lost) await make().tick();   // a restarted bot settles the write whose response was lost
+      await make().tick();             // and does nothing more
+      const label = `${decided} during the ${path}${lost ? ", response lost" : ""}`;
+      assert.strictEqual(b.status(), decided, `${label}: the person's decision was overwritten`);
+      assert.deepStrictEqual(b.writes.filter((w) => w.body.status).map((w) => w.body.status),
+        ["done", path === "reopen" ? "todo" : first, decided], `${label}: unexpected status writes`);
+      assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).closing, {}, `${label}: the write was never settled`);
     }
   });
 
