@@ -3,7 +3,7 @@
  * and never sees the Discord conversation buffer.
  */
 const assert = require("assert");
-const { readFileSync, writeFileSync, mkdtempSync } = require("fs");
+const { readFileSync, readdirSync, writeFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
 const { pickOpenRun, askOf, askKey, buildTaskPrompt, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED } = require("../lib/paperclip");
@@ -282,6 +282,29 @@ const poller = (b, answer) => createPaperclipPoller({
       answer: async () => { calls++; return "the answer"; } }).tick();
     assert.strictEqual(calls, 1, "the ask ran a second time");
     assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-2", FALLBACK_REPLY]]);
+  });
+
+  await check("a damaged state file stops board tasks rather than running answered ones again", async () => {
+    // Second-pass review of 2.7.0: the state was overwritten in place and an
+    // unreadable file was read as empty, so a torn write re-ran every task.
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    let runs = running;
+    const b = board({ runs, comments });
+    const fetch = async (url, init) => url.endsWith("/issues/iss-1/runs")
+      ? { ok: true, text: async () => JSON.stringify(runs) } : b.fetch(url, init);
+    const dir = mkdtempSync(join(tmpdir(), "pc-")), stateFile = join(dir, "s.json");
+    let calls = 0, errors = 0;
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, fetch,
+      log: { ...silent, error() { errors++; } }, answer: async () => { calls++; return "the answer"; } });
+    await make().tick();
+    assert.deepStrictEqual(readdirSync(dir), ["s.json"], "the state is written through a temp file that is renamed into place");
+    const whole = readFileSync(stateFile, "utf8");
+    writeFileSync(stateFile, whole.slice(0, whole.length >> 1));
+    runs = [{ id: "run-2", agentId: ME.id, status: "running" }];
+    await make().tick();
+    assert.strictEqual(calls, 1, "an answered ask ran again from a damaged state file");
+    assert.strictEqual(b.writes.length, 1);
+    assert.strictEqual(errors, 1, "the damaged file is reported");
   });
 
   await check("a re-wake note that fails to send is retried until it lands, never dropped", async () => {
