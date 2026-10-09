@@ -38,7 +38,7 @@ function board({ runs, comments = [], wakeCommentId }) {
     if (!(key in routes)) return { ok: false, status: 404, text: async () => "" };
     return { ok: true, text: async () => JSON.stringify(routes[key]) };
   };
-  return { fetch, writes };
+  return { fetch, writes, setStatus: (st) => { routes["GET /issues/iss-1"].status = st; } };
 }
 const running = [{ id: "run-1", agentId: ME.id, status: "running" }];
 const poller = (b, answer) => createPaperclipPoller({
@@ -181,6 +181,32 @@ const poller = (b, answer) => createPaperclipPoller({
         answer: async () => "the answer" }).tick();
       assert.deepStrictEqual(writes, [{ status: "done", comment: "the answer" }], `a ${decided} task was reopened`);
       assert.strictEqual(issue.status, decided);
+    }
+  });
+
+  await check("a task a person blocked or cancelled while the bot answered keeps that status", async () => {
+    // Second-pass review of 2.7.0: the close compared only the ask, so a status
+    // change with no comment was overwritten with done — answer and re-wake alike.
+    for (const decided of ["cancelled", "blocked"]) for (const rewake of [false, true]) {
+      const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+      let runs = running;
+      const b = board({ runs, comments });
+      const fetch = async (url, init) => {
+        if (url.endsWith("/issues/iss-1/runs")) return { ok: true, text: async () => JSON.stringify(runs) };
+        return b.fetch(url, init);
+      };
+      const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+      const make = (ans) => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch, answer: ans });
+      if (rewake) {
+        await make(async () => "the answer").tick();
+        runs = [{ id: "run-2", agentId: ME.id, status: "running" }]; b.writes.length = 0;
+        b.setStatus(decided);
+        await make(async () => "unused").tick();
+      } else {
+        await make(async () => { b.setStatus(decided); return "the answer"; }).tick();
+      }
+      assert.deepStrictEqual(b.writes.map((w) => w.body), [{ comment: rewake ? ALREADY_ANSWERED : "the answer" }],
+        `${decided}, ${rewake ? "re-wake" : "answer"}: the status was overwritten`);
     }
   });
 
