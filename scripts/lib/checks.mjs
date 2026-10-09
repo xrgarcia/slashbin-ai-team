@@ -243,6 +243,14 @@ export function checkEcosystem(file, sourceDir) {
         if (/\.(js|mjs|cjs)$/.test(f)) files.push(join(libDir, f));
       }
     }
+    // The pack's hooks and commands run as the bot's children and read its
+    // environment too. Leaving them out reported BOT_MAIL_*, BOT_CALENDAR_NO_ATTENDEES
+    // and BOT_LAND_PATHS as dead: the switches that turn the mail, calendar and
+    // land gates on, recommended for deletion.
+    const pack = join(sourceDir, "skill-pack");
+    const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(join(d, e.name)) : /\.(js|mjs|cjs|py|sh)$/.test(e.name) ? [join(d, e.name)] : []);
+    if (existsSync(pack)) files.push(...walk(pack));
     for (const file of files) {
       const src = readFileSync(file, "utf8");
       // Settings are read three ways and ALL count. Matching only the first form
@@ -253,9 +261,21 @@ export function checkEcosystem(file, sourceDir) {
       // A shared resolver takes the environment as a parameter and reads `env.NAME`.
       // Anchored so `.env` filenames and `cleanEnv.NAME` deletions do not count.
       for (const m of src.matchAll(/(?<![.\w])env\.([A-Z][A-Z0-9_]*)/g)) read.add(m[1]);
+      // Python and shell, for the pack's hooks.
+      for (const m of src.matchAll(/(?:environ\.get\(|environ\[|getenv\()\s*["']([A-Z][A-Z0-9_]*)["']/g)) read.add(m[1]);
+      for (const m of src.matchAll(/\$\{?([A-Z][A-Z0-9_]*)/g)) if (file.endsWith(".sh")) read.add(m[1]);
+    }
+    // A bot's MCP servers read its environment through `${NAME}` in the .mcp.json
+    // of its working directory. Only the names are taken from it.
+    for (const b of parseFleet(file)) {
+      const mcp = b.claudeCwd && join(b.claudeCwd, ".mcp.json");
+      if (!mcp || !existsSync(mcp)) continue;
+      for (const m of readFileSync(mcp, "utf8").matchAll(/\$\{([A-Z][A-Z0-9_]*)(?::-[^}]*)?\}/g)) read.add(m[1]);
     }
     const set = [...text.matchAll(/^\s*([A-Z][A-Z0-9_]*)\s*:/gm)].map((m) => m[1]);
-    const dead = [...new Set(set)].filter((k) => !read.has(k) && k !== "NODE_ENV");
+    // git and gh read their own: GIT_AUTHOR_NAME, GIT_SSH_COMMAND, GH_TOKEN, ...
+    const toolEnv = (k) => /^(GIT|GH)_/.test(k) || k === "GITHUB_TOKEN";
+    const dead = [...new Set(set)].filter((k) => !read.has(k) && k !== "NODE_ENV" && !toolEnv(k));
     out.push(dead.length
       ? warn("ecosystem: dead settings", dead.join(", "), "These are set but read by no source file — remove them, or they will be mistaken for working configuration.")
       : ok("ecosystem: dead settings", "none"));
@@ -387,6 +407,7 @@ export function parseFleet(file) {
     const name = /^\s*BOT_NAME:\s*['"]([^'"]+)['"]/m.exec(block);
     if (!name) continue;
     const tokenRef = /^\s*DISCORD_TOKEN:\s*process\.env\.([A-Z0-9_]+)/m.exec(block);
+    const paperclipKeyRef = /^\s*PAPERCLIP_API_KEY:\s*process\.env\.([A-Z0-9_]+)/m.exec(block);
     // Values may be plain strings OR template literals built from top-level
     // consts — `BOT_STATE_DIR: `${BOT_DATA}/engineering-manager``. Matching only
     // quotes silently returned null for those, so checkStateDir fell back to the
@@ -417,6 +438,11 @@ export function parseFleet(file) {
       historyDir: pick("BOT_HISTORY_DIR"),
       allowedUsers: pick("ALLOWED_USERS"),
       sessionTimeoutMs: Number(pick("SESSION_TIMEOUT_MS")) || null,
+      paperclipUrl: pick("PAPERCLIP_URL"),
+      // A literal key is caught by checkEcosystem's credentials check; this is
+      // only ever a variable NAME.
+      paperclipKeyVar: paperclipKeyRef ? paperclipKeyRef[1] : null,
+      paperclipKeyLiteral: !paperclipKeyRef && /^\s*PAPERCLIP_API_KEY:/m.test(block),
     });
   }
   return bots;
@@ -470,6 +496,53 @@ export async function checkFleet(file, harnessDir, env = process.env) {
       name: `${label}: schedules`,
     });
     out.push({ ...checkRunningCodeFresh(harnessDir, b.name), name: `${label}: running code` });
+    const board = await checkPaperclip(b, harnessDir, env);
+    if (board) out.push({ ...board, name: `${label}: Paperclip` });
   }
   return out;
+}
+
+/**
+ * A bot on a Paperclip board: will its connector come on, and does the board
+ * take its key? A bot whose key was revoked, or whose CLAUDE_CWD the connector
+ * refuses, logs one line at startup and then answers no task; the board shows
+ * the task failing 20 minutes later. Null when the bot is on no board.
+ */
+export async function checkPaperclip(bot, harnessDir, env = process.env, { fetch: fetchImpl = fetch, timeoutMs = 10000 } = {}) {
+  const name = "Paperclip";
+  const { paperclipUrl: url, paperclipKeyVar: keyVar } = bot;
+  const hasKey = keyVar || bot.paperclipKeyLiteral;
+  if (!url && !hasKey) return null;
+  if (!url || !hasKey) {
+    return warn(name, `${url ? "PAPERCLIP_API_KEY" : "PAPERCLIP_URL"} is not set, so the connector is off`,
+      "Set both to put this bot on the board, or neither.");
+  }
+  // The same test the bot makes at startup (bot.js), against the folders known
+  // here: the bot's state folder and the harness.
+  const { boardCwdDenied } = require_("../../lib/permission-mode.js");
+  const denied = [bot.stateDir, harnessDir].filter(Boolean);
+  if (bot.claudeCwd && boardCwdDenied(denied, bot.claudeCwd)) {
+    return bad(name, `connector stays off: CLAUDE_CWD ${bot.claudeCwd} is the harness or state folder, or inside one`,
+      "A board run cannot keep that folder closed. Point CLAUDE_CWD at the folder board tasks should read.");
+  }
+  if (!keyVar) return warn(name, "PAPERCLIP_API_KEY is a literal, not a process.env reference", "Move it to the environment.");
+  if (!env[keyVar]) {
+    return warn(name, `${keyVar} is not set in this shell`,
+      "Run doctor in the same environment PM2 launches from, or this bot's board key cannot be verified.");
+  }
+  let res;
+  try {
+    res = await fetchImpl(`${url.replace(/\/+$/, "")}/api/agents/me`, {
+      headers: { authorization: `Bearer ${env[keyVar]}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    return bad(name, `${url} unreachable (${err.message})`, "Check PAPERCLIP_URL and that the board is up.");
+  }
+  if (res.status === 401 || res.status === 403) {
+    return bad(name, `${url} rejected ${keyVar}`, "The key was revoked or belongs to another board. Mint a new agent key and store it in the same variable.");
+  }
+  if (!res.ok) return bad(name, `${url} answered HTTP ${res.status}`, "Check PAPERCLIP_URL and that the board is up.");
+  const me = await res.json().catch(() => ({}));
+  return ok(name, `${url}, signed in as ${me.name ?? "an unnamed agent"}`);
 }
