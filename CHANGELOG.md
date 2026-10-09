@@ -88,8 +88,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shared with the Discord sessions in the same folder, is off for a board run,
   and no settings file is read for one: an approval made for Discord sessions
   (in `BOT_SETTINGS`, the repo's or the user's settings) does not carry over.
-  The bot's
-  Discord token and bridge token are withheld from a board run as well, and so is
+  A board run's environment carries none of the bot's own configuration (every
+  `BOT_*` variable but the few the skill pack's hooks read, `MCP_CONFIG*`, the
+  Paperclip key, the Discord and bridge tokens), so a credential inside an inline
+  `BOT_SETTINGS` cannot be printed into a reply. Withheld as well is
   the whole harness folder (its `.env`, logs and default state): a bot whose
   `CLAUDE_CWD` is the harness folder gives board runs nothing to read. An answer whose post fails is
   kept (across a restart) and re-posted; the task is never run twice. A comment

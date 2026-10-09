@@ -5,8 +5,8 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, privateMemoryDeny, boardArgs, boardSettings, SYSTEM_READ } = require("../lib/permission-mode");
-const { readFileSync, writeFileSync, mkdtempSync, mkdirSync } = require("fs");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, SYSTEM_READ } = require("../lib/permission-mode");
+const { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
 const { spawnSync } = require("child_process");
@@ -97,6 +97,23 @@ check("restricted sessions read no settings file, so only the bot's list approve
   assert.ok(!bypass.includes("--setting-sources"), "bypass argv must stay the historical one");
   // --add-dir loads that folder's CLAUDE.md only with this set.
   assert.match(bot, /if \(opts\.noBufferContext \|\| PERMISSION_MODE === "restricted"\) cleanEnv\.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";/);
+});
+
+check("a board run gets none of the bot's own configuration, but keeps what the hooks read", () => {
+  // Second pass on e73ddeb: BOT_SETTINGS='{"env":{"DISCORD_TOKEN":"…"}}' reached
+  // the board run, where an approved printenv would post it.
+  for (const name of ["BOT_SETTINGS", "BOT_SYSTEM_PROMPT", "BOT_PERMISSION_ALLOW", "BOT_SOMETHING_ADDED_LATER",
+    "MCP_CONFIG", "MCP_CONFIG_EXTRA", "PAPERCLIP_API_KEY", "HANK_PAPERCLIP_API_KEY", "DISCORD_TOKEN"]) {
+    assert.ok(withheldFromBoard(name), `${name} reaches a board run`);
+  }
+  for (const name of ["PATH", "HOME", "GIT_AUTHOR_NAME", ...BOARD_BOT_ENV]) assert.ok(!withheldFromBoard(name), `${name} is withheld`);
+  // Every BOT_* the skill pack reads is kept or private: a gate whose variable is
+  // withheld turns itself off.
+  const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]);
+  const read = new Set(walk(join(__dirname, "..", "skill-pack")).flatMap((f) => readFileSync(f, "utf8").match(/BOT_[A-Z_]+/g) ?? []));
+  for (const name of read) {
+    assert.ok(BOARD_BOT_ENV.includes(name) || PRIVATE_MEMORY_ENV.includes(name), `the skill pack reads ${name}: add it to BOARD_BOT_ENV or PRIVATE_MEMORY_ENV`);
+  }
 });
 
 console.log("\nPermission mode — a summary run is narrow in every mode");
@@ -204,17 +221,18 @@ check("a board run drops every memory variable and denies the path each one name
     assert.ok(m, `${name} is no longer published — update PRIVATE_MEMORY_ENV`);
     return m[1];
   }));
-  assert.match(src, /if \(opts\.noBufferContext\) \{\s*for \(const name of \[\.\.\.PRIVATE_MEMORY_ENV, \.\.\.DISCORD_CREDENTIAL_ENV\]\) delete cleanEnv\[name\];/);
+  assert.match(src, /if \(opts\.noBufferContext\) \{\s*for \(const name of Object\.keys\(cleanEnv\)\) if \(withheldFromBoard\(name\)\) delete cleanEnv\[name\];/);
+  for (const name of PRIVATE_MEMORY_ENV) assert.ok(withheldFromBoard(name), `${name} reaches a board run`);
   // Second-pass review of 2.7.0: a bypass board run could print the bot's
   // Discord token into its reply. Every credential the bot itself reads that
   // gives Discord access must be withheld.
   for (const name of ["DISCORD_TOKEN", "BRIDGE_TOKEN"]) {
-    assert.ok(DISCORD_CREDENTIAL_ENV.includes(name), `${name} reaches a board run`);
+    assert.ok(DISCORD_CREDENTIAL_ENV.includes(name) && withheldFromBoard(name), `${name} reaches a board run`);
     assert.ok(src.includes(`process.env.${name}`), `${name} is no longer read by the bot — revisit this list`);
   }
   // The withholding runs after every variable is set and before the spawn.
   const at = (re) => src.search(re);
-  assert.ok(at(/cleanEnv\.BOT_CHANNEL_ID = /) < at(/DISCORD_CREDENTIAL_ENV\]\) delete/) && at(/DISCORD_CREDENTIAL_ENV\]\) delete/) < at(/spawn\(CLAUDE_BIN, safeArgs/),
+  assert.ok(at(/cleanEnv\.BOT_CHANNEL_ID = /) < at(/withheldFromBoard\(name\)\) delete/) && at(/withheldFromBoard\(name\)\) delete/) < at(/spawn\(CLAUDE_BIN, safeArgs/),
     "the credentials are removed before they are set, or after the spawn");
   assert.match(src, /deny: \[PERMISSION_DENY, \.\.\.privateMemoryDeny\(boardDeniedPaths\(\)\)\]/, "the board run no longer denies the memory paths");
   // Second pass on e4411f4: files already sent to Discord sit in the outbox,

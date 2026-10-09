@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, privateMemoryDeny, boardArgs, boardSettings } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -1984,7 +1984,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     cleanEnv.BOT_SCHEDULES_FILE = SCHEDULES_FILE;
     cleanEnv.BOT_CHANNEL_ID = String(channelId);
     if (opts.noBufferContext) {
-      for (const name of [...PRIVATE_MEMORY_ENV, ...DISCORD_CREDENTIAL_ENV]) delete cleanEnv[name];
+      for (const name of Object.keys(cleanEnv)) if (withheldFromBoard(name)) delete cleanEnv[name];
       // Claude Code's project auto-memory is shared with the Discord sessions in
       // the same CLAUDE_CWD and loads at startup, before any tool runs. Off here
       // and in boardSettings; the CLI reads this variable first.
