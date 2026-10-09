@@ -358,6 +358,24 @@ check("no invocation hardcodes the skip-permissions flags", () => {
     "a call site still passes the skip flags directly, bypassing the mode");
 });
 
+check("bypass keeps BOT_PERMISSION_DENY", () => {
+  // A bypass bot with a deny list must not silently lose it: deny rules hold under
+  // --dangerously-skip-permissions, so the harness passes them on.
+  const fn = /function permissionArgs[\s\S]*?\n}/.exec(bot)[0];
+  const bypass = /if \(PERMISSION_MODE === "bypass"\) \{[\s\S]*?\n  \}/.exec(fn);
+  assert.ok(bypass, "bypass branch not found");
+  assert.ok(/PERMISSION_DENY \? \["--disallowedTools", PERMISSION_DENY\]/.test(bypass[0]),
+    "the bypass branch drops the deny list");
+});
+
+check("BOT_SETTINGS reaches every session", () => {
+  assert.ok(/\.\.\.settingsArgs\(\{ board: Boolean\(opts\.noBufferContext\) \}\),/.test(bot), "the session argv never passes --settings");
+  // A board run's settings are the bot's own with the sandbox layered on, never instead of them.
+  const fn = /function settingsArgs[\s\S]*?\n}/.exec(bot)[0];
+  assert.ok(/if \(!board\) return SESSION_SETTINGS \? \["--settings", SESSION_SETTINGS\] : \[\];/.test(fn), "a Discord run lost BOT_SETTINGS");
+  assert.ok(/boardSettings\(base,/.test(fn) && /SESSION_SETTINGS/.test(fn.split("boardSettings")[0]), "a board run dropped BOT_SETTINGS");
+});
+
 check("restricted is the default, bypass must be asked for", () => {
   const perm = readFileSync(join(REPO, "lib/permission-mode.js"), "utf8");
   assert.ok(/return \{ mode: "restricted", source: "built-in default" \}/.test(perm),
@@ -383,10 +401,51 @@ check("the resolved mode reports where it came from", () => {
 
 check("restriction uses --tools, which is the flag that actually restricts", () => {
   // Measured 2026-08-09: --allowedTools and --permission-mode plan restrict
-  // NOTHING in -p mode; only --tools changes the exposed tool set. Using
-  // --allowedTools here would be security theater.
+  // NOTHING in -p mode; only --tools changes the exposed tool set.
   assert.ok(/"--tools"/.test(bot), "must restrict via --tools");
-  assert.ok(!/"--allowedTools"/.test(bot), "--allowedTools does not restrict anything in -p mode");
+});
+
+check("restricted sessions deny what is not pre-approved, so MCP tools are gated too", () => {
+  // Measured 2026-10-08: --tools leaves every MCP tool exposed, and a user-level
+  // bypassPermissions default runs them unasked. dontAsk is the mode that denies;
+  // --allowedTools is only meaningful beside it, so it may never appear alone.
+  const guarded = /function permissionArgs[\s\S]*?\n}/.exec(bot)[0];
+  assert.ok((guarded.match(/"dontAsk"/g) || []).length >= 1,
+    "the restricted session path must run in dontAsk");
+  assert.ok(/"--allowedTools", attachmentReadRule\(ATTACHMENTS_DIR\),\s*\.\.\.\(PERMISSION_ALLOW \? \[PERMISSION_ALLOW\]/.test(guarded),
+    "BOT_PERMISSION_ALLOW must reach --allowedTools, after the uploads-folder rule");
+  assert.ok(!/"--allowedTools"/.test(bot.replace(guarded, "")),
+    "--allowedTools outside permissionArgs() restricts nothing without dontAsk");
+  const perm = readFileSync(join(REPO, "lib/permission-mode.js"), "utf8");
+  assert.ok(/function summarizerArgs[\s\S]*?"--permission-mode", "dontAsk"/.test(perm), "summary runs must run in dontAsk");
+});
+
+check("MCP_CONFIG_STRICT holds without MCP_CONFIG, and keeps the repo's own config", () => {
+  // Second-pass review of 2.7.0: with MCP_CONFIG unset, mcpArgs() returned []
+  // before looking at strict, so the host's servers stayed and EXTRA was dropped.
+  // Measured 2026-10-08: --strict-mcp-config alone also drops CLAUDE_CWD/.mcp.json.
+  const fn = /function mcpArgs\(\) \{[\s\S]*?\n\}/.exec(bot)[0];
+  const { mkdtempSync, writeFileSync, existsSync } = require("fs");
+  const dir = mkdtempSync(join(require("os").tmpdir(), "mcp-"));
+  const repoConfig = join(dir, ".mcp.json");
+  const { resolve, relative } = require("path");
+  const run = (env, cwd = dir) => new Function("process", "join", "resolve", "existsSync", "CLAUDE_CWD", `${fn}; return mcpArgs();`)(
+    { env }, join, resolve, existsSync, cwd);
+  assert.deepStrictEqual(run({ MCP_CONFIG_STRICT: "true" }), ["--strict-mcp-config"]);
+  writeFileSync(repoConfig, "{}");
+  assert.deepStrictEqual(run({ MCP_CONFIG_STRICT: "true", MCP_CONFIG_EXTRA: "{x}" }),
+    ["--mcp-config", repoConfig, "--mcp-config", "{x}", "--strict-mcp-config"]);
+  // A relative CLAUDE_CWD still yields an absolute path: Claude runs inside it.
+  assert.deepStrictEqual(run({ MCP_CONFIG_STRICT: "true" }, relative(process.cwd(), dir)),
+    ["--mcp-config", repoConfig, "--strict-mcp-config"]);
+  assert.deepStrictEqual(run({ MCP_CONFIG: "/a.json", MCP_CONFIG_STRICT: "true" }),
+    ["--mcp-config", "/a.json", "--strict-mcp-config"]);
+  assert.deepStrictEqual(run({}), [], "without strict, the repo's own config loads by itself");
+});
+
+check("MCP_CONFIG_EXTRA is a second --mcp-config, still under strict", () => {
+  assert.ok(/MCP_CONFIG_EXTRA \? \["--mcp-config", process\.env\.MCP_CONFIG_EXTRA\]/.test(bot),
+    "MCP_CONFIG_EXTRA must reach a second --mcp-config");
 });
 
 check("summarizers never get write or execute tools when restricted", () => {
@@ -394,14 +453,14 @@ check("summarizers never get write or execute tools when restricted", () => {
   assert.ok(/BOT_SUMMARIZER_TOOLS \|\| "Read"/.test(bot), "summarizer default should be read-only");
 });
 
-check("summarize.js resolves the mode the same way bot.js does", () => {
+check("summarize.js builds its flags exactly as bot.js's summaries do", () => {
+  // Second-pass review of 2.7.0: under bypass both summarizers ran with every
+  // tool and the skip flags, on chat text from anyone in the channel.
   const sum = readFileSync(join(REPO, "summarize.js"), "utf8");
-  assert.ok(/resolvePermissionMode/.test(sum),
-    "summarize.js must use the SHARED resolver — a second copy is how the host default gets honoured in one process and ignored in the other");
+  assert.ok(/permissionArgs: summarizerArgs\(/.test(sum), "summarize.js must use the shared summary flags");
+  assert.ok(!/dangerously-skip-permissions/.test(sum), "summarize.js still has a skip-permissions path");
   assert.ok(!/process\.env\.BOT_PERMISSION_MODE/.test(sum),
-    "summarize.js still reads the env var directly, bypassing the precedence rules");
-  assert.ok(!/^\s*"--dangerously-skip-permissions",\s*$/m.test(sum.replace(/\?[\s\S]*?:/, "")),
-    "summarize.js still hardcodes the skip flags outside the mode check");
+    "summarize.js reads the mode; a summary's flags do not depend on it");
 });
 
 check("an unknown permission mode fails at startup", () => {

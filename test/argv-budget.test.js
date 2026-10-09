@@ -113,13 +113,13 @@ check("a truncated buffer keeps the NEWEST lines and says it was cut", () => {
 check("everyday input is untouched — no truncation, both sections present", () => {
   const r = budgetContext({
     summaries: ["yesterday: we shipped the thing"],
-    buffer: "[09:00] owner: morning",
+    buffer: "[09:00] alex: morning",
     maxBytes: 65536,
   });
   assert.strictEqual(r.droppedSummaries, 0);
   assert.strictEqual(r.bufferTruncated, false);
   assert.ok(r.text.includes("we shipped the thing"));
-  assert.ok(r.text.includes("[09:00] owner: morning"));
+  assert.ok(r.text.includes("[09:00] alex: morning"));
   assert.ok(!/omitted/i.test(r.text), "nothing was dropped, so nothing should be announced");
 });
 

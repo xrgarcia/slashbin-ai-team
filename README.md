@@ -161,14 +161,14 @@ Put a `.mcp.json` in your project directory:
 }
 ```
 
-Any MCP server works. Connected MCP tools stay available in `restricted` mode — the tool allowlist governs the built-ins.
+Any MCP server works. In `restricted` mode an MCP tool runs only if `BOT_PERMISSION_ALLOW` names it (`mcp__server` for a whole server, `mcp__server__tool` for one tool). Set `MCP_CONFIG_STRICT=true` to load only the servers in `MCP_CONFIG` and none of the host's.
 
 ## Tool exposure
 
 | `BOT_PERMISSION_MODE` | Behaviour |
 |---|---|
-| `restricted` *(default)* | Only `BOT_ALLOWED_TOOLS` — read-only built-ins by default — plus connected MCP tools |
-| `bypass` | Every tool, no permission checks |
+| `restricted` *(default)* | Only `BOT_ALLOWED_TOOLS` — read-only built-ins by default. Runs in `dontAsk` mode: anything else, MCP tools included, is denied unless `BOT_PERMISSION_ALLOW` pre-approves it. No user or repo settings file is read, so none can approve a tool; put the bot's own settings in `BOT_SETTINGS`. CLAUDE.md still loads |
+| `bypass` | Every tool, no permission prompts. `BOT_PERMISSION_DENY` still applies; pair it with a `BOT_SETTINGS` sandbox to keep the shell off the rest of the machine |
 
 **Use `bypass` only for a bot you intend to let write code and run commands, and only alongside a real `ALLOWED_USERS`.** In that configuration anyone who can reach the bot can run commands on your machine. It warns on every start.
 
@@ -224,6 +224,8 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `CLAUDE_CWD` | current dir | **Your** project repo — its `CLAUDE.md` is the bot's role |
 | `BOT_NAME` | `bot` | Instance name; scopes pid, log and session files |
 | `MCP_CONFIG` | *(none)* | Path to `.mcp.json` if not in `CLAUDE_CWD` |
+| `MCP_CONFIG_STRICT` | `false` | `true` loads ONLY the servers in `MCP_CONFIG` (`--strict-mcp-config`), or in `CLAUDE_CWD`'s own config when `MCP_CONFIG` is unset |
+| `MCP_CONFIG_EXTRA` | *(none)* | A second `--mcp-config` (path or inline JSON) beside `MCP_CONFIG` — e.g. one claude.ai connector as `claudeai-proxy` while strict drops the rest |
 | `BOT_SKILL_PACK` | `<harness>/skill-pack` | Harness-owned skills loaded into every bot. Empty disables |
 | `BOT_EXTRA_SKILL_PACKS` | *(none)* | Additional plugin directories, comma-separated |
 
@@ -233,6 +235,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `ALLOWED_USERS` | *(empty = everyone)* | User IDs allowed to drive the bot |
 | `BOT_REQUIRE_ALLOWLIST` | `false` | Refuse to start when `ALLOWED_USERS` is empty |
 | `MONITOR_CHANNELS` | *(none)* | Channels answered without an @mention |
+| `REPLY_FINAL_TEXT_ONLY` | `false` | `true` posts only the text written after the run's last tool call; anything said before a tool call is dropped from the reply |
 | `ALLOWED_CHANNELS` | *(none)* | Restrict responses to these channels |
 | `ALLOWED_BOTS` | *(none)* | Peer bot IDs allowed to interact |
 | `MAX_BOT_EXCHANGES` | `2` | Consecutive bot-to-bot exchanges before stopping |
@@ -243,7 +246,16 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `BOT_PERMISSION_MODE` | `restricted` | `restricted` or `bypass`. This bot only |
 | `BOT_PERMISSION_MODE_DEFAULT` | — | Host-wide default for bots that set no `BOT_PERMISSION_MODE` |
 | `BOT_ALLOWED_TOOLS` | `Read,Glob,Grep,WebFetch,WebSearch,TodoWrite` | Built-ins exposed in `restricted` |
-| `BOT_SUMMARIZER_TOOLS` | `Read` | Tools the summarizer may use |
+| `BOT_BOARD_TOOLS` | `Read,Glob,Grep` | Paperclip board runs only, in every mode: the built-in tools a board run gets |
+| `BOT_BOARD_PERMISSION_ALLOW` | *(none)* | Paperclip board runs only: permission rules pre-approved for a board run, e.g. `mcp__my-db`. A `Bash` rule here runs sandboxed to `CLAUDE_CWD` |
+| `BOT_PERMISSION_ALLOW` | *(none)* | `restricted` only: comma-separated permission rules pre-approved in `dontAsk` mode, e.g. `mcp__my-db,Bash(gh issue list:*)` |
+| `BOT_PERMISSION_DENY` | *(none)* | Comma-separated permission rules always denied; deny beats allow, e.g. `Bash(gh *--repo*)` to keep an allowed `gh` command on one repo. Honoured in `bypass` too: nothing prompts, but a denied tool or path stays denied |
+| `BOT_SETTINGS` | *(none)* | Claude Code settings (a path or inline JSON) passed to every session with `--settings`, which the repository's own settings cannot loosen. E.g. a shell sandbox for a `bypass` bot: `{"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"filesystem":{"denyRead":["~/"],"allowRead":["/srv/bot-repo"]}}}`. Invalid inline JSON stops the bot at startup |
+| `BOT_MAIL_ALLOWED_RECIPIENTS` | *(none)* | With the claude.ai Gmail `send_message` tool allowed: the only addresses it may send to, in to, cc or bcc. Set, the pack's mail gate also refuses drafts, replies and unknown arguments, and fails closed. Unset, sends are not checked |
+| `BOT_MAIL_SUBJECT_PREFIX` | *(none)* | With `BOT_MAIL_ALLOWED_RECIPIENTS` set: every sent subject must start with this, e.g. `Bot:` |
+| `BOT_CALENDAR_NO_ATTENDEES` | *(none)* | `true`: the pack's calendar gate checks the claude.ai Google Calendar `create_event`, `update_event` and `delete_event`. It refuses any attendee, any calendar but `primary`, unknown arguments, and an update or delete without `notificationLevel: "NONE"`, and fails closed. It cannot see an existing event's guests or title. Unset, calendar writes are not checked |
+| `BOT_LAND_PATHS` | *(none)* | Comma-separated globs, relative to the bot's repo (`CLAUDE_CWD`), of the files the pack's `land` skill may commit and push to the checkout's upstream branch; `!glob` excludes, e.g. `notes/**,skills/**,!skills/guarded/**`. It lands only the files it is named, refuses a checkout with unpushed commits, and pushes the exact commit it checked (built outside the checkout, so another session's commit is never published and local commit hooks do not run); a rejected push leaves nothing behind. Pair it with `Edit(...)` rules on the same paths and an allow rule for the command. Unset, landing is off |
+| `BOT_SUMMARIZER_TOOLS` | `Read` | Tools a summary run may use, in every mode. Summaries never get MCP servers or the skip flags, and take `BOT_PERMISSION_DENY` and `BOT_SETTINGS` |
 
 ### Claude
 | Variable | Default | Description |
@@ -283,7 +295,7 @@ ceiling, and the clamp that keeps it under cuts from the end.
 |---|---|---|
 | `BOT_STATE_DIR` | `BOT_HISTORY_DIR` | **One root for everything a bot remembers** — buffer, sessions, and the default parent for the rest |
 | `BOT_HISTORY_DIR` | `.bot-history` | Daily summaries only — the reviewable record |
-| `BOT_ATTACHMENTS_DIR` | `<history>/attachments` | Inbound files. Worth pointing **outside any git repo** — these are arbitrary user-supplied binaries, and a working tree loses them to `git clean -x` or a re-clone |
+| `BOT_ATTACHMENTS_DIR` | `<history>/attachments` | Inbound files. A `restricted` bot can always read this folder; no `BOT_PERMISSION_ALLOW` rule is needed. Worth pointing **outside any git repo** — these are arbitrary user-supplied binaries, and a working tree loses them to `git clean -x` or a re-clone |
 | `BOT_OUTBOX_DIR` | `<history>/outbox` | Files written here are sent to the user |
 | `SUMMARIZE_INTERVAL_MS` | `0` *(off)* | Background summarization interval |
 | `SUMMARIZE_CHANNELS` | `MONITOR_CHANNELS` | Channels to summarize |
@@ -348,6 +360,18 @@ Two busy weeks of summaries will reach it. The default is also a cost decision �
 | `BRIDGE_TOKEN` | — | Required to send a signal when the bridge is not on loopback |
 | `BRIDGE_SIGNAL_MEMORY_MS` | `300000` | How long a signal with nothing waiting is remembered |
 | `BRIDGE_SIGNAL_DATA_MAX` | `2000` | Characters of signal text kept before truncation |
+
+### Paperclip
+Answer tasks assigned to this bot on a [Paperclip](https://paperclip.ing) board. A task Paperclip hands to an agent is checked out to the run it opened, and writes to a checked-out task must come from that run, so the agent's command on the board must hold its run open until a comment lands under it; the bot polls its inbox, answers through the same run path as Discord, and posts the reply under the run. A board is read by people outside the bot's Discord channels, so a board run gets least privilege in every permission mode, `bypass` included: only `BOT_BOARD_TOOLS` (read-only built-ins by default), in `dontAsk` mode, which confines the read tools to `CLAUDE_CWD`, plus whatever `BOT_BOARD_PERMISSION_ALLOW` pre-approves. A Paperclip run cannot reach Discord memory — the buffer, summaries, uploads, sessions, scheduled jobs, the state folder and the outbox of files already sent are kept out of its prompt and environment, denied to the read tools, and unreadable to any shell it is allowed, which always runs in Claude Code's sandbox confined to `CLAUDE_CWD` (the host needs it: `bwrap` and `socat` on Linux; without it the task gets the fallback reply; besides `CLAUDE_CWD` it reads only the system folders — `/usr`, `/bin`, `/lib`, `/etc` and the like — so a tool kept anywhere else, such as the home folder, needs an `allowRead` in `BOT_SETTINGS`; nothing else in `BOT_SETTINGS` can loosen a board run's sandbox). No settings file — user, project or local — is read for a board run, and of `BOT_SETTINGS` it takes only the model and those sandbox rules, so no approval made for Discord sessions carries over; the `CLAUDE_CWD` CLAUDE.md still loads. Claude Code's project auto-memory, which the Discord sessions in the same `CLAUDE_CWD` write and the CLI loads at startup, is off for a board run. Its environment carries none of the bot's own configuration — every `BOT_*` variable except the few the skill pack's hooks read (the mail and calendar gates among them), `MCP_CONFIG*`, anything naming Paperclip, `DISCORD_TOKEN` and `BRIDGE_TOKEN` — since a credential inside, say, an inline `BOT_SETTINGS` could otherwise be printed into a reply; other host variables, such as one an MCP server needs, still reach it, so give a board run a shell only if those can be read by every board reader. The whole harness folder is withheld too (its `.env`, logs and default state), so set `CLAUDE_CWD` to the folder board tasks should read: a bot whose `CLAUDE_CWD` is the harness or state folder, or inside one, keeps the connector off and logs why, since Claude Code's sandbox always opens its working directory. Each task keeps its own session.
+
+This connector is the inbound half only. For a bot to create, assign or comment on tasks itself, add Paperclip's own MCP server (`@paperclipai/mcp-server`) to that bot's MCP config and allow its tools. Give every agent its own key, used by both halves, and never share it between bots — the board's record of who did what is only as true as that. The bot hides `PAPERCLIP_API_KEY` from Claude, so hand the MCP server its key under another name: set it in the bot's `env` (pm2 passes only what the ecosystem lists) and reference it from the MCP config as `${THAT_NAME}`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `PAPERCLIP_URL` | — | Board origin, e.g. `https://board.example.com`. Off unless this and the key are set |
+| `PAPERCLIP_API_KEY` | — | The agent's API key. Removed from the environment Claude runs in |
+| `PAPERCLIP_PROMPT_CHANNEL` | — | Channel id whose `.claude/channel-prompts/` file applies to board replies — use the channel with the same audience as the board |
+| `PAPERCLIP_POLL_MS` | `15000` | How often the inbox is checked |
 
 ### Misc
 | Variable | Default | Description |

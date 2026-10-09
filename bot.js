@@ -3,16 +3,17 @@ const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
 const { WebSocketServer } = require("ws");
 const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync, readlinkSync, renameSync } = require("fs");
-const { join } = require("path");
+const { join, resolve } = require("path");
 const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
+const { createPaperclipPoller, replyCollector } = require("./lib/paperclip");
 
 // --- Logger ---
 const log = pino({
@@ -65,6 +66,12 @@ const ALLOWED_CHANNELS = process.env.ALLOWED_CHANNELS
   ? process.env.ALLOWED_CHANNELS.split(",").filter(Boolean)
   : [];
 const MAX_BOT_EXCHANGES = parseInt(process.env.MAX_BOT_EXCHANGES, 10) || 2;
+// Post only the text written after the run's LAST tool call. Off by default, so
+// every bot that does not set it replies exactly as before. A bot that talks in a
+// channel its customer reads turns it on: anything said before a tool call is
+// the model talking to itself ("Grep the file for titles…"), and when it was
+// joined onto the answer it reached the customer.
+const REPLY_FINAL_TEXT_ONLY = process.env.REPLY_FINAL_TEXT_ONLY === "true";
 const SUMMARIZE_INTERVAL_MS = parseInt(process.env.SUMMARIZE_INTERVAL_MS, 10) || 0;
 const SUMMARIZE_CHANNELS = process.env.SUMMARIZE_CHANNELS
   ? process.env.SUMMARIZE_CHANNELS.split(",").filter(Boolean)
@@ -120,9 +127,26 @@ const CHECKPOINT_FILE = join(STATE_DIR, ".checkpoints.json");
 const { mode: PERMISSION_MODE, source: PERMISSION_MODE_SOURCE } = resolvePermissionMode();
 const DEFAULT_ALLOWED_TOOLS = "Read,Glob,Grep,WebFetch,WebSearch,TodoWrite";
 const ALLOWED_TOOLS = process.env.BOT_ALLOWED_TOOLS || DEFAULT_ALLOWED_TOOLS;
+// --tools only limits the BUILT-IN tools. Every MCP tool the host can see is still
+// exposed, and a user-level `defaultMode: bypassPermissions` lets each one run
+// unasked — measured 2026-10-08: a "restricted" session reached a shell-runner MCP
+// and Klaviyo's send/write tools. So restricted sessions also run in dontAsk mode
+// (deny anything not pre-approved), and BOT_PERMISSION_ALLOW is the pre-approval
+// list: permission rules such as `mcp__some-server`, `mcp__srv__one_tool` or
+// `Bash(gh issue list:*)`. Built-in read tools inside CLAUDE_CWD need no rule.
+const PERMISSION_ALLOW = (process.env.BOT_PERMISSION_ALLOW || "").trim();
+// BOT_PERMISSION_DENY carves exceptions out of an allow rule (deny wins), e.g. a
+// bot allowed `Bash(gh issue edit:*)` on its own repo but denied `Bash(gh *--repo*)`
+// so it cannot point the same command at another one.
+const PERMISSION_DENY = (process.env.BOT_PERMISSION_DENY || "").trim();
 // Summarisation reads a transcript that is already in its prompt. It never needs
 // to write, edit or execute anything.
 const SUMMARIZER_TOOLS = process.env.BOT_SUMMARIZER_TOOLS || "Read";
+// A Paperclip board run's tools and pre-approvals, whatever the bot's mode. The
+// board is read by people outside the bot's channels, so the default is the
+// read-only built-ins, confined to the working directory, and nothing else.
+const BOARD_TOOLS = process.env.BOT_BOARD_TOOLS || "Read,Glob,Grep";
+const BOARD_PERMISSION_ALLOW = (process.env.BOT_BOARD_PERMISSION_ALLOW || "").trim();
 
 /**
  * The permission flags for one invocation.
@@ -130,10 +154,74 @@ const SUMMARIZER_TOOLS = process.env.BOT_SUMMARIZER_TOOLS || "Read";
  * documented one-line upgrade for anyone already running this harness.
  */
 function permissionArgs(kind = "session") {
-  if (PERMISSION_MODE === "bypass") {
-    return ["--allow-dangerously-skip-permissions", "--dangerously-skip-permissions"];
+  // A summary run reads untrusted chat text and needs no tools: narrow in every mode.
+  if (kind === "summarizer") {
+    return summarizerArgs({ tools: SUMMARIZER_TOOLS, deny: PERMISSION_DENY, settings: SESSION_SETTINGS });
   }
-  return ["--tools", kind === "summarizer" ? SUMMARIZER_TOOLS : ALLOWED_TOOLS];
+  // A board run answers people outside the bot's Discord channels: least
+  // privilege in every mode, and no reach into Discord memory.
+  if (kind === "board") {
+    return boardArgs({ tools: BOARD_TOOLS, allow: BOARD_PERMISSION_ALLOW, cwd: CLAUDE_CWD,
+      deny: [PERMISSION_DENY, ...privateMemoryDeny(boardDeniedPaths())].filter(Boolean) });
+  }
+  if (PERMISSION_MODE === "bypass") {
+    // Deny rules still hold under bypass (measured): nothing prompts, but a denied
+    // tool or path stays denied. Unset, the argv is the historical one.
+    return [
+      "--allow-dangerously-skip-permissions", "--dangerously-skip-permissions",
+      ...(PERMISSION_DENY ? ["--disallowedTools", PERMISSION_DENY] : []),
+    ];
+  }
+  return [
+    "--tools", ALLOWED_TOOLS,
+    "--permission-mode", "dontAsk",
+    // dontAsk honors an approval from any settings file, so a user's or the
+    // repo's `mcp__shell` would run without BOT_PERMISSION_ALLOW naming it. No
+    // settings file is read; the bot's own come in through BOT_SETTINGS, and
+    // CLAUDE.md through --add-dir (with CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD).
+    "--setting-sources", "",
+    "--add-dir", CLAUDE_CWD,
+    // The bot's own uploads folder is always readable; dontAsk would deny it.
+    "--allowedTools", attachmentReadRule(ATTACHMENTS_DIR),
+    ...(PERMISSION_ALLOW ? [PERMISSION_ALLOW] : []),
+    ...(PERMISSION_DENY ? ["--disallowedTools", PERMISSION_DENY] : []),
+  ];
+}
+
+// BOT_SETTINGS layers Claude Code settings (a path or inline JSON) over every
+// session through --settings, e.g. a sandbox around the shell. Settings passed this
+// way are not loosened by the repository's own .claude/settings*.json.
+const SESSION_SETTINGS = (process.env.BOT_SETTINGS || "").trim();
+function settingsArgs({ board = false } = {}) {
+  if (!board) return SESSION_SETTINGS ? ["--settings", SESSION_SETTINGS] : [];
+  // A board run sandboxes any shell it is allowed to the working directory, on
+  // top of the bot's own settings. Read per run: a settings file that cannot be read fails the run
+  // rather than starting it without the sandbox. A relative path is read from
+  // CLAUDE_CWD, where Claude itself would resolve it for a Discord session.
+  const base = !SESSION_SETTINGS ? null
+    : JSON.parse(SESSION_SETTINGS.startsWith("{") ? SESSION_SETTINGS : readFileSync(resolve(CLAUDE_CWD, SESSION_SETTINGS), "utf8"));
+  return ["--settings", JSON.stringify(boardSettings(base, boardDeniedPaths(), CLAUDE_CWD))];
+}
+
+// MCP_CONFIG adds servers; it does not remove the host's. MCP_CONFIG_STRICT=true
+// makes it the ONLY source (--strict-mcp-config), so a bot sees its own servers and
+// none of the user-level, plugin or claude.ai connectors on the same machine.
+// MCP_CONFIG_EXTRA is a second --mcp-config (a path or an inline JSON string) for
+// servers that cannot live in the repo's .mcp.json, e.g. ONE claude.ai connector as
+// {"type":"claudeai-proxy","url":…,"id":…} — strict still drops every other one.
+//
+// Strict does not depend on MCP_CONFIG being set. With it unset, strict names the
+// repo's own .mcp.json, which --strict-mcp-config would otherwise drop with the rest.
+function mcpArgs() {
+  const strict = process.env.MCP_CONFIG_STRICT === "true";
+  // Absolute: Claude runs inside CLAUDE_CWD, so a relative path would be resolved twice.
+  const repoConfig = resolve(CLAUDE_CWD, ".mcp.json");
+  const own = process.env.MCP_CONFIG || (strict && existsSync(repoConfig) ? repoConfig : "");
+  return [
+    ...(own ? ["--mcp-config", own] : []),
+    ...(process.env.MCP_CONFIG_EXTRA ? ["--mcp-config", process.env.MCP_CONFIG_EXTRA] : []),
+    ...(strict ? ["--strict-mcp-config"] : []),
+  ];
 }
 
 // How often the "typing…" indicator is refreshed while a request runs.
@@ -427,6 +515,15 @@ if (!VALID_MODES.includes(PERMISSION_MODE)) {
     'Permission mode must be "restricted" (default — expose only BOT_ALLOWED_TOOLS) or "bypass" (all tools, no permission checks)'
   );
   process.exit(EXIT_CONFIG);
+}
+// A malformed inline BOT_SETTINGS would fail every session, one message at a time.
+if (SESSION_SETTINGS.startsWith("{")) {
+  try {
+    JSON.parse(SESSION_SETTINGS);
+  } catch (err) {
+    log.fatal({ err: err.message }, "BOT_SETTINGS is not valid JSON");
+    process.exit(EXIT_CONFIG);
+  }
 }
 // Name the SOURCE, not just the value. On a multi-bot host the question is never
 // "what mode is this bot in" — it is "why is this one different from its
@@ -1025,6 +1122,21 @@ const botExchanges = new Map();
 
 // --- Session continuity: track Claude session IDs per channel for --resume ---
 const SESSION_FILE = join(STATE_DIR, "sessions.json");
+// Where each PRIVATE_MEMORY_ENV variable points, in the same order: Discord
+// memory a board run is denied by path as well as by variable.
+function privateMemoryPaths() {
+  return [HISTORY_DIR, BUFFER_FILE, ATTACHMENTS_DIR, SESSION_FILE, JOB_HISTORY_FILE, SCHEDULES_FILE];
+}
+// Everything a board run must not read. The private-memory paths can be moved
+// out of the state folder one by one, so they are named as well as the folder;
+// the outbox holds every file already sent to Discord, wherever it is put.
+// The harness folder is withheld whole: it holds .env, every instance's log
+// (each request's opening words), and any state left at its defaults. Naming
+// those files one by one kept missing one. A bot that leaves CLAUDE_CWD at the
+// harness folder therefore gives its board runs nothing to read.
+function boardDeniedPaths() {
+  return [...privateMemoryPaths(), STATE_DIR, OUTBOX_DIR, ...new Set([__dirname, process.cwd()])];
+}
 LEGACY_STATE.push([join(__dirname, `.${BOT_NAME}-sessions.json`), SESSION_FILE]);
 // Moved out of the summaries directory: a schedule is the user's, and losing it
 // to a re-clone is the kind of failure nobody notices until a job stops firing.
@@ -1550,10 +1662,10 @@ function createSendQueue(msg, reqLog) {
 // A summary is written as `YYYY-MM-DD-<channel>.md` (lib/summarize-core.js).
 // The window below is a LEXICAL compare against a date string, which is only a
 // date compare for filenames that actually start with one — every letter sorts
-// after every digit, so `acme-report-v3-FULL.md` reads as newer than any date
+// after every digit, so `vendor-spec-v3-FULL.md` reads as newer than any date
 // and is admitted unconditionally. That is not hypothetical: on 2026-06-19 two
-// 64KB and 51KB pasted docs landed here and took the EM bot fully offline with
-// `spawn E2BIG` . The argv budget (lib/argv-budget.js) has since made
+// 64KB and 51KB pasted docs landed here and took a production bot fully offline with
+// `spawn E2BIG`. The argv budget (lib/argv-budget.js) has since made
 // the crash unreachable, which turned this from an outage into something worse
 // to diagnose: the intruder sorts LAST, so it survives the budget while the
 // real summaries — genuinely older — are the ones dropped. The bot stays up and
@@ -1804,7 +1916,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 
     // Head of the prompt, in precedence order: repo overrides, then anything
     // this channel narrows or contradicts. Both are re-read per request.
-    const head = `${systemPromptOverrides()}${channelPrompt(channelId, channelName)}`;
+    // A run that is not from a Discord channel (a Paperclip task) can borrow a
+    // channel's instructions with opts.promptChannel.
+    const head = `${systemPromptOverrides()}${channelPrompt(opts.promptChannel ?? channelId, channelName)}`;
 
     let systemPrompt;
     if (resumeSessionId) {
@@ -1812,7 +1926,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       systemPrompt = `${head}${basePrompt}${channelContext}${fileTransferContext}`;
       reqLog.info("Resume mode: skipping buffer/summary re-injection");
     } else {
-      const context = buildContextPrompt(reqLog);
+      // The buffer holds every channel's conversation. A run whose reply lands
+      // somewhere else (a Paperclip board) must not see it.
+      const context = opts.noBufferContext ? "" : buildContextPrompt(reqLog);
       systemPrompt = context
         ? `${head}${basePrompt}${channelContext}${fileTransferContext}\n\n${context}`
         : `${head}${basePrompt}${channelContext}${fileTransferContext}`;
@@ -1820,12 +1936,14 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 
     const args = [
       "--output-format", "stream-json",
-      ...permissionArgs("session"),
+      // A run whose reply lands outside Discord gets least privilege.
+      ...permissionArgs(opts.noBufferContext ? "board" : "session"),
       ...skillPackArgs(),
       "--verbose",
       "--max-turns", String(CLAUDE_MAX_TURNS),
       ...(process.env.CLAUDE_MODEL ? ["--model", process.env.CLAUDE_MODEL] : []),
-      ...(process.env.MCP_CONFIG ? ["--mcp-config", process.env.MCP_CONFIG] : []),
+      ...mcpArgs(),
+      ...settingsArgs({ board: Boolean(opts.noBufferContext) }),
       "--append-system-prompt", systemPrompt,
     ];
 
@@ -1865,8 +1983,19 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     cleanEnv.BOT_JOB_HISTORY_FILE = JOB_HISTORY_FILE;
     cleanEnv.BOT_SCHEDULES_FILE = SCHEDULES_FILE;
     cleanEnv.BOT_CHANNEL_ID = String(channelId);
+    if (opts.noBufferContext) {
+      for (const name of Object.keys(cleanEnv)) if (withheldFromBoard(name)) delete cleanEnv[name];
+      // Claude Code's project auto-memory is shared with the Discord sessions in
+      // the same CLAUDE_CWD and loads at startup, before any tool runs. Off here
+      // and in boardSettings; the CLI reads this variable first.
+      cleanEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
+    }
+    // A board or restricted run reads no settings file (permissionArgs); its
+    // CLAUDE.md comes in through --add-dir, which loads one only with this set.
+    if (opts.noBufferContext || PERMISSION_MODE === "restricted") cleanEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";
 
     delete cleanEnv.CLAUDECODE;
+    delete cleanEnv.PAPERCLIP_API_KEY;
     delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
     delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
     delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
@@ -2105,6 +2234,10 @@ function handleStreamEvent(event, reqLog, sendMessage, state) {
             // Track files Claude creates for Discord attachment
             // Only attach user-facing files (CSV, PDF, etc.), not config/internal files
             state.toolCalls++;
+            // Everything written so far was working notes, not the answer.
+            // Dropped from the reply AND from the returned response, so the
+            // conversation history records what was posted, not what was thought.
+            if (REPLY_FINAL_TEXT_ONLY) state.setTurnText("");
             state.progress?.tool(block.name, block.input);
             if (block.name === "Write" && block.input?.file_path) {
               const fp = block.input.file_path;
@@ -2725,7 +2858,7 @@ async function runScheduledJobs() {
       // Resolve the channel BEFORE stamping _lastRun. Stamping first marked a job
       // "ran" even when it was skipped for a missing channel — and channels.cache
       // is empty for a moment after a Discord reconnect, so a gateway blip at the
-      // scheduled minute silently burned the run for the day (acme-support, 2026-06-11).
+      // scheduled minute silently burned the run for the day (seen in production, 2026-06-11).
       // Leaving it unstamped keeps it eligible for the 5-minute lookback.
       const channel = client.channels.cache.get(job.channel);
       if (!channel) {
@@ -2805,6 +2938,40 @@ validateSchedulesOnStartup();
 
 // Start scheduler check loop
 setInterval(runScheduledJobs, SCHEDULE_CHECK_MS);
+
+// --- Paperclip ---
+// Tasks assigned to this bot on a Paperclip board, answered through the same
+// run path as Discord (see lib/paperclip.js). Off unless both are set.
+const PAPERCLIP_URL = process.env.PAPERCLIP_URL;
+const PAPERCLIP_API_KEY = process.env.PAPERCLIP_API_KEY;
+// The sandbox binds the working directory writable over its read denials, so a
+// CLAUDE_CWD that is the harness or state folder (or inside one) would open the
+// harness secrets file and the Discord stores to a board shell. Such a bot
+// answers no board.
+const PAPERCLIP_CWD_DENIED = boardCwdDenied(boardDeniedPaths(), CLAUDE_CWD);
+if (PAPERCLIP_URL && PAPERCLIP_API_KEY && PAPERCLIP_CWD_DENIED) {
+  log.error({ cwd: CLAUDE_CWD }, "Paperclip connector off — CLAUDE_CWD is the harness or state folder, or inside one, which a board run cannot keep closed; point it at the folder board tasks should read");
+} else if (PAPERCLIP_URL && PAPERCLIP_API_KEY) {
+  const pLog = log.child({ component: "paperclip" });
+  const promptChannel = process.env.PAPERCLIP_PROMPT_CHANNEL || undefined;
+  const poller = createPaperclipPoller({
+    url: PAPERCLIP_URL,
+    apiKey: PAPERCLIP_API_KEY,
+    stateFile: join(STATE_DIR, "paperclip.json"),
+    log: pLog,
+    // One session per task, so a reply on the task continues its conversation.
+    answer: (prompt, issue) => {
+      const reply = replyCollector();
+      return runClaude(prompt, `paperclip-${issue.identifier}`, pLog.child({ paperclipTask: issue.identifier }),
+        reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true })
+        .then(() => reply.text());
+    },
+  });
+  setInterval(poller.tick, envInt("PAPERCLIP_POLL_MS", 15000, { min: 5000 }));
+  pLog.info({ url: PAPERCLIP_URL, promptChannel: promptChannel ?? null }, "Paperclip connector on");
+} else if (PAPERCLIP_URL || PAPERCLIP_API_KEY) {
+  log.warn("Paperclip connector off — PAPERCLIP_URL and PAPERCLIP_API_KEY must both be set");
+}
 
 // --- Process error handlers ---
 process.on("unhandledRejection", (reason) => {
