@@ -236,7 +236,7 @@ check("a board run's shell is sandboxed to the working directory, on top of the 
   const base = { model: "x", sandbox: { network: { allowedDomains: ["github.com"] }, filesystem: { denyRead: ["/etc/secret"], allowRead: ["/opt/tools"] } } };
   const s = boardSettings(base, ["/repo/bot-history/", "/state/buffer.txt"], "/repo");
   assert.strictEqual(s.model, "x", "the bot's own settings were dropped");
-  assert.deepStrictEqual(s.sandbox.network, base.sandbox.network, "the bot's network rules were dropped");
+  assert.deepStrictEqual(s.sandbox.network, { ...base.sandbox.network, allowAllUnixSockets: false }, "the bot's network rules were dropped");
   assert.strictEqual(s.sandbox.enabled, true);
   // Second pass on 09bb6cd: the CLI loads project auto-memory, shared with the
   // Discord sessions, at startup, before any sandbox or deny rule applies.
@@ -257,6 +257,19 @@ check("a board run's shell is sandboxed to the working directory, on top of the 
   const open = boardSettings({ sandbox: { enabled: false, allowUnsandboxedCommands: true } }, ["/s"], "/repo");
   assert.strictEqual(open.sandbox.enabled, true, "a bot that turns its sandbox off turns it off for board runs too");
   assert.strictEqual(open.sandbox.allowUnsandboxedCommands, false);
+  // Second pass on c2da179: a key of the bot's that loosens the sandbox survived a spread.
+  const loose = boardSettings({ sandbox: { excludedCommands: ["cat:*"], enableWeakerNestedSandbox: true, autoAllowBashIfSandboxed: true,
+    network: { allowedDomains: ["x.com"], allowAllUnixSockets: true }, credentials: { envVars: { deny: ["K"] } },
+    filesystem: { disabled: true, allowWrite: ["/state"], denyWrite: ["/repo/.git"] } } }, ["/state"], "/repo");
+  assert.strictEqual(loose.sandbox.filesystem.disabled, false, "the bot's settings switch the file sandbox off");
+  assert.deepStrictEqual(loose.sandbox.excludedCommands, [], "a command runs outside the sandbox");
+  assert.strictEqual(loose.sandbox.enableWeakerNestedSandbox, false);
+  assert.strictEqual(loose.sandbox.autoAllowBashIfSandboxed, false, "every shell command is pre-approved, not only BOT_BOARD_PERMISSION_ALLOW");
+  assert.strictEqual(loose.sandbox.network.allowAllUnixSockets, false, "a shell can reach any local socket");
+  assert.deepStrictEqual(loose.sandbox.network.allowedDomains, ["x.com"]);
+  assert.deepStrictEqual(loose.sandbox.credentials, { envVars: { deny: ["K"] } }, "a tightening key was dropped");
+  assert.ok(!("allowWrite" in loose.sandbox.filesystem), "a board shell may write where the bot allows");
+  assert.deepStrictEqual(loose.sandbox.filesystem.denyWrite, ["/repo/.git"]);
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
   assert.match(src, /\.\.\.settingsArgs\(\{ board: Boolean\(opts\.noBufferContext\) \}\)/, "the board run no longer gets the sandbox");
   assert.match(src, /boardSettings\(base, boardDeniedPaths\(\), CLAUDE_CWD\)/);
