@@ -248,6 +248,9 @@ check("a board run's shell is sandboxed to the working directory, on top of the 
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
   assert.match(src, /\.\.\.settingsArgs\(\{ board: Boolean\(opts\.noBufferContext\) \}\)/, "the board run no longer gets the sandbox");
   assert.match(src, /boardSettings\(base, boardDeniedPaths\(\), CLAUDE_CWD\)/);
+  // Second pass on 3c32d35: a relative BOT_SETTINGS read from the harness folder
+  // failed every board run while Discord sessions, run in CLAUDE_CWD, found it.
+  assert.match(src, /readFileSync\(resolve\(CLAUDE_CWD, SESSION_SETTINGS\), "utf8"\)/, "a relative settings file is read from the wrong folder");
 });
 
 console.log(`\n${passes} passed, ${failures} failed\n`);

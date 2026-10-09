@@ -190,9 +190,10 @@ function settingsArgs({ board = false } = {}) {
   if (!board) return SESSION_SETTINGS ? ["--settings", SESSION_SETTINGS] : [];
   // A board run sandboxes any shell it is allowed to the working directory, on
   // top of the bot's own settings. Read per run: a settings file that cannot be read fails the run
-  // rather than starting it without the sandbox.
+  // rather than starting it without the sandbox. A relative path is read from
+  // CLAUDE_CWD, where Claude itself would resolve it for a Discord session.
   const base = !SESSION_SETTINGS ? null
-    : JSON.parse(SESSION_SETTINGS.startsWith("{") ? SESSION_SETTINGS : readFileSync(SESSION_SETTINGS, "utf8"));
+    : JSON.parse(SESSION_SETTINGS.startsWith("{") ? SESSION_SETTINGS : readFileSync(resolve(CLAUDE_CWD, SESSION_SETTINGS), "utf8"));
   return ["--settings", JSON.stringify(boardSettings(base, boardDeniedPaths(), CLAUDE_CWD))];
 }
 
