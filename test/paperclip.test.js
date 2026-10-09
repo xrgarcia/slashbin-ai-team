@@ -70,6 +70,18 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.deepStrictEqual(b.writes, [{ key: "PATCH /issues/iss-1", body: { status: "done", comment: "the answer" }, runId: "run-1" }]);
   });
 
+  await check("a comment that lands while the bot is answering keeps the task open for it", async () => {
+    const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "first ask" }];
+    const b = board({ runs: running, comments });
+    const p = poller(b, async () => {
+      comments.push({ id: "h2", authorAgentId: null, createdAt: "2026-01-03T00:00:00Z", body: "and another thing" });
+      return "answer to the first";
+    });
+    await p.tick();
+    assert.deepStrictEqual(b.writes, [{ key: "PATCH /issues/iss-1", body: { comment: "answer to the first" }, runId: "run-1" }],
+      "the answer posts, but the task is not marked done over an ask it never saw");
+  });
+
   await check("a failed run still ends the wait, with the fallback", async () => {
     const b = board({ runs: running });
     await poller(b, async () => { throw new Error("boom"); }).tick();
