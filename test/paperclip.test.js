@@ -6,7 +6,7 @@ const assert = require("assert");
 const { readFileSync, readdirSync, writeFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { pickOpenRun, askOf, askKey, buildTaskPrompt, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED } = require("../lib/paperclip");
+const { pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED } = require("../lib/paperclip");
 
 const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
 let pass = 0, fail = 0;
@@ -451,6 +451,19 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.match(bot, /noBufferContext: true/);
     assert.match(bot, /opts\.noBufferContext \? "" : buildContextPrompt/);
     assert.match(bot, /delete cleanEnv\.PAPERCLIP_API_KEY/);
+  });
+
+  await check("a file the run made is named as not delivered, never left to read as attached", () => {
+    // Second-pass review of 2.7.0: the collector kept only text, so "the report
+    // is attached" closed the task with no report.
+    const r = replyCollector();
+    r.collect("The report is attached.");
+    r.collect({ files: [{ attachment: "/home/bot/outbox/report.csv" }] });
+    assert.strictEqual(r.text(), "The report is attached.\n\nNot delivered: report.csv. Files cannot be attached to a board task — ask for it in a channel that takes files.");
+    const plain = replyCollector(); plain.collect("just text");
+    assert.strictEqual(plain.text(), "just text");
+    assert.match(buildTaskPrompt({ identifier: "T-1", title: "Q" }, [], ME, "u"), /cannot attach a file/);
+    assert.match(bot, /reply\.collect, \{\}, "paperclip"/, "the board run collects through replyCollector");
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

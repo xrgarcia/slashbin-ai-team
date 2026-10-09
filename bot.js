@@ -13,7 +13,7 @@ const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs }
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
-const { createPaperclipPoller } = require("./lib/paperclip");
+const { createPaperclipPoller, replyCollector } = require("./lib/paperclip");
 
 // --- Logger ---
 const log = pino({
@@ -2904,11 +2904,10 @@ if (PAPERCLIP_URL && PAPERCLIP_API_KEY) {
     log: pLog,
     // One session per task, so a reply on the task continues its conversation.
     answer: (prompt, issue) => {
-      const parts = [];
-      const collect = (m) => { if (typeof m === "string") parts.push(m); };
+      const reply = replyCollector();
       return runClaude(prompt, `paperclip-${issue.identifier}`, pLog.child({ paperclipTask: issue.identifier }),
-        collect, {}, "paperclip", null, { promptChannel, noBufferContext: true })
-        .then(() => parts.join("\n\n"));
+        reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true })
+        .then(() => reply.text());
     },
   });
   setInterval(poller.tick, envInt("PAPERCLIP_POLL_MS", 15000, { min: 5000 }));

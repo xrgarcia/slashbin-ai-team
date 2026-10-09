@@ -73,6 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept (across a restart) and re-posted; the task is never run twice. A comment
   that lands while the bot is answering keeps the task open, so it is answered next;
   a re-wake of an answered task gets a short note under its run, never a second run.
+  A file the run makes is named in the reply as not delivered, since a board
+  comment cannot carry one.
   A board task
   cannot book a follow-up: `schedule.mjs` refuses any destination that is not a
   Discord channel, rather than saving a job that would never fire.
