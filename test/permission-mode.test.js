@@ -116,6 +116,19 @@ check("a board run gets none of the bot's own configuration, but keeps what the 
   }
 });
 
+check("a private store reached through a symlink is denied by its real path too", () => {
+  // Second pass on 731cfbf: BOT_STATE_DIR a link into CLAUDE_CWD left the target
+  // open to the built-in Read, which the shell sandbox does not govern.
+  const tmp = require("fs").realpathSync(mkdtempSync(join(require("os").tmpdir(), "board-store-")));
+  mkdirSync(join(tmp, "repo", "private"), { recursive: true });
+  require("fs").symlinkSync(join(tmp, "repo", "private"), join(tmp, "state"));
+  const rules = privateMemoryDeny([join(tmp, "state")]);
+  for (const p of [join(tmp, "state"), join(tmp, "repo", "private")]) {
+    assert.ok(rules.includes(`Read(/${p})`) && rules.includes(`Read(/${p}/**)`), `${p} is not denied`);
+  }
+  assert.strictEqual(privateMemoryDeny(["/no/such/place"]).length, 2, "a path with no link is denied once");
+});
+
 check("a bot whose CLAUDE_CWD is a denied folder answers no board", () => {
   // Second pass on 1f20c66: the sandbox binds the working directory writable after
   // its read denials, so a denied CLAUDE_CWD (the harness folder) was open to a
