@@ -121,6 +121,29 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.match(alone, /This ask was cut here.*Say so in your reply/);
   });
 
+  await check("a very long thread is fitted in linear time, to the byte", () => {
+    // Second pass on 52e8de4: rebuilding the prompt per comment dropped made
+    // 4,000 comments of 4,000 characters hold the bot's event loop for 52 s.
+    const many = Array.from({ length: 4000 }, (_, i) => ({ id: `c${i}`, authorAgentId: i % 2 ? ME.id : null, createdAt: `${i}`, body: `c-${i} ${"x".repeat(4000)}` }));
+    const ask = { id: "ask", authorAgentId: null, createdAt: "z", body: "the latest ask END" };
+    const t0 = Date.now();
+    const p = buildTaskPrompt({ identifier: "T-1", title: "Q", description: "d" }, [...many, ask, ...many.slice(0, 2000).map((c) => ({ ...c, authorAgentId: ME.id }))], ME, "u");
+    assert.ok(Date.now() - t0 < 2000, `fitting took ${Date.now() - t0} ms`);
+    assert.ok(Buffer.byteLength(p) <= 96 * 1024 && p.includes(ask.body));
+
+    // The size is computed, not built: it must match what is built exactly, or a
+    // prompt is shed too far or sent over budget. Multi-byte text, every budget.
+    const small = Array.from({ length: 6 }, (_, i) => ({ id: `s${i}`, authorAgentId: i === 4 ? null : ME.id, createdAt: `${i}`, body: `é—${i} ${"ü".repeat(30 * i)}` }));
+    const issue = { identifier: "T-1", title: "Tïtle ✓", description: "dé".repeat(40) };
+    const full = buildTaskPrompt(issue, small, ME, "u", { maxBytes: 1e9 });
+    for (let max = Buffer.byteLength(full) + 5; max > 1400; max -= 7) {
+      const q = buildTaskPrompt(issue, small, ME, "u", { maxBytes: max });
+      assert.ok(Buffer.byteLength(q) <= max, `${Buffer.byteLength(q)} bytes over a budget of ${max}`);
+      if (max >= Buffer.byteLength(full)) assert.strictEqual(q, full, "a prompt within budget was shed");
+      assert.strictEqual(buildTaskPrompt(issue, small, ME, "u", { maxBytes: Buffer.byteLength(q) }), q, `shed more than needed at ${max}`);
+    }
+  });
+
   await check("the answer is posted under the open run and the task closed", async () => {
     const b = board({ runs: running });
     await poller(b, async () => "the answer").tick();
