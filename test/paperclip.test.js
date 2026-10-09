@@ -104,6 +104,35 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies, {});
   });
 
+  await check("one task whose post keeps failing does not hold up the rest of the inbox", async () => {
+    // Second-pass review of 2.7.0: a failure on task 1 left the loop, so task 2
+    // was never reached on any tick.
+    const writes = [];
+    const routes = { "GET /agents/me": ME, "GET /agents/me/inbox-lite": [{ id: "iss-1" }, { id: "iss-2" }] };
+    for (const n of [1, 2]) {
+      routes[`GET /issues/iss-${n}/runs`] = [{ id: `run-${n}`, agentId: ME.id, status: "running" }];
+      routes[`GET /issues/iss-${n}`] = { id: `iss-${n}`, identifier: `T-${n}`, title: "Q", createdAt: "2026-01-01T00:00:00Z" };
+      routes[`GET /issues/iss-${n}/comments`] = [];
+      routes[`GET /heartbeat-runs/run-${n}`] = { contextSnapshot: {} };
+    }
+    const fetch = async (url, init) => {
+      const key = `${init.method} ${url.replace(/^.*\/api/, "")}`;
+      if (init.method === "PATCH") {
+        if (key === "PATCH /issues/iss-1") return { ok: false, status: 500, text: async () => "boom" };
+        writes.push(key); return { ok: true, text: async () => "{}" };
+      }
+      return key in routes ? { ok: true, text: async () => JSON.stringify(routes[key]) } : { ok: false, status: 404, text: async () => "" };
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const asked = [];
+    const p = createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile,
+      answer: async (_, issue) => { asked.push(issue.identifier); return "a"; }, log: silent, fetch });
+    await p.tick(); await p.tick();
+    assert.deepStrictEqual(writes, ["PATCH /issues/iss-2"]);
+    assert.deepStrictEqual(asked, ["T-1", "T-2"], "each task runs once; task 1 only retries its post");
+    assert.deepStrictEqual(Object.keys(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies), ["run-1"]);
+  });
+
   await check("bot.js: board runs never see the buffer, and the key never reaches Claude", () => {
     assert.match(bot, /noBufferContext: true/);
     assert.match(bot, /opts\.noBufferContext \? "" : buildContextPrompt/);
