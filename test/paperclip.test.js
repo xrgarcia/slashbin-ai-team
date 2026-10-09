@@ -18,8 +18,10 @@ const silent = { info() {}, warn() {}, error() {}, child() { return silent; } };
 const ME = { id: "agent-1", name: "Bot" };
 
 function board({ runs, comments = [], wakeCommentId }) {
-  const writes = [];
+  const writes = [], activity = [];
+  let race = null, lose = 0;
   const routes = {
+    "GET /issues/iss-1/activity": activity,
     "GET /agents/me": ME,
     "GET /agents/me/inbox-lite": [{ id: "iss-1" }],
     "GET /issues/iss-1/runs": runs,
@@ -32,13 +34,24 @@ function board({ runs, comments = [], wakeCommentId }) {
     if (init.method === "PATCH") {
       const body = JSON.parse(init.body);
       writes.push({ key, body, runId: init.headers["x-paperclip-run-id"] });
-      if (body.status) routes["GET /issues/iss-1"].status = body.status;
+      const issue = routes["GET /issues/iss-1"];
+      // A person's status change that lands just before this write, after the bot's last read.
+      if (race && body.status === "done") { issue.status = race; race = null; }
+      if (body.status) {
+        // Paperclip records each update's from/to under the row lock, newest first.
+        activity.unshift({ runId: init.headers["x-paperclip-run-id"], action: "issue.updated",
+          details: { changes: { status: { from: issue.status ?? "todo", to: body.status } } } });
+        issue.status = body.status;
+      }
+      if (lose-- > 0) return { ok: false, status: 502, text: async () => "bad gateway" };
       return { ok: true, text: async () => "{}" };
     }
     if (!(key in routes)) return { ok: false, status: 404, text: async () => "" };
     return { ok: true, text: async () => JSON.stringify(routes[key]) };
   };
-  return { fetch, writes, setStatus: (st) => { routes["GET /issues/iss-1"].status = st; } };
+  return { fetch, writes, setStatus: (st) => { routes["GET /issues/iss-1"].status = st; },
+    status: () => routes["GET /issues/iss-1"].status,
+    raceClose: (st, { loseResponse = false } = {}) => { race = st; lose = loseResponse ? 1 : 0; } };
 }
 const running = [{ id: "run-1", agentId: ME.id, status: "running" }];
 const poller = (b, answer) => createPaperclipPoller({
@@ -135,7 +148,7 @@ const poller = (b, answer) => createPaperclipPoller({
           return { ok: true, text: async () => "{}" };
         }
         const routes = { "/agents/me": ME, "/agents/me/inbox-lite": [{ id: "iss-1" }], "/issues/iss-1": issue,
-          "/issues/iss-1/comments": comments, "/issues/iss-1/runs": runs };
+          "/issues/iss-1/comments": comments, "/issues/iss-1/runs": runs, "/issues/iss-1/activity": [] };
         return path in routes ? { ok: true, text: async () => JSON.stringify(routes[path]) } : { ok: false, status: 404, text: async () => "" };
       };
       const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
@@ -207,6 +220,35 @@ const poller = (b, answer) => createPaperclipPoller({
       }
       assert.deepStrictEqual(b.writes.map((w) => w.body), [{ comment: rewake ? ALREADY_ANSWERED : "the answer" }],
         `${decided}, ${rewake ? "re-wake" : "answer"}: the status was overwritten`);
+    }
+  });
+
+  await check("a task a person blocked or cancelled just before the close lands gets that status back", async () => {
+    // Second-pass review of 2.7.0: a decision made after the bot's last read but
+    // before its close was overwritten with done, and nothing put it back — not
+    // even when the close's response was lost and a restarted bot looked again.
+    for (const decided of ["cancelled", "blocked"]) for (const rewake of [false, true]) for (const lost of [false, true]) {
+      const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+      let runs = running;
+      const b = board({ runs, comments });
+      const fetch = async (url, init) => {
+        if (url.endsWith("/issues/iss-1/runs")) return { ok: true, text: async () => JSON.stringify(runs) };
+        return b.fetch(url, init);
+      };
+      const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+      const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+        answer: async () => "the answer" });
+      const label = `${decided}, ${rewake ? "re-wake" : "answer"}${lost ? ", response lost" : ""}`;
+      if (rewake) { await make().tick(); runs = [{ id: "run-2", agentId: ME.id, status: "running" }]; b.writes.length = 0; b.setStatus("in_progress"); }
+      b.raceClose(decided, { loseResponse: lost });
+      await make().tick();
+      if (lost) await make().tick();   // a restarted bot finishes the look after closing
+      await make().tick();             // and does nothing more
+      assert.strictEqual(b.status(), decided, `${label}: the decision was overwritten`);
+      const run = rewake ? "run-2" : "run-1";
+      assert.deepStrictEqual(b.writes.filter((w) => w.body.status).map((w) => [w.runId, w.body.status]),
+        [[run, "done"], [run, decided]], `${label}: unexpected status writes`);
+      assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).closing, {}, `${label}: the close was never settled`);
     }
   });
 
