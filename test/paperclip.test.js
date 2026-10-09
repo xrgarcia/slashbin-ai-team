@@ -444,6 +444,30 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies, {});
   });
 
+  await check("an answer whose post landed unseen is not carried out again by a newer ask", async () => {
+    // Second pass on a76d8c0: the landed post was looked for only under the ask it
+    // answered, so a newer ask posted "Answer A\n\n---\n\nAnswer B".
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask A" }];
+    const b = board({ runs: running, comments });
+    let lost = 1;
+    const flaky = async (url, init) => {
+      if (init.method === "PATCH" && lost-- > 0) {
+        comments.push({ id: "a", authorAgentId: ME.id, createdByRunId: init.headers["x-paperclip-run-id"], createdAt: "2026-01-02T00:02:00Z", body: JSON.parse(init.body).comment });
+        return { ok: false, status: 504, text: async () => "gateway timeout" };
+      }
+      return b.fetch(url, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const replies = ["Answer A", "Answer B"];
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch: flaky,
+      answer: async () => replies.shift() });
+    await make().tick();
+    comments.push({ id: "w2", authorAgentId: null, createdAt: "2026-01-02T00:03:00Z", body: "ask B" });
+    await make().tick();
+    assert.deepStrictEqual(b.writes.map((w) => w.body.comment), ["Answer B"]);
+    assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies, {});
+  });
+
   await check("a response that stalls mid-body times out, and the next poll goes on", async () => {
     // Second pass on 7fc887d: api() awaited r.text() with no deadline, so one
     // trickling response kept the tick busy and every later poll was skipped.
