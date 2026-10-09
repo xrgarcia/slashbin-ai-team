@@ -87,6 +87,31 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.match(p, /T-1: Q/); assert.match(p, /details/); assert.match(p, /first ask/);
   });
 
+  await check("a long thread loses its oldest comments, never the latest ask", () => {
+    // Second-pass review of 2.7.0: 36 older comments of 4,410 bytes pushed the
+    // latest ask past the argument limit, whose clamp keeps only the head; the
+    // task was closed and recorded as answered without the bot ever seeing it.
+    const { DEFAULT_ARG_LIMIT } = require("../lib/argv-budget");
+    const old = Array.from({ length: 36 }, (_, i) => ({ id: `o${i}`, authorAgentId: i % 2 ? ME.id : null, createdAt: `${i}`, body: `old-${i} ${"x".repeat(4400)}` }));
+    const ask = { id: "ask", authorAgentId: null, createdAt: "99", body: `the latest ask ${"y".repeat(2000)} END` };
+    const after = { id: "mine", authorAgentId: ME.id, createdAt: "100", body: "a note of mine after it" };
+    const p = buildTaskPrompt({ identifier: "T-1", title: "Q", description: "details" }, [...old, ask, after], ME, "u");
+    assert.ok(Buffer.byteLength(p) <= 96 * 1024 && Buffer.byteLength(p) < DEFAULT_ARG_LIMIT, `the prompt is ${Buffer.byteLength(p)} bytes`);
+    assert.ok(p.includes(ask.body), "the latest ask was cut");
+    assert.ok(p.includes(after.body) && p.includes("details"));
+    assert.ok(!p.includes("old-0 ") && p.includes("old-35 "), "the newest older comments should stay, the oldest go");
+    assert.match(p, /earlier comments are left out/);
+    assert.ok(p.trimEnd().endsWith("Reply with the comment body only."), "the closing instructions were lost");
+
+    const huge = buildTaskPrompt({ identifier: "T-1", title: "Q", description: "d".repeat(200000) }, [ask], ME, "u");
+    assert.ok(Buffer.byteLength(huge) <= 96 * 1024 && huge.includes(ask.body), "a long description crowded out the ask");
+    assert.match(huge, /rest of the description is left out/);
+
+    const alone = buildTaskPrompt({ identifier: "T-1", title: "Q" }, [{ ...ask, body: "z\n".repeat(100000) }], ME, "u");
+    assert.ok(Buffer.byteLength(alone) <= 96 * 1024);
+    assert.match(alone, /This ask was cut here.*Say so in your reply/);
+  });
+
   await check("the answer is posted under the open run and the task closed", async () => {
     const b = board({ runs: running });
     await poller(b, async () => "the answer").tick();
