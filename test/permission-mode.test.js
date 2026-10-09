@@ -242,6 +242,11 @@ check("a board run's shell is sandboxed to the working directory, on top of the 
   assert.strictEqual(s.sandbox.allowUnsandboxedCommands, false, "a command could step outside the sandbox");
   assert.deepStrictEqual(s.sandbox.filesystem.denyRead, ["/etc/secret", "~/", "/repo/bot-history", "/state/buffer.txt"]);
   assert.deepStrictEqual(s.sandbox.filesystem.allowRead, ["/opt/tools", "/repo"]);
+  // Second pass on 8260cf4: an allowRead is mounted back over a denyRead, so a
+  // working directory that IS the denied harness folder must not be allowed.
+  const harness = boardSettings({ sandbox: { filesystem: { allowRead: ["/opt/tools", "/bot/logs", "/bot"] } } }, ["/bot", "/state"], "/bot");
+  assert.deepStrictEqual(harness.sandbox.filesystem.allowRead, ["/opt/tools"], "an allowRead reopens a denied folder");
+  assert.deepStrictEqual(boardSettings(null, ["/bot"], "/bot-po").sandbox.filesystem.allowRead, ["/bot-po"], "a sibling folder is not inside a denied one");
   const open = boardSettings({ sandbox: { enabled: false, allowUnsandboxedCommands: true } }, ["/s"], "/repo");
   assert.strictEqual(open.sandbox.enabled, true, "a bot that turns its sandbox off turns it off for board runs too");
   assert.strictEqual(open.sandbox.allowUnsandboxedCommands, false);
