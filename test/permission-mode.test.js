@@ -191,7 +191,7 @@ check("a board run drops every memory variable and denies the path each one name
     assert.ok(m, `${name} is no longer published — update PRIVATE_MEMORY_ENV`);
     return m[1];
   }));
-  assert.match(src, /if \(opts\.noBufferContext\) for \(const name of \[\.\.\.PRIVATE_MEMORY_ENV, \.\.\.DISCORD_CREDENTIAL_ENV\]\) delete cleanEnv\[name\];/);
+  assert.match(src, /if \(opts\.noBufferContext\) \{\s*for \(const name of \[\.\.\.PRIVATE_MEMORY_ENV, \.\.\.DISCORD_CREDENTIAL_ENV\]\) delete cleanEnv\[name\];/);
   // Second-pass review of 2.7.0: a bypass board run could print the bot's
   // Discord token into its reply. Every credential the bot itself reads that
   // gives Discord access must be withheld.
@@ -238,6 +238,10 @@ check("a board run's shell is sandboxed to the working directory, on top of the 
   assert.strictEqual(s.model, "x", "the bot's own settings were dropped");
   assert.deepStrictEqual(s.sandbox.network, base.sandbox.network, "the bot's network rules were dropped");
   assert.strictEqual(s.sandbox.enabled, true);
+  // Second pass on 09bb6cd: the CLI loads project auto-memory, shared with the
+  // Discord sessions, at startup, before any sandbox or deny rule applies.
+  assert.strictEqual(boardSettings({ autoMemoryEnabled: true }, [], "/repo").autoMemoryEnabled, false, "a board run loads Discord sessions' auto-memory");
+  assert.match(readFileSync(join(__dirname, "..", "bot.js"), "utf8"), /if \(opts\.noBufferContext\) \{[^}]*cleanEnv\.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";\s*\}/, "the board run's env leaves auto-memory on");
   assert.strictEqual(s.sandbox.failIfUnavailable, true, "a host without the sandbox would run the board task open");
   assert.strictEqual(s.sandbox.allowUnsandboxedCommands, false, "a command could step outside the sandbox");
   assert.deepStrictEqual(s.sandbox.filesystem.denyRead, ["/etc/secret", "/", "/repo/bot-history", "/state/buffer.txt"]);

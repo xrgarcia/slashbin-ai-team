@@ -1977,7 +1977,13 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     cleanEnv.BOT_JOB_HISTORY_FILE = JOB_HISTORY_FILE;
     cleanEnv.BOT_SCHEDULES_FILE = SCHEDULES_FILE;
     cleanEnv.BOT_CHANNEL_ID = String(channelId);
-    if (opts.noBufferContext) for (const name of [...PRIVATE_MEMORY_ENV, ...DISCORD_CREDENTIAL_ENV]) delete cleanEnv[name];
+    if (opts.noBufferContext) {
+      for (const name of [...PRIVATE_MEMORY_ENV, ...DISCORD_CREDENTIAL_ENV]) delete cleanEnv[name];
+      // Claude Code's project auto-memory is shared with the Discord sessions in
+      // the same CLAUDE_CWD and loads at startup, before any tool runs. Off here
+      // and in boardSettings; the CLI reads this variable first.
+      cleanEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
+    }
 
     delete cleanEnv.CLAUDECODE;
     delete cleanEnv.PAPERCLIP_API_KEY;
