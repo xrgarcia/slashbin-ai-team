@@ -130,6 +130,12 @@ const poller = (b, answer) => createPaperclipPoller({
     const p = buildTaskPrompt({ identifier: "T-1", title: "Q", description: "d" }, [...many, ask, ...many.slice(0, 2000).map((c) => ({ ...c, authorAgentId: ME.id }))], ME, "u");
     assert.ok(Date.now() - t0 < 2000, `fitting took ${Date.now() - t0} ms`);
     assert.ok(Buffer.byteLength(p) <= 96 * 1024 && p.includes(ask.body));
+    // Second pass on 0553e16: a 4 MB description made each comment dropped
+    // compare the whole head again, 7 s for the same thread.
+    const t1 = Date.now();
+    const big = buildTaskPrompt({ identifier: "T-1", title: "Q", description: "d".repeat(4e6) }, [...many, ask], ME, "u");
+    assert.ok(Date.now() - t1 < 2000, `fitting under a 4 MB description took ${Date.now() - t1} ms`);
+    assert.ok(Buffer.byteLength(big) <= 96 * 1024 && big.includes(ask.body));
 
     // The size is computed, not built: it must match what is built exactly, or a
     // prompt is shed too far or sent over budget. Multi-byte text, every budget.
