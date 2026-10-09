@@ -110,6 +110,47 @@ const poller = (b, answer) => createPaperclipPoller({
     }
   });
 
+  await check("a reopen that fails is retried on later polls, across a restart, without running the ask again", async () => {
+    // Second-pass review of 2.7.0: the run was marked handled before the reopen,
+    // so one failed reopen left the newer ask on a done task for good.
+    for (const rewake of [false, true]) {
+      const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "first ask" }];
+      const issue = { id: "iss-1", identifier: "T-1", title: "A question", status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
+      let runs = running, landing = false, reopenFails = 0;
+      const writes = [];
+      const fetch = async (url, init) => {
+        const path = url.replace(/^.*\/api/, "");
+        if (init.method === "PATCH") {
+          const body = JSON.parse(init.body);
+          if (body.status === "todo" && reopenFails-- > 0) return { ok: false, status: 503, text: async () => "unavailable" };
+          writes.push([init.headers["x-paperclip-run-id"], body]);
+          if (body.status) issue.status = body.status;
+          if (body.comment) comments.push({ id: `a${comments.length}`, authorAgentId: ME.id, createdByRunId: init.headers["x-paperclip-run-id"], createdAt: "2026-01-02T00:02:00Z", body: body.comment });
+          if (landing) { landing = false; comments.push({ id: "h2", authorAgentId: null, createdAt: "2026-01-02T00:03:00Z", body: "one more" }); }
+          return { ok: true, text: async () => "{}" };
+        }
+        const routes = { "/agents/me": ME, "/agents/me/inbox-lite": [{ id: "iss-1" }], "/issues/iss-1": issue,
+          "/issues/iss-1/comments": comments, "/issues/iss-1/runs": runs };
+        return path in routes ? { ok: true, text: async () => JSON.stringify(routes[path]) } : { ok: false, status: 404, text: async () => "" };
+      };
+      const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+      let calls = 0;
+      const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+        answer: async () => { calls++; return "the answer"; } });
+      if (rewake) { await make().tick(); runs = [{ id: "run-2", agentId: ME.id, status: "running" }]; writes.length = 0; issue.status = "in_progress"; }
+      landing = true; reopenFails = 1;
+      await make().tick();          // closes; the newer ask lands; the reopen fails
+      assert.strictEqual(issue.status, "done");
+      await make().tick();          // a restarted bot retries the reopen
+      await make().tick();          // and does nothing more once it is done
+      const run = rewake ? "run-2" : "run-1";
+      assert.strictEqual(calls, 1, "the answered ask ran again");
+      assert.deepStrictEqual(writes, [[run, { status: "done", comment: rewake ? ALREADY_ANSWERED : "the answer" }], [run, { status: "todo" }]],
+        `${rewake ? "re-wake note" : "answer"}: the reopen was not retried`);
+      assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).closing, {});
+    }
+  });
+
   await check("a failed run still ends the wait, with the fallback", async () => {
     const b = board({ runs: running });
     await poller(b, async () => { throw new Error("boom"); }).tick();
