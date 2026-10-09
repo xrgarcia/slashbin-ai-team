@@ -3,7 +3,7 @@ const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
 const { WebSocketServer } = require("ws");
 const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync, readlinkSync, renameSync } = require("fs");
-const { join } = require("path");
+const { join, resolve } = require("path");
 const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
 const pino = require("pino");
@@ -190,7 +190,8 @@ function settingsArgs() {
 // repo's own .mcp.json, which --strict-mcp-config would otherwise drop with the rest.
 function mcpArgs() {
   const strict = process.env.MCP_CONFIG_STRICT === "true";
-  const repoConfig = join(CLAUDE_CWD, ".mcp.json");
+  // Absolute: Claude runs inside CLAUDE_CWD, so a relative path would be resolved twice.
+  const repoConfig = resolve(CLAUDE_CWD, ".mcp.json");
   const own = process.env.MCP_CONFIG || (strict && existsSync(repoConfig) ? repoConfig : "");
   return [
     ...(own ? ["--mcp-config", own] : []),

@@ -424,12 +424,16 @@ check("MCP_CONFIG_STRICT holds without MCP_CONFIG, and keeps the repo's own conf
   const { mkdtempSync, writeFileSync, existsSync } = require("fs");
   const dir = mkdtempSync(join(require("os").tmpdir(), "mcp-"));
   const repoConfig = join(dir, ".mcp.json");
-  const run = (env) => new Function("process", "join", "existsSync", "CLAUDE_CWD", `${fn}; return mcpArgs();`)(
-    { env }, join, existsSync, dir);
+  const { resolve, relative } = require("path");
+  const run = (env, cwd = dir) => new Function("process", "join", "resolve", "existsSync", "CLAUDE_CWD", `${fn}; return mcpArgs();`)(
+    { env }, join, resolve, existsSync, cwd);
   assert.deepStrictEqual(run({ MCP_CONFIG_STRICT: "true" }), ["--strict-mcp-config"]);
   writeFileSync(repoConfig, "{}");
   assert.deepStrictEqual(run({ MCP_CONFIG_STRICT: "true", MCP_CONFIG_EXTRA: "{x}" }),
     ["--mcp-config", repoConfig, "--mcp-config", "{x}", "--strict-mcp-config"]);
+  // A relative CLAUDE_CWD still yields an absolute path: Claude runs inside it.
+  assert.deepStrictEqual(run({ MCP_CONFIG_STRICT: "true" }, relative(process.cwd(), dir)),
+    ["--mcp-config", repoConfig, "--strict-mcp-config"]);
   assert.deepStrictEqual(run({ MCP_CONFIG: "/a.json", MCP_CONFIG_STRICT: "true" }),
     ["--mcp-config", "/a.json", "--strict-mcp-config"]);
   assert.deepStrictEqual(run({}), [], "without strict, the repo's own config loads by itself");
