@@ -71,7 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the run. Board runs get one session per task, never see the Discord buffer, and
   the key is scrubbed from Claude's environment. An answer whose post fails is
   kept (across a restart) and re-posted; the task is never run twice. A comment
-  that lands while the bot is answering keeps the task open, so it is answered next.
+  that lands while the bot is answering keeps the task open, so it is answered next;
+  a re-wake of an answered task gets a short note under its run, never a second run.
   A board task
   cannot book a follow-up: `schedule.mjs` refuses any destination that is not a
   Discord channel, rather than saving a job that would never fire.

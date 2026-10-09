@@ -6,7 +6,7 @@ const assert = require("assert");
 const { readFileSync, writeFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { pickOpenRun, askOf, askKey, buildTaskPrompt, createPaperclipPoller, FALLBACK_REPLY } = require("../lib/paperclip");
+const { pickOpenRun, askOf, askKey, buildTaskPrompt, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED } = require("../lib/paperclip");
 
 const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
 let pass = 0, fail = 0;
@@ -256,7 +256,11 @@ const poller = (b, answer) => createPaperclipPoller({
     runs = [{ id: "run-2", agentId: ME.id, status: "running" }];
     await make().tick();
     assert.strictEqual(calls, 1, "a re-wake answered the same ask twice");
-    assert.strictEqual(b.writes.length, 1);
+    // Second-pass review of 2.7.0: the re-wake was marked handled with nothing
+    // under it, and a run is held open until a comment lands under it.
+    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer"], ["run-2", ALREADY_ANSWERED]]);
+    await make().tick();
+    assert.strictEqual(b.writes.length, 2, "the re-wake was acknowledged twice");
   });
 
   await check("an answer is filed under the comment it answers, not the one that woke the run", async () => {
@@ -308,7 +312,7 @@ const poller = (b, answer) => createPaperclipPoller({
     await tick();                          // the ask was edited
     issue.description = "v2";
     await tick();                          // the task was revised and reopened
-    assert.deepStrictEqual(writes, ["answer 1", "answer 2", "answer 3"]);
+    assert.deepStrictEqual(writes, ["answer 1", ALREADY_ANSWERED, "answer 2", "answer 3"]);
   });
 
   await check("one task whose post keeps failing does not hold up the rest of the inbox", async () => {
