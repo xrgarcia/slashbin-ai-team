@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, privateMemoryDeny } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, privateMemoryDeny, boardSettings } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -174,8 +174,14 @@ function permissionArgs(kind = "session", extraDeny = []) {
 // session through --settings, e.g. a sandbox around the shell. Settings passed this
 // way are not loosened by the repository's own .claude/settings*.json.
 const SESSION_SETTINGS = (process.env.BOT_SETTINGS || "").trim();
-function settingsArgs() {
-  return SESSION_SETTINGS ? ["--settings", SESSION_SETTINGS] : [];
+function settingsArgs({ board = false } = {}) {
+  if (!board) return SESSION_SETTINGS ? ["--settings", SESSION_SETTINGS] : [];
+  // A board run sandboxes the shell away from Discord memory, on top of the bot's
+  // own settings. Read per run: a settings file that cannot be read fails the run
+  // rather than starting it without the sandbox.
+  const base = !SESSION_SETTINGS ? null
+    : JSON.parse(SESSION_SETTINGS.startsWith("{") ? SESSION_SETTINGS : readFileSync(SESSION_SETTINGS, "utf8"));
+  return ["--settings", JSON.stringify(boardSettings(base, privateMemoryPaths()))];
 }
 
 // MCP_CONFIG adds servers; it does not remove the host's. MCP_CONFIG_STRICT=true
@@ -1908,7 +1914,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "--max-turns", String(CLAUDE_MAX_TURNS),
       ...(process.env.CLAUDE_MODEL ? ["--model", process.env.CLAUDE_MODEL] : []),
       ...mcpArgs(),
-      ...settingsArgs(),
+      ...settingsArgs({ board: Boolean(opts.noBufferContext) }),
       "--append-system-prompt", systemPrompt,
     ];
 

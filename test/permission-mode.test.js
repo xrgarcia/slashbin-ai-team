@@ -5,7 +5,7 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, privateMemoryDeny } = require("../lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, privateMemoryDeny, boardSettings } = require("../lib/permission-mode");
 const { readFileSync, writeFileSync, mkdtempSync, mkdirSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
@@ -194,6 +194,26 @@ check("a board run drops every memory variable and denies the path each one name
   assert.match(src, /if \(opts\.noBufferContext\) for \(const name of PRIVATE_MEMORY_ENV\) delete cleanEnv\[name\];/);
   assert.match(src, /permissionArgs\("session", opts\.noBufferContext \? privateMemoryDeny\(privateMemoryPaths\(\)\) : \[\]\)/);
   assert.match(src, /noBufferContext: true/, "the Paperclip run no longer marks itself as a board run");
+});
+
+check("a board run's shell is sandboxed away from Discord memory, on top of the bot's own settings", () => {
+  // Second-pass review of 2.7.0: Read deny rules do not bind the shell, so a
+  // bypass board run could still cat the buffer.
+  const base = { model: "x", sandbox: { network: { allowedDomains: ["github.com"] }, filesystem: { denyRead: ["~/.ssh"] } } };
+  const s = boardSettings(base, ["/state/buffer.txt", "/state/history/"]);
+  assert.strictEqual(s.model, "x", "the bot's own settings were dropped");
+  assert.deepStrictEqual(s.sandbox.network, base.sandbox.network, "the bot's network rules were dropped");
+  assert.strictEqual(s.sandbox.enabled, true);
+  assert.strictEqual(s.sandbox.failIfUnavailable, true, "a host without the sandbox would run the board task open");
+  assert.strictEqual(s.sandbox.allowUnsandboxedCommands, false, "a command could step outside the sandbox");
+  assert.deepStrictEqual(s.sandbox.filesystem.denyRead, ["~/.ssh", "/state/buffer.txt", "/state/history"]);
+  const open = boardSettings({ sandbox: { enabled: false, allowUnsandboxedCommands: true } }, ["/s"]);
+  assert.strictEqual(open.sandbox.enabled, true, "a bot that turns its sandbox off turns it off for board runs too");
+  assert.strictEqual(open.sandbox.allowUnsandboxedCommands, false);
+  assert.deepStrictEqual(boardSettings(null, ["/s"]).sandbox.filesystem.denyRead, ["/s"]);
+  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.match(src, /\.\.\.settingsArgs\(\{ board: Boolean\(opts\.noBufferContext\) \}\)/, "the board run no longer gets the sandbox");
+  assert.match(src, /boardSettings\(base, privateMemoryPaths\(\)\)/);
 });
 
 console.log(`\n${passes} passed, ${failures} failed\n`);

@@ -370,7 +370,11 @@ check("bypass keeps BOT_PERMISSION_DENY", () => {
 });
 
 check("BOT_SETTINGS reaches every session", () => {
-  assert.ok(/\.\.\.settingsArgs\(\),/.test(bot), "the session argv never passes --settings");
+  assert.ok(/\.\.\.settingsArgs\(\{ board: Boolean\(opts\.noBufferContext\) \}\),/.test(bot), "the session argv never passes --settings");
+  // A board run's settings are the bot's own with the sandbox layered on, never instead of them.
+  const fn = /function settingsArgs[\s\S]*?\n}/.exec(bot)[0];
+  assert.ok(/if \(!board\) return SESSION_SETTINGS \? \["--settings", SESSION_SETTINGS\] : \[\];/.test(fn), "a Discord run lost BOT_SETTINGS");
+  assert.ok(/boardSettings\(base,/.test(fn) && /SESSION_SETTINGS/.test(fn.split("boardSettings")[0]), "a board run dropped BOT_SETTINGS");
 });
 
 check("restricted is the default, bypass must be asked for", () => {
