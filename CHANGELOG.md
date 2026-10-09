@@ -75,7 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the key is scrubbed from Claude's environment. Nor can a board run reach Discord
   memory any other way: the memory stores (buffer, summaries, uploads, sessions,
   scheduled jobs) are left out of its environment, so recall reports them
-  unavailable, each path carries a read deny rule, and any shell a board run is
+  unavailable, each path — and the state folder and outbox of files already
+  sent — carries a read deny rule, and any shell a board run is
   allowed runs in Claude Code's sandbox confined to the working directory (no
   stepping outside it; a host without the sandbox fails the run rather than
   running it open). The bot's

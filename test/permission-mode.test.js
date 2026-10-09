@@ -203,7 +203,10 @@ check("a board run drops every memory variable and denies the path each one name
   const at = (re) => src.search(re);
   assert.ok(at(/cleanEnv\.BOT_CHANNEL_ID = /) < at(/DISCORD_CREDENTIAL_ENV\]\) delete/) && at(/DISCORD_CREDENTIAL_ENV\]\) delete/) < at(/spawn\(CLAUDE_BIN, safeArgs/),
     "the credentials are removed before they are set, or after the spawn");
-  assert.match(src, /deny: \[PERMISSION_DENY, \.\.\.privateMemoryDeny\(privateMemoryPaths\(\)\)\]/, "the board run no longer denies the memory paths");
+  assert.match(src, /deny: \[PERMISSION_DENY, \.\.\.privateMemoryDeny\(boardDeniedPaths\(\)\)\]/, "the board run no longer denies the memory paths");
+  // Second pass on e4411f4: files already sent to Discord sit in the outbox,
+  // which can be moved anywhere, including inside CLAUDE_CWD.
+  assert.match(src, /function boardDeniedPaths\(\) \{\n  return \[\.\.\.privateMemoryPaths\(\), STATE_DIR, OUTBOX_DIR\];/, "the outbox or state folder is readable to a board run");
   assert.match(src, /noBufferContext: true/, "the Paperclip run no longer marks itself as a board run");
 });
 
@@ -239,7 +242,7 @@ check("a board run's shell is sandboxed to the working directory, on top of the 
   assert.strictEqual(open.sandbox.allowUnsandboxedCommands, false);
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
   assert.match(src, /\.\.\.settingsArgs\(\{ board: Boolean\(opts\.noBufferContext\) \}\)/, "the board run no longer gets the sandbox");
-  assert.match(src, /boardSettings\(base, privateMemoryPaths\(\), CLAUDE_CWD\)/);
+  assert.match(src, /boardSettings\(base, boardDeniedPaths\(\), CLAUDE_CWD\)/);
 });
 
 console.log(`\n${passes} passed, ${failures} failed\n`);

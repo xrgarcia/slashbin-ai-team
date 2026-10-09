@@ -162,7 +162,7 @@ function permissionArgs(kind = "session") {
   // privilege in every mode, and no reach into Discord memory.
   if (kind === "board") {
     return boardArgs({ tools: BOARD_TOOLS, allow: BOARD_PERMISSION_ALLOW,
-      deny: [PERMISSION_DENY, ...privateMemoryDeny(privateMemoryPaths())].filter(Boolean) });
+      deny: [PERMISSION_DENY, ...privateMemoryDeny(boardDeniedPaths())].filter(Boolean) });
   }
   if (PERMISSION_MODE === "bypass") {
     // Deny rules still hold under bypass (measured): nothing prompts, but a denied
@@ -193,7 +193,7 @@ function settingsArgs({ board = false } = {}) {
   // rather than starting it without the sandbox.
   const base = !SESSION_SETTINGS ? null
     : JSON.parse(SESSION_SETTINGS.startsWith("{") ? SESSION_SETTINGS : readFileSync(SESSION_SETTINGS, "utf8"));
-  return ["--settings", JSON.stringify(boardSettings(base, privateMemoryPaths(), CLAUDE_CWD))];
+  return ["--settings", JSON.stringify(boardSettings(base, boardDeniedPaths(), CLAUDE_CWD))];
 }
 
 // MCP_CONFIG adds servers; it does not remove the host's. MCP_CONFIG_STRICT=true
@@ -1119,6 +1119,12 @@ const SESSION_FILE = join(STATE_DIR, "sessions.json");
 // memory a board run is denied by path as well as by variable.
 function privateMemoryPaths() {
   return [HISTORY_DIR, BUFFER_FILE, ATTACHMENTS_DIR, SESSION_FILE, JOB_HISTORY_FILE, SCHEDULES_FILE];
+}
+// Everything a board run must not read. The private-memory paths can be moved
+// out of the state folder one by one, so they are named as well as the folder;
+// the outbox holds every file already sent to Discord, wherever it is put.
+function boardDeniedPaths() {
+  return [...privateMemoryPaths(), STATE_DIR, OUTBOX_DIR];
 }
 LEGACY_STATE.push([join(__dirname, `.${BOT_NAME}-sessions.json`), SESSION_FILE]);
 // Moved out of the summaries directory: a schedule is the user's, and losing it
