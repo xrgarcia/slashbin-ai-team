@@ -406,14 +406,14 @@ check("restricted sessions deny what is not pre-approved, so MCP tools are gated
   // bypassPermissions default runs them unasked. dontAsk is the mode that denies;
   // --allowedTools is only meaningful beside it, so it may never appear alone.
   const guarded = /function permissionArgs[\s\S]*?\n}/.exec(bot)[0];
-  assert.ok((guarded.match(/"dontAsk"/g) || []).length >= 2,
-    "both the session and summarizer restricted paths must run in dontAsk");
+  assert.ok((guarded.match(/"dontAsk"/g) || []).length >= 1,
+    "the restricted session path must run in dontAsk");
   assert.ok(/"--allowedTools", attachmentReadRule\(ATTACHMENTS_DIR\),\s*\.\.\.\(PERMISSION_ALLOW \? \[PERMISSION_ALLOW\]/.test(guarded),
     "BOT_PERMISSION_ALLOW must reach --allowedTools, after the uploads-folder rule");
   assert.ok(!/"--allowedTools"/.test(bot.replace(guarded, "")),
     "--allowedTools outside permissionArgs() restricts nothing without dontAsk");
-  const sum = readFileSync(join(REPO, "summarize.js"), "utf8");
-  assert.ok(/"--permission-mode", "dontAsk"/.test(sum), "summarize.js restricted path must run in dontAsk");
+  const perm = readFileSync(join(REPO, "lib/permission-mode.js"), "utf8");
+  assert.ok(/function summarizerArgs[\s\S]*?"--permission-mode", "dontAsk"/.test(perm), "summary runs must run in dontAsk");
 });
 
 check("MCP_CONFIG_STRICT makes MCP_CONFIG the only MCP source", () => {
@@ -431,14 +431,14 @@ check("summarizers never get write or execute tools when restricted", () => {
   assert.ok(/BOT_SUMMARIZER_TOOLS \|\| "Read"/.test(bot), "summarizer default should be read-only");
 });
 
-check("summarize.js resolves the mode the same way bot.js does", () => {
+check("summarize.js builds its flags exactly as bot.js's summaries do", () => {
+  // Second-pass review of 2.7.0: under bypass both summarizers ran with every
+  // tool and the skip flags, on chat text from anyone in the channel.
   const sum = readFileSync(join(REPO, "summarize.js"), "utf8");
-  assert.ok(/resolvePermissionMode/.test(sum),
-    "summarize.js must use the SHARED resolver — a second copy is how the host default gets honoured in one process and ignored in the other");
+  assert.ok(/permissionArgs: summarizerArgs\(/.test(sum), "summarize.js must use the shared summary flags");
+  assert.ok(!/dangerously-skip-permissions/.test(sum), "summarize.js still has a skip-permissions path");
   assert.ok(!/process\.env\.BOT_PERMISSION_MODE/.test(sum),
-    "summarize.js still reads the env var directly, bypassing the precedence rules");
-  assert.ok(!/^\s*"--dangerously-skip-permissions",\s*$/m.test(sum.replace(/\?[\s\S]*?:/, "")),
-    "summarize.js still hardcodes the skip flags outside the mode check");
+    "summarize.js reads the mode; a summary's flags do not depend on it");
 });
 
 check("an unknown permission mode fails at startup", () => {

@@ -20,7 +20,7 @@ const { spawn } = require("child_process");
 const { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } = require("fs");
 const { join } = require("path");
 const summarizeCore = require("./lib/summarize-core");
-const { resolvePermissionMode } = require("./lib/permission-mode");
+const { summarizerArgs } = require("./lib/permission-mode");
 
 // --- Config ---
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -133,13 +133,13 @@ function summarizeWithClaude(channelName, date, messages) {
     timeoutMs: Number.parseInt(process.env.SUMMARIZE_TIMEOUT_MS, 10) > 0
       ? Number.parseInt(process.env.SUMMARIZE_TIMEOUT_MS, 10)
       : 120000,
-    // Resolved through the SHARED resolver, not a second copy of the rule — a
-    // host-level default that one process honours and the other ignores is worse
-    // than no default at all. Summarisation reads a transcript already present in
-    // its prompt, so it needs no write or execute tools.
-    permissionArgs: resolvePermissionMode().mode === "bypass"
-      ? ["--allow-dangerously-skip-permissions", "--dangerously-skip-permissions"]
-      : ["--tools", process.env.BOT_SUMMARIZER_TOOLS || "Read", "--permission-mode", "dontAsk"],
+    // The SAME flags bot.js gives its summaries, in every mode: a summary reads
+    // chat text from anyone and needs no write, execute or server tools.
+    permissionArgs: summarizerArgs({
+      tools: process.env.BOT_SUMMARIZER_TOOLS || "Read",
+      deny: (process.env.BOT_PERMISSION_DENY || "").trim(),
+      settings: (process.env.BOT_SETTINGS || "").trim(),
+    }),
   });
 }
 

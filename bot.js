@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -149,6 +149,10 @@ const SUMMARIZER_TOOLS = process.env.BOT_SUMMARIZER_TOOLS || "Read";
  * documented one-line upgrade for anyone already running this harness.
  */
 function permissionArgs(kind = "session") {
+  // A summary run reads untrusted chat text and needs no tools: narrow in every mode.
+  if (kind === "summarizer") {
+    return summarizerArgs({ tools: SUMMARIZER_TOOLS, deny: PERMISSION_DENY, settings: SESSION_SETTINGS });
+  }
   if (PERMISSION_MODE === "bypass") {
     // Deny rules still hold under bypass (measured): nothing prompts, but a denied
     // tool or path stays denied. Unset, the argv is the historical one.
@@ -157,7 +161,6 @@ function permissionArgs(kind = "session") {
       ...(PERMISSION_DENY ? ["--disallowedTools", PERMISSION_DENY] : []),
     ];
   }
-  if (kind === "summarizer") return ["--tools", SUMMARIZER_TOOLS, "--permission-mode", "dontAsk"];
   return [
     "--tools", ALLOWED_TOOLS,
     "--permission-mode", "dontAsk",

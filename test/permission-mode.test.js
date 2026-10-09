@@ -5,7 +5,7 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule } = require("../lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs } = require("../lib/permission-mode");
 const { readFileSync } = require("fs");
 const { join } = require("path");
 
@@ -79,8 +79,31 @@ check("restricted sessions pass the rule, ahead of BOT_PERMISSION_ALLOW", () => 
   const fn = bot.slice(bot.indexOf("function permissionArgs("), bot.indexOf("function settingsArgs("));
   assert.match(fn, /"--allowedTools", attachmentReadRule\(ATTACHMENTS_DIR\)/);
   assert.match(fn, /PERMISSION_ALLOW \? \[PERMISSION_ALLOW\]/);
-  const bypass = fn.slice(0, fn.indexOf('if (kind === "summarizer")'));
-  assert.ok(!bypass.includes("attachmentReadRule"), "bypass argv must stay the historical one");
+  const bypass = fn.slice(fn.indexOf('if (PERMISSION_MODE === "bypass")'), fn.indexOf('"--tools", ALLOWED_TOOLS'));
+  assert.ok(bypass.length > 0 && !bypass.includes("attachmentReadRule"), "bypass argv must stay the historical one");
+});
+
+console.log("\nPermission mode — a summary run is narrow in every mode");
+
+check("summary flags: read-only tools, nothing prompts, no MCP servers", () => {
+  // Measured 2026-10-08 with the real CLI: these flags start a run whose only
+  // tool is Read, with no MCP server and permissionMode dontAsk.
+  assert.deepStrictEqual(summarizerArgs(), ["--tools", "Read", "--permission-mode", "dontAsk", "--strict-mcp-config"]);
+  const a = summarizerArgs({ tools: "Read", deny: "Read(//etc/**)", settings: '{"sandbox":{"enabled":true}}' });
+  assert.deepStrictEqual(a.slice(-4), ["--disallowedTools", "Read(//etc/**)", "--settings", '{"sandbox":{"enabled":true}}']);
+  assert.ok(!a.some((x) => /dangerously/.test(x)));
+});
+
+check("bot.js answers a summary run before it looks at the mode", () => {
+  // Second-pass review of 2.7.0: under bypass the buffer-rotation and hourly
+  // summaries got every tool and the skip flags, and skipped BOT_SETTINGS.
+  const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  const fn = bot.slice(bot.indexOf("function permissionArgs("), bot.indexOf("function settingsArgs("));
+  const summary = fn.indexOf('if (kind === "summarizer")');
+  assert.ok(summary > 0 && summary < fn.indexOf('if (PERMISSION_MODE === "bypass")'), "the bypass branch is reached first");
+  assert.match(fn, /summarizerArgs\(\{ tools: SUMMARIZER_TOOLS, deny: PERMISSION_DENY, settings: SESSION_SETTINGS \}\)/);
+  assert.strictEqual((bot.match(/summarizeCore\.summarize\(/g) || []).length,
+    (bot.match(/permissionArgs: permissionArgs\("summarizer"\)/g) || []).length, "a summary call site skips the summary flags");
 });
 
 console.log("\nPermission mode — backward compatibility");

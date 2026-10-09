@@ -18,7 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-approval list. **Upgrading:** a restricted bot that relied on MCP tools must
   name them in `BOT_PERMISSION_ALLOW`. A restricted bot can always read its own
   uploads folder (`BOT_ATTACHMENTS_DIR`) without a rule, so files people send it
-  stay readable. `bypass` bots are unchanged.
+  stay readable. `bypass` sessions are unchanged.
+- **Summaries run narrow in every mode.** Buffer-rotation, hourly and
+  `npm run summarize` summaries read chat text from anyone in the channel, yet under
+  `bypass` they ran with every tool and the skip flags, outside `BOT_SETTINGS`. They
+  now always get only `BOT_SUMMARIZER_TOOLS` (default `Read`), `dontAsk`, no MCP
+  servers, plus `BOT_PERMISSION_DENY` and `BOT_SETTINGS`. A summary needs no tools,
+  so nothing it writes changes.
 - **Mail gate.** A permission rule sees a tool's name, never its arguments, so
   allowing Gmail's `send_message` allowed mail to anyone. With
   `BOT_MAIL_ALLOWED_RECIPIENTS` set, the skill pack's `PreToolUse` gate requires

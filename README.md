@@ -253,7 +253,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `BOT_MAIL_SUBJECT_PREFIX` | *(none)* | With `BOT_MAIL_ALLOWED_RECIPIENTS` set: every sent subject must start with this, e.g. `Bot:` |
 | `BOT_CALENDAR_NO_ATTENDEES` | *(none)* | `true`: the pack's calendar gate checks the claude.ai Google Calendar `create_event`, `update_event` and `delete_event`. It refuses any attendee, any calendar but `primary`, unknown arguments, and an update or delete without `notificationLevel: "NONE"`, and fails closed. It cannot see an existing event's guests or title. Unset, calendar writes are not checked |
 | `BOT_LAND_PATHS` | *(none)* | Comma-separated globs, relative to the bot's repo (`CLAUDE_CWD`), of the files the pack's `land` skill may commit and push to the checkout's upstream branch; `!glob` excludes, e.g. `notes/**,skills/**,!skills/guarded/**`. It lands only the files it is named, refuses a checkout with unpushed commits, and undoes the commit if the push is rejected. Pair it with `Edit(...)` rules on the same paths and an allow rule for the command. Unset, landing is off |
-| `BOT_SUMMARIZER_TOOLS` | `Read` | Tools the summarizer may use |
+| `BOT_SUMMARIZER_TOOLS` | `Read` | Tools a summary run may use, in every mode. Summaries never get MCP servers or the skip flags, and take `BOT_PERMISSION_DENY` and `BOT_SETTINGS` |
 
 ### Claude
 | Variable | Default | Description |
