@@ -6,7 +6,7 @@ const assert = require("assert");
 const { readFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { pickOpenRun, askOf, buildTaskPrompt, createPaperclipPoller, FALLBACK_REPLY } = require("../lib/paperclip");
+const { pickOpenRun, askOf, askKey, buildTaskPrompt, createPaperclipPoller, FALLBACK_REPLY } = require("../lib/paperclip");
 
 const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
 let pass = 0, fail = 0;
@@ -252,6 +252,33 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.deepStrictEqual(b.writes.map((w) => w.body.comment), ["answer to B"]);
   });
 
+  await check("an edited ask or a revised task is answered again; an unchanged re-wake is not", async () => {
+    // Second-pass review of 2.7.0: the key named the ask but not its content, so
+    // a reopened task with a new description, or an edited ask, was never answered.
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    const issue = { id: "iss-1", identifier: "T-1", title: "A question", description: "v1", createdAt: "2026-01-01T00:00:00Z" };
+    let run = 0;
+    const fetch = async (url, init) => {
+      const path = url.replace(/^.*\/api/, "");
+      if (init.method === "PATCH") { writes.push(JSON.parse(init.body).comment); return { ok: true, text: async () => "{}" }; }
+      const routes = { "/agents/me": ME, "/agents/me/inbox-lite": [{ id: "iss-1" }], "/issues/iss-1": issue,
+        "/issues/iss-1/comments": comments, "/issues/iss-1/runs": [{ id: `run-${run}`, agentId: ME.id, status: "running" }] };
+      return path in routes ? { ok: true, text: async () => JSON.stringify(routes[path]) } : { ok: false, status: 404, text: async () => "" };
+    };
+    const writes = [];
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let n = 0;
+    const tick = () => { run++; return createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: async () => `answer ${++n}` }).tick(); };
+    await tick();                          // answered
+    await tick();                          // unchanged re-wake: nothing
+    comments[0] = { ...comments[0], body: "ask, edited" };
+    await tick();                          // the ask was edited
+    issue.description = "v2";
+    await tick();                          // the task was revised and reopened
+    assert.deepStrictEqual(writes, ["answer 1", "answer 2", "answer 3"]);
+  });
+
   await check("one task whose post keeps failing does not hold up the rest of the inbox", async () => {
     // Second-pass review of 2.7.0: a failure on task 1 left the loop, so task 2
     // was never reached on any tick.
@@ -278,7 +305,8 @@ const poller = (b, answer) => createPaperclipPoller({
     await p.tick(); await p.tick();
     assert.deepStrictEqual(writes, ["PATCH /issues/iss-2"]);
     assert.deepStrictEqual(asked, ["T-1", "T-2"], "each task runs once; task 1 only retries its post");
-    assert.deepStrictEqual(Object.keys(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies), ["iss-1:task"]);
+    assert.deepStrictEqual(Object.keys(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies),
+      [askKey("iss-1", { id: "iss-1", identifier: "T-1", title: "Q", createdAt: "2026-01-01T00:00:00Z" }, null)]);
   });
 
   await check("no unposted answer is dropped, however many pile up across a restart", async () => {
