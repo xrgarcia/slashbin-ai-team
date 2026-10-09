@@ -438,6 +438,32 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies, {});
   });
 
+  await check("a response that stalls mid-body times out, and the next poll goes on", async () => {
+    // Second pass on 7fc887d: api() awaited r.text() with no deadline, so one
+    // trickling response kept the tick busy and every later poll was skipped.
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    const b = board({ runs: running, comments });
+    let stall = 2, unhandled = 0;
+    const onUnhandled = () => unhandled++;
+    process.on("unhandledRejection", onUnhandled);
+    const stalling = async (url, init) => {
+      if (stall-- > 0) return { ok: true, status: 200, text: () => new Promise((_, reject) => init.signal?.addEventListener("abort", () => reject(new Error("aborted")))) };
+      return b.fetch(url, init);
+    };
+    const p = createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile: join(mkdtempSync(join(tmpdir(), "pc-")), "s.json"),
+      log: silent, fetch: stalling, requestTimeoutMs: 50, answer: async () => "the answer" });
+    // A tick stuck forever would otherwise end this file early, and silently.
+    const within = (t) => { let k; return Promise.race([t, new Promise((_, no) => { k = setTimeout(() => no(new Error("a poll is stuck on the stalled response")), 2000); })]).finally(() => clearTimeout(k)); };
+    try {
+      await within(p.tick());
+      await within(p.tick());
+      await within(p.tick());
+      await new Promise((r) => setImmediate(r));
+    } finally { process.off("unhandledRejection", onUnhandled); }
+    assert.deepStrictEqual(b.writes, [{ key: "PATCH /issues/iss-1", body: { status: "done", comment: "the answer" }, runId: "run-1" }]);
+    assert.strictEqual(unhandled, 0, "an aborted body read was left unhandled");
+  });
+
   await check("a saved answer survives Paperclip re-waking the task under a new run", async () => {
     // Second-pass review of 2.7.0: saved answers were keyed by run id, so a
     // re-wake under run-2 found nothing and ran the same ask again.
