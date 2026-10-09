@@ -94,7 +94,7 @@ check("a zip is neither — must still be passed through", () => {
   assert.strictEqual(F.isTextAttachment(f), false);
 });
 
-console.log("\nPrompt injection (the reported case)");
+console.log("\nPrompt injection (a real customer's exact case)");
 check("message.txt is named to Claude with its path", () => {
   const lines = F.buildAttachmentPrompt(
     [{ name: "message.txt", size: 3072, contentType: "text/plain", path: "/att/1-message.txt", source: "message" }], []);

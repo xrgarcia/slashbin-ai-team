@@ -45,6 +45,16 @@ for (const f of SOURCES) {
   for (const m of src.matchAll(/(?<![.\w])env\.([A-Z][A-Z0-9_]*)/g)) read.add(m[1]);
 }
 
+// Pack hooks are Python and read os.environ. The mail gate's settings are
+// operator config like any other, so they are held to the same table.
+const PACK_HOOKS = join(REPO, "skill-pack", "hooks");
+if (existsSync(PACK_HOOKS)) {
+  for (const f of readdirSync(PACK_HOOKS).filter((n) => n.endsWith(".py"))) {
+    const src = readFileSync(join(PACK_HOOKS, f), "utf8");
+    for (const m of src.matchAll(/os\.environ\.get\(\s*["']([A-Z][A-Z0-9_]*)["']/g)) read.add(m[1]);
+  }
+}
+
 // Settings the README documents: rows shaped `| \`NAME\` | default | description |`
 const readme = readFileSync(join(REPO, "README.md"), "utf8");
 const documented = new Set();
@@ -58,6 +68,7 @@ const EXEMPT = new Set([
   "CLAUDE_CODE_ENTRYPOINT",
   "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
   "X",                                     // appears only in envInt()'s own doc comment
+  "CLAUDE_PLUGIN_ROOT",                    // set by the CLI for a plugin's hooks
 ]);
 
 // Variables the harness PUBLISHES to skills, rather than settings an operator

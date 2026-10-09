@@ -44,7 +44,9 @@ module.exports = {
         BOT_REQUIRE_ALLOWLIST: 'false',
 
         // Which tools the bot may use.
-        //   restricted (default) — only BOT_ALLOWED_TOOLS, plus connected MCP tools
+        //   restricted (default) — only BOT_ALLOWED_TOOLS; any other tool, MCP
+        //                          included, is denied unless BOT_PERMISSION_ALLOW
+        //                          pre-approves it
         //   bypass               — every tool, no permission checks
         // Use bypass only for a bot you intend to let write code and run commands,
         // and only alongside a real ALLOWED_USERS.
@@ -53,6 +55,7 @@ module.exports = {
         // A per-bot value always wins over the host default.
         BOT_PERMISSION_MODE: 'restricted',
         // BOT_ALLOWED_TOOLS: 'Read,Glob,Grep,WebFetch,WebSearch,TodoWrite',
+        // BOT_PERMISSION_ALLOW: 'mcp__my-db,Bash(gh issue list:*)',
 
         // Channels answered without an @mention. Empty = mention-only (DMs always work).
         MONITOR_CHANNELS: '',

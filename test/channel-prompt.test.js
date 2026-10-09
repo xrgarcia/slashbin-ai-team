@@ -108,7 +108,7 @@ check("the block declares that it outranks what precedes it", () => {
 check("the channel block is assembled into the prompt HEAD, where clamping cannot reach it", () => {
   assert.ok(
     SRC.slice(SRC.indexOf("const head ="), SRC.indexOf("let systemPrompt;"))
-      .includes("channelPrompt(channelId, channelName)"),
+      .includes("channelPrompt(opts.promptChannel ?? channelId, channelName)"),
     "channelPrompt not called at assembly"
   );
   // From the declaration onward: the head's own definition is a template literal

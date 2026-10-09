@@ -5,6 +5,111 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] — 2026-10-08
+
+### Security
+
+- **`restricted` now restricts MCP tools too.** `--tools` limits only the built-in
+  tools: every MCP server on the host stayed exposed, and a user-level
+  `defaultMode: bypassPermissions` ran each tool unasked. Measured 2026-10-08, a
+  restricted session could reach a shell-running MCP server and Klaviyo's send and
+  write tools. Restricted sessions (and the summarizer) now run in `dontAsk` mode,
+  which denies anything not pre-approved. `BOT_PERMISSION_ALLOW` is the
+  pre-approval list. `dontAsk` would honor an approval from any settings file, so a
+  restricted session reads none: only `BOT_SETTINGS` applies, and CLAUDE.md still
+  loads. **Upgrading:** a restricted bot that relied on MCP tools must name them in
+  `BOT_PERMISSION_ALLOW`; hooks, deny rules or approvals it took from a user or
+  repo settings file move into `BOT_SETTINGS`, `BOT_PERMISSION_ALLOW` or
+  `BOT_PERMISSION_DENY`. A restricted bot can always read its own
+  uploads folder (`BOT_ATTACHMENTS_DIR`) without a rule, so files people send it
+  stay readable. `bypass` sessions are unchanged.
+- **Summaries run narrow in every mode.** Buffer-rotation, hourly and
+  `npm run summarize` summaries read chat text from anyone in the channel, yet under
+  `bypass` they ran with every tool and the skip flags, outside `BOT_SETTINGS`. They
+  now always get only `BOT_SUMMARIZER_TOOLS` (default `Read`), `dontAsk`, no MCP
+  servers, plus `BOT_PERMISSION_DENY` and `BOT_SETTINGS`. A summary needs no tools,
+  so nothing it writes changes.
+- **Mail gate.** A permission rule sees a tool's name, never its arguments, so
+  allowing Gmail's `send_message` allowed mail to anyone. With
+  `BOT_MAIL_ALLOWED_RECIPIENTS` set, the skill pack's `PreToolUse` gate requires
+  every `to`/`cc`/`bcc` address to be on the list, refuses draft sends, replies and
+  unknown arguments, and enforces `BOT_MAIL_SUBJECT_PREFIX` when set. It fails
+  closed. Bots that set neither variable are untouched.
+- **Calendar gate.** With `BOT_CALENDAR_NO_ATTENDEES` set, a bot's calendar writes
+  invite nobody: attendees on create, added attendees on update, any calendar but
+  `primary`, unknown arguments, and an update or delete without
+  `notificationLevel: "NONE"` are refused. It fails closed. Bots without the
+  setting are untouched.
+
+### Added
+
+- **`MCP_CONFIG_STRICT=true`** loads only the servers in `MCP_CONFIG`
+  (`--strict-mcp-config`), so a bot cannot see the host's other MCP servers. With
+  `MCP_CONFIG` unset it keeps the repo's own `.mcp.json` in `CLAUDE_CWD`.
+- **`MCP_CONFIG_EXTRA`** — a second `--mcp-config` (a path or inline JSON) that
+  strict mode still honours, so a bot can keep strict on and name the one
+  claude.ai connector it needs as a `claudeai-proxy` server.
+- **`BOT_PERMISSION_DENY`** maps to `--disallowedTools` (deny beats allow), so a
+  restricted bot can be pre-approved a command but stopped from aiming it
+  elsewhere — e.g. allowed on its own board, denied any `--repo`, `-R` or URL
+  naming another repo.
+- **`REPLY_FINAL_TEXT_ONLY=true`** posts only the text written after the last tool
+  call, so a working note written before a tool call never reaches the channel.
+  Off by default; every bot that does not set it replies exactly as before.
+- **`land` — a restricted bot commits and pushes only the files it names.** A raw
+  `git commit`/`push` allow rule sees only the command's prefix, so it would let a
+  bot commit anyone's uncommitted edits or publish unpushed local commits. The
+  skill pack's `land` command is the bot's only way to commit: `BOT_LAND_PATHS`
+  (globs, `!` excludes) names what may land, unset means landing is off. Every
+  concrete file git would commit is checked, so naming a folder cannot carry an
+  excluded file out with it, and a wildcard is a literal name. It
+  refuses a checkout with unpushed commits and builds the commit outside the
+  checkout, from the upstream tip plus the checked files, then pushes it by id: a
+  commit another session makes meanwhile is never published or undone, no local
+  commit hook can add to it, and a rejected push leaves nothing behind.
+- **`BOT_SETTINGS`** layers Claude Code settings (a path or inline JSON) over every
+  session through `--settings` — e.g. a sandbox around the shell.
+- **`BOT_PERMISSION_DENY` now also applies in `bypass` mode.** Nothing prompts, but
+  a denied tool or path stays denied. Unset, the bypass argv is unchanged.
+- **Paperclip connector.** Opt-in with `PAPERCLIP_URL` and `PAPERCLIP_API_KEY`: the
+  bot polls its Paperclip inbox, answers each open task through the same run path
+  as Discord, and posts the reply under the run. A board run gets least privilege
+  in every mode, `bypass` included: `BOT_BOARD_TOOLS` (read-only built-ins by
+  default) in `dontAsk`, confined to the working directory, plus whatever
+  `BOT_BOARD_PERMISSION_ALLOW` names. Board runs get one session per task, never see the Discord buffer, and
+  the key is scrubbed from Claude's environment. Nor can a board run reach Discord
+  memory any other way: the memory stores (buffer, summaries, uploads, sessions,
+  scheduled jobs) are left out of its environment, so recall reports them
+  unavailable, each path — and the state folder and outbox of files already
+  sent — carries a read deny rule, and any shell a board run is
+  allowed runs in Claude Code's sandbox confined to the working directory and
+  the system folders (no stepping outside it; a host without the sandbox fails
+  the run rather than running it open). Claude Code's project auto-memory,
+  shared with the Discord sessions in the same folder, is off for a board run,
+  and no settings file is read for one: an approval made for Discord sessions
+  (in `BOT_SETTINGS`, the repo's or the user's settings) does not carry over.
+  A board run's environment carries none of the bot's own configuration (every
+  `BOT_*` variable but the few the skill pack's hooks read, `MCP_CONFIG*`, the
+  Paperclip key, the Discord and bridge tokens), so a credential inside an inline
+  `BOT_SETTINGS` cannot be printed into a reply. Withheld as well is
+  the whole harness folder (its `.env`, logs and default state): a bot whose
+  `CLAUDE_CWD` is the harness or state folder (or inside one) keeps the connector
+  off and logs why, since the sandbox always opens its working directory. An answer whose post fails is
+  kept (across a restart) and re-posted; the task is never run twice. A comment
+  that lands while the bot is answering keeps the task open, so it is answered next;
+  a re-wake of an answered task gets a short note under its run, never a second run.
+  A file the run makes is named in the reply as not delivered, since a board
+  comment cannot carry one.
+  A board task
+  cannot book a follow-up: `schedule.mjs` refuses any destination that is not a
+  Discord channel, rather than saving a job that would never fire.
+
+### Fixed
+
+- **The background-job gate prints the bot's bridge port.** A job launched outside
+  the bot's env (systemd-run, cron) has no `WS_PORT`, so `signal.mjs` defaulted to
+  9800 and missed a bot on another port. The gate now prints `--port` explicitly.
+
 ## [2.6.0] — 2026-10-02
 
 ### Added

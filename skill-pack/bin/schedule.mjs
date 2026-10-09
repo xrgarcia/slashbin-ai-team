@@ -40,7 +40,21 @@ const MIN_WAKE_MS = 60_000;
 const MAX_WAKE_MS = 7 * 24 * 60 * 60_000;
 
 function die(msg) { console.error(msg); process.exit(1); }
-if (!SCHEDULES) die("BOT_SCHEDULES_FILE is not set — this harness is too old to support scheduling from chat.");
+
+/**
+ * Where a job posts. The scheduler looks it up in Discord's channel list, so only
+ * a Discord channel id (all digits) can ever fire. A Paperclip task's conversation
+ * is not one: a job booked there reported success and never ran.
+ */
+function destination() {
+  const channel = flag("channel") || process.env.BOT_CHANNEL_ID;
+  if (!channel) die("No channel — pass --channel or run this from a bot conversation.");
+  if (!/^\d+$/.test(channel)) {
+    die(`Cannot schedule into "${channel}": a job can only post to a Discord channel, so this one would never run. Nothing was booked — say plainly that you cannot follow up from here.`);
+  }
+  return channel;
+}
+if (!SCHEDULES) die("BOT_SCHEDULES_FILE is not set — this run cannot schedule: it is a board task, or the harness is too old to support scheduling from chat.");
 
 const load = () => { try { return JSON.parse(readFileSync(SCHEDULES, "utf8")); } catch { return []; } };
 const save = (jobs) => { mkdirSync(dirname(SCHEDULES), { recursive: true }); writeFileSync(SCHEDULES, JSON.stringify(jobs, null, 2) + "\n"); };
@@ -164,8 +178,7 @@ if (cmd === "list") {
   const jobs = load();
   if (jobs.length >= MAX_JOBS) die(`This bot already has ${jobs.length} jobs (limit ${MAX_JOBS}). Remove one first.`);
 
-  const channel = flag("channel") || process.env.BOT_CHANNEL_ID;
-  if (!channel) die("No channel — pass --channel or run this from a bot conversation.");
+  const channel = destination();
 
   const id = flag("id") || `job-${Date.now().toString(36)}`;
   if (jobs.some((j) => j.id === id)) die(`A job called ${id} already exists.`);
@@ -241,8 +254,7 @@ if (cmd === "list") {
   const jobs = load();
   if (jobs.length >= MAX_JOBS) die(`This bot already has ${jobs.length} jobs (limit ${MAX_JOBS}). Remove one first.`);
 
-  const channel = flag("channel") || process.env.BOT_CHANNEL_ID;
-  if (!channel) die("No channel — pass --channel or run this from a bot conversation.");
+  const channel = destination();
 
   const id = flag("id") || `wake-${Date.now().toString(36)}`;
   if (jobs.some((j) => j.id === id)) die(`A job called ${id} already exists.`);
