@@ -81,6 +81,29 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.strictEqual(calls, 1);
   });
 
+  await check("a failed post is retried without running the task again, even across a restart", async () => {
+    // Second-pass review of 2.7.0: the run's answer was dropped when the PATCH
+    // failed, so the next tick ran the task again — a second email, a second record.
+    const b = board({ runs: running });
+    let failPatch = 2;
+    const flaky = async (url, init) => {
+      if (init.method === "PATCH" && failPatch-- > 0) return { ok: false, status: 502, text: async () => "bad gateway" };
+      return b.fetch(url, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let calls = 0;
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile,
+      answer: async () => { calls++; return "the answer"; }, log: silent, fetch: flaky });
+    await make().tick();          // runs the task; the post fails
+    await make().tick();          // a restarted bot: the post fails again
+    await make().tick();          // the post lands
+    assert.strictEqual(calls, 1, "the task ran more than once");
+    assert.deepStrictEqual(b.writes.map((w) => w.body.comment), ["the answer"]);
+    const p = make(); await p.tick();
+    assert.strictEqual(calls, 1); assert.strictEqual(b.writes.length, 1);
+    assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies, {});
+  });
+
   await check("bot.js: board runs never see the buffer, and the key never reaches Claude", () => {
     assert.match(bot, /noBufferContext: true/);
     assert.match(bot, /opts\.noBufferContext \? "" : buildContextPrompt/);

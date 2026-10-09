@@ -62,7 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bot polls its Paperclip inbox, answers each open task through the same run path
   as Discord (same tools, permissions and MCP config), and posts the reply under
   the run. Board runs get one session per task, never see the Discord buffer, and
-  the key is scrubbed from Claude's environment.
+  the key is scrubbed from Claude's environment. An answer whose post fails is
+  kept (across a restart) and re-posted; the task is never run twice.
 
 ### Fixed
 
