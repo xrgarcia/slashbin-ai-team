@@ -80,8 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allowed runs in Claude Code's sandbox confined to the working directory (no
   stepping outside it; a host without the sandbox fails the run rather than
   running it open). The bot's
-  Discord token and bridge token are withheld from a board run as well, by
-  variable and by denying its credentials file and setup's backup of it. An answer whose post fails is
+  Discord token and bridge token are withheld from a board run as well, and so is
+  the whole harness folder (its `.env`, logs and default state): a bot whose
+  `CLAUDE_CWD` is the harness folder gives board runs nothing to read. An answer whose post fails is
   kept (across a restart) and re-posted; the task is never run twice. A comment
   that lands while the bot is answering keeps the task open, so it is answered next;
   a re-wake of an answered task gets a short note under its run, never a second run.

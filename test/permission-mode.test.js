@@ -207,11 +207,11 @@ check("a board run drops every memory variable and denies the path each one name
   // Second pass on e4411f4: files already sent to Discord sit in the outbox,
   // which can be moved anywhere, including inside CLAUDE_CWD.
   const denied = /function boardDeniedPaths\(\) \{[\s\S]*?\n\}/.exec(src)[0];
-  assert.match(denied, /return \[\.\.\.privateMemoryPaths\(\), STATE_DIR, OUTBOX_DIR, \.\.\.credentialFiles\];/, "the outbox or state folder is readable to a board run");
-  // Second pass on 0f2539f: with the default CLAUDE_CWD the board run's Read
-  // tool sits next to the bot's .env, whatever was removed from its environment.
-  assert.match(denied, /\[process\.cwd\(\), __dirname\]/, "dotenv reads .env from the process folder");
-  assert.match(denied, /\["\.env", "\.env\.bak"\]/, "the credentials file or setup's backup of it is readable to a board run");
+  // Second passes on 0f2539f and 1bf0c97: with the default CLAUDE_CWD a board
+  // run's Read tool sat next to the bot's .env and every instance's log. The
+  // harness folder (and the folder dotenv reads from) is denied whole.
+  assert.match(denied, /return \[\.\.\.privateMemoryPaths\(\), STATE_DIR, OUTBOX_DIR, \.\.\.new Set\(\[__dirname, process\.cwd\(\)\]\)\];/,
+    "the outbox, state folder or harness folder is readable to a board run");
   assert.match(src, /noBufferContext: true/, "the Paperclip run no longer marks itself as a board run");
 });
 

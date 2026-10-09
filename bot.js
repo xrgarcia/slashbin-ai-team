@@ -1124,15 +1124,12 @@ function privateMemoryPaths() {
 // Everything a board run must not read. The private-memory paths can be moved
 // out of the state folder one by one, so they are named as well as the folder;
 // the outbox holds every file already sent to Discord, wherever it is put.
-// The bot's credentials file is withheld too: withholding the variables from
-// the environment means nothing while the default CLAUDE_CWD is the folder
-// holding .env. Only files that exist are named, so the sandbox never has to
-// mask a path that is not there.
+// The harness folder is withheld whole: it holds .env, every instance's log
+// (each request's opening words), and any state left at its defaults. Naming
+// those files one by one kept missing one. A bot that leaves CLAUDE_CWD at the
+// harness folder therefore gives its board runs nothing to read.
 function boardDeniedPaths() {
-  const credentialFiles = [...new Set([process.cwd(), __dirname])]
-    .flatMap((dir) => [".env", ".env.bak"].map((f) => join(dir, f)))
-    .filter((p) => existsSync(p));
-  return [...privateMemoryPaths(), STATE_DIR, OUTBOX_DIR, ...credentialFiles];
+  return [...privateMemoryPaths(), STATE_DIR, OUTBOX_DIR, ...new Set([__dirname, process.cwd()])];
 }
 LEGACY_STATE.push([join(__dirname, `.${BOT_NAME}-sessions.json`), SESSION_FILE]);
 // Moved out of the summaries directory: a schedule is the user's, and losing it
