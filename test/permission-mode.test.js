@@ -5,7 +5,7 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, privateMemoryDeny, boardArgs, boardSettings } = require("../lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, privateMemoryDeny, boardArgs, boardSettings, SYSTEM_READ } = require("../lib/permission-mode");
 const { readFileSync, writeFileSync, mkdtempSync, mkdirSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
@@ -240,13 +240,16 @@ check("a board run's shell is sandboxed to the working directory, on top of the 
   assert.strictEqual(s.sandbox.enabled, true);
   assert.strictEqual(s.sandbox.failIfUnavailable, true, "a host without the sandbox would run the board task open");
   assert.strictEqual(s.sandbox.allowUnsandboxedCommands, false, "a command could step outside the sandbox");
-  assert.deepStrictEqual(s.sandbox.filesystem.denyRead, ["/etc/secret", "~/", "/repo/bot-history", "/state/buffer.txt"]);
-  assert.deepStrictEqual(s.sandbox.filesystem.allowRead, ["/opt/tools", "/repo"]);
+  assert.deepStrictEqual(s.sandbox.filesystem.denyRead, ["/etc/secret", "/", "/repo/bot-history", "/state/buffer.txt"]);
+  // Second pass on 1a1d7a2: denying only the home folder left /srv/bot-b/state readable.
+  const sys = (a) => a.filter((p) => !SYSTEM_READ.includes(p));
+  assert.ok(SYSTEM_READ.includes("/usr") && !SYSTEM_READ.some((p) => /^\/(tmp|var|srv|opt|home|root|mnt)\b/.test(p)), "a system allowRead reopens where bots keep state");
+  assert.deepStrictEqual(sys(s.sandbox.filesystem.allowRead), ["/opt/tools", "/repo"]);
   // Second pass on 8260cf4: an allowRead is mounted back over a denyRead, so a
   // working directory that IS the denied harness folder must not be allowed.
   const harness = boardSettings({ sandbox: { filesystem: { allowRead: ["/opt/tools", "/bot/logs", "/bot"] } } }, ["/bot", "/state"], "/bot");
-  assert.deepStrictEqual(harness.sandbox.filesystem.allowRead, ["/opt/tools"], "an allowRead reopens a denied folder");
-  assert.deepStrictEqual(boardSettings(null, ["/bot"], "/bot-po").sandbox.filesystem.allowRead, ["/bot-po"], "a sibling folder is not inside a denied one");
+  assert.deepStrictEqual(sys(harness.sandbox.filesystem.allowRead), ["/opt/tools"], "an allowRead reopens a denied folder");
+  assert.deepStrictEqual(sys(boardSettings(null, ["/bot"], "/bot-po").sandbox.filesystem.allowRead), ["/bot-po"], "a sibling folder is not inside a denied one");
   const open = boardSettings({ sandbox: { enabled: false, allowUnsandboxedCommands: true } }, ["/s"], "/repo");
   assert.strictEqual(open.sandbox.enabled, true, "a bot that turns its sandbox off turns it off for board runs too");
   assert.strictEqual(open.sandbox.allowUnsandboxedCommands, false);

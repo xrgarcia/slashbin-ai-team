@@ -78,9 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scheduled jobs) are left out of its environment, so recall reports them
   unavailable, each path — and the state folder and outbox of files already
   sent — carries a read deny rule, and any shell a board run is
-  allowed runs in Claude Code's sandbox confined to the working directory (no
-  stepping outside it; a host without the sandbox fails the run rather than
-  running it open). The bot's
+  allowed runs in Claude Code's sandbox confined to the working directory and
+  the system folders (no stepping outside it; a host without the sandbox fails
+  the run rather than running it open). The bot's
   Discord token and bridge token are withheld from a board run as well, and so is
   the whole harness folder (its `.env`, logs and default state): a bot whose
   `CLAUDE_CWD` is the harness folder gives board runs nothing to read. An answer whose post fails is
