@@ -138,7 +138,7 @@ In your shell (add `-- --name <bot>` to target one instance):
 |---|---|
 | `npm run setup` | Interactive configuration, validated as you go |
 | `npm run doctor` | Check an existing install; exits non-zero on failure |
-| `npm run doctor:fleet` | Check **every** bot in `ecosystem.config.js` in one pass — tokens, schedules, stale processes |
+| `npm run doctor:fleet` | Check **every** bot in `ecosystem.config.js` in one pass — tokens, Paperclip board keys, schedules, stale processes |
 | `npm run signal <name>` | Tell a bot something happened, waking any follow-up that was waiting for it |
 | `npm run advise` | Read an existing install and list what to do **before** upgrading. `--json` for an agent; `--dir` to point at any checkout |
 | `npm start` / `stop` / `restart` | Manage the bot |
