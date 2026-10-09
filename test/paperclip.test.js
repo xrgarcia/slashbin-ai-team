@@ -29,7 +29,12 @@ function board({ runs, comments = [], wakeCommentId }) {
   };
   const fetch = async (url, init) => {
     const key = `${init.method} ${url.replace(/^.*\/api/, "")}`;
-    if (init.method === "PATCH") { writes.push({ key, body: JSON.parse(init.body), runId: init.headers["x-paperclip-run-id"] }); return { ok: true, text: async () => "{}" }; }
+    if (init.method === "PATCH") {
+      const body = JSON.parse(init.body);
+      writes.push({ key, body, runId: init.headers["x-paperclip-run-id"] });
+      if (body.status) routes["GET /issues/iss-1"].status = body.status;
+      return { ok: true, text: async () => "{}" };
+    }
     if (!(key in routes)) return { ok: false, status: 404, text: async () => "" };
     return { ok: true, text: async () => JSON.stringify(routes[key]) };
   };
@@ -148,6 +153,34 @@ const poller = (b, answer) => createPaperclipPoller({
       assert.deepStrictEqual(writes, [[run, { status: "done", comment: rewake ? ALREADY_ANSWERED : "the answer" }], [run, { status: "todo" }]],
         `${rewake ? "re-wake note" : "answer"}: the reopen was not retried`);
       assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).closing, {});
+    }
+  });
+
+  await check("a task a person cancelled or blocked as it closed is never reopened", async () => {
+    // Second-pass review of 2.7.0: the look after closing reopened any task whose
+    // ask moved, so a comment-and-cancel came back as todo.
+    for (const decided of ["cancelled", "blocked"]) {
+      const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "first ask" }];
+      const issue = { id: "iss-1", identifier: "T-1", title: "A question", status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
+      const writes = [];
+      const fetch = async (url, init) => {
+        const path = url.replace(/^.*\/api/, "");
+        if (init.method === "PATCH") {
+          const body = JSON.parse(init.body);
+          writes.push(body);
+          comments.push({ id: "h2", authorAgentId: null, createdAt: "2026-01-02T00:03:00Z", body: "never mind" });
+          issue.status = decided;     // the person's decision lands right after the close
+          return { ok: true, text: async () => "{}" };
+        }
+        const routes = { "/agents/me": ME, "/agents/me/inbox-lite": [{ id: "iss-1" }], "/issues/iss-1": issue,
+          "/issues/iss-1/comments": comments, "/issues/iss-1/runs": running };
+        return path in routes ? { ok: true, text: async () => JSON.stringify(routes[path]) } : { ok: false, status: 404, text: async () => "" };
+      };
+      const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+      await createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+        answer: async () => "the answer" }).tick();
+      assert.deepStrictEqual(writes, [{ status: "done", comment: "the answer" }], `a ${decided} task was reopened`);
+      assert.strictEqual(issue.status, decided);
     }
   });
 
