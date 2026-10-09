@@ -6,7 +6,7 @@ const assert = require("assert");
 const { readFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { pickOpenRun, alreadyAnswered, buildTaskPrompt, createPaperclipPoller, FALLBACK_REPLY } = require("../lib/paperclip");
+const { pickOpenRun, askOf, buildTaskPrompt, createPaperclipPoller, FALLBACK_REPLY } = require("../lib/paperclip");
 
 const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
 let pass = 0, fail = 0;
@@ -49,10 +49,13 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.strictEqual(pickOpenRun(runs, ME.id, new Set(["c"])), null);
   });
 
-  await check("a run whose wake the agent already replied to is not answered again", () => {
-    const comments = [{ id: "w", authorAgentId: null, createdAt: "1" }, { id: "r", authorAgentId: ME.id, createdAt: "2" }];
-    assert.strictEqual(alreadyAnswered(comments, "w", ME.id, "0"), true);
-    assert.strictEqual(alreadyAnswered([comments[0]], "w", ME.id, "0"), false);
+  await check("the ask is the wake comment, else the latest human one — never the bot's own", () => {
+    const comments = [{ id: "h1", authorAgentId: null, createdAt: "1" }, { id: "h2", authorAgentId: null, createdAt: "2" },
+      { id: "r", authorAgentId: ME.id, createdAt: "3" }];
+    assert.strictEqual(askOf(comments, "h1", ME.id).id, "h1");
+    assert.strictEqual(askOf(comments, undefined, ME.id).id, "h2");
+    assert.strictEqual(askOf(comments, "r", ME.id).id, "h2", "a run woken by the bot's own comment is not a new ask");
+    assert.strictEqual(askOf([], undefined, ME.id), null);
   });
 
   await check("the prompt carries the task and its thread", () => {
@@ -188,6 +191,40 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.deepStrictEqual(b.writes.map((w) => w.body.comment), ["first answer\n\n---\n\nsecond answer"],
       "the earlier ask's unposted answer must go out with the new one, not be dropped");
     assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies, {});
+  });
+
+  await check("a progress note left by a run that never finished does not count as the answer", async () => {
+    // Second-pass review of 2.7.0: any later comment of ours marked the ask
+    // handled, so a restart mid-run left the task unanswered and open for good.
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" },
+      { id: "p", authorAgentId: ME.id, createdAt: "2026-01-02T00:01:00Z", body: "working on it" }];
+    const b = board({ runs: running, comments, wakeCommentId: "w" });
+    let calls = 0;
+    await poller(b, async () => { calls++; return "the answer"; }).tick();
+    assert.strictEqual(calls, 1);
+    assert.deepStrictEqual(b.writes.map((w) => w.body.comment), ["the answer"]);
+  });
+
+  await check("an answered ask is not answered again when Paperclip re-wakes it under a new run", async () => {
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    const b = board({ runs: running, comments, wakeCommentId: "w" });
+    let runs = running;
+    const fetch = async (url, init) => {
+      const path = url.replace(/^.*\/api/, "");
+      if (path === "/issues/iss-1/runs") return { ok: true, text: async () => JSON.stringify(runs) };
+      if (path === "/heartbeat-runs/run-2") return { ok: true, text: async () => JSON.stringify({ contextSnapshot: {} }) };
+      if (init.method === "PATCH") comments.push({ id: "a", authorAgentId: ME.id, createdAt: "2026-01-02T00:02:00Z", body: JSON.parse(init.body).comment });
+      return b.fetch(url, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let calls = 0;
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: async () => { calls++; return "the answer"; } });
+    await make().tick();
+    runs = [{ id: "run-2", agentId: ME.id, status: "running" }];
+    await make().tick();
+    assert.strictEqual(calls, 1, "a re-wake answered the same ask twice");
+    assert.strictEqual(b.writes.length, 1);
   });
 
   await check("one task whose post keeps failing does not hold up the rest of the inbox", async () => {
