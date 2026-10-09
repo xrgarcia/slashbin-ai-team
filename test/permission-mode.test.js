@@ -128,6 +128,15 @@ check("a bot whose CLAUDE_CWD is a denied folder answers no board", () => {
   assert.ok(!boardCwdDenied(denied, "/repo"));
   assert.ok(!boardCwdDenied(denied, "/harness-two"));
   assert.ok(!boardCwdDenied(denied, "/data"), "a denied folder inside the working directory stays hidden");
+  // Second pass on 0897d78: a symlink to a denied folder is that folder.
+  const tmp = mkdtempSync(join(require("os").tmpdir(), "board-alias-"));
+  mkdirSync(join(tmp, "harness"));
+  require("fs").symlinkSync(join(tmp, "harness"), join(tmp, "alias"));
+  assert.ok(boardCwdDenied([join(tmp, "harness")], join(tmp, "alias")), "an alias of a denied folder passes");
+  assert.ok(boardCwdDenied([join(tmp, "alias")], join(tmp, "harness")), "a denied alias misses its target");
+  assert.ok(boardCwdDenied([join(tmp, "harness")], join(tmp, "alias", "not-made-yet")));
+  const fsSettings = boardSettings(null, [join(tmp, "harness")], join(tmp, "alias")).sandbox.filesystem;
+  assert.ok(!fsSettings.allowRead.some((p) => p.startsWith(tmp)), "the alias is still given an allowRead");
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
   assert.match(src, /const PAPERCLIP_CWD_DENIED = boardCwdDenied\(boardDeniedPaths\(\), CLAUDE_CWD\);\nif \(PAPERCLIP_URL && PAPERCLIP_API_KEY && PAPERCLIP_CWD_DENIED\) \{\n  log\.error/);
   assert.ok(src.indexOf("PAPERCLIP_CWD_DENIED) {") < src.indexOf("createPaperclipPoller({"), "the poller starts before the check");
