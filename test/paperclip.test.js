@@ -107,6 +107,15 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.ok(Buffer.byteLength(huge) <= 96 * 1024 && huge.includes(ask.body), "a long description crowded out the ask");
     assert.match(huge, /rest of the description is left out/);
 
+    // Second pass on 8990c51: a 110 KB answer of the bot's own after an edited
+    // ask was kept whole, and the ask was cut to nothing to make room.
+    const long = { id: "long", authorAgentId: ME.id, createdAt: "100", body: `my long answer ${"w".repeat(110000)}` };
+    const edited = buildTaskPrompt({ identifier: "T-1", title: "Q" }, [...old.slice(0, 3), ask, long, after], ME, "u");
+    assert.ok(Buffer.byteLength(edited) <= 96 * 1024, `the prompt is ${Buffer.byteLength(edited)} bytes`);
+    assert.ok(edited.includes(ask.body), "the bot's own later comments crowded out the ask");
+    assert.match(edited, /1 of your own later comment is left out/);
+    assert.ok(edited.includes(after.body), "a later comment that fits was dropped");
+
     const alone = buildTaskPrompt({ identifier: "T-1", title: "Q" }, [{ ...ask, body: "z\n".repeat(100000) }], ME, "u");
     assert.ok(Buffer.byteLength(alone) <= 96 * 1024);
     assert.match(alone, /This ask was cut here.*Say so in your reply/);
