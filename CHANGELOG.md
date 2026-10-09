@@ -5,6 +5,27 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] — 2026-10-09
+
+### Added
+
+- **`doctor:fleet` checks each bot's Paperclip board.** For a bot that sets
+  `PAPERCLIP_URL` and `PAPERCLIP_API_KEY`, it signs in to the board with the key
+  and names the agent it gets back, fails a key the board rejects, and fails a
+  `CLAUDE_CWD` the connector would refuse at startup (the harness or the bot's
+  state folder, or inside one). Half a board config warns that the connector is
+  off. Before this, a revoked key showed only as a board task failing 20 minutes
+  later. The key is read from the environment by name and never printed.
+
+### Fixed
+
+- **`doctor`'s dead-settings check flagged working settings.** It read only the
+  harness's own source, so the switches read by the skill pack's hooks and commands
+  (`BOT_MAIL_*`, `BOT_CALENDAR_NO_ATTENDEES`, `BOT_LAND_PATHS`), the variables a
+  bot's `.mcp.json` interpolates, and git's and gh's own (`GIT_*`, `GH_*`) were
+  all recommended for deletion. It now reads the skill pack and the names in each
+  bot's `.mcp.json`, and leaves `GIT_*`, `GH_*` and `GITHUB_TOKEN` to those tools.
+
 ## [2.7.0] — 2026-10-08
 
 ### Security

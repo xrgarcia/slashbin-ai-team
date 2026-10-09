@@ -12,14 +12,25 @@
 // genuinely broken single-bot install still fails.
 
 const assert = require("assert");
-const { mkdtempSync, writeFileSync, rmSync } = require("fs");
+const { mkdtempSync, writeFileSync, rmSync, mkdirSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
 
-let failures = 0;
+let failures = 0, passes = 0;
+async function checkAsync(name, fn) {
+  try {
+    await fn();
+    passes++;
+    console.log(`  ok   ${name}`);
+  } catch (err) {
+    failures++;
+    console.log(`  FAIL ${name}\n       ${err.message}`);
+  }
+}
 function check(name, fn) {
   try {
     fn();
+    passes++;
     console.log(`  ok   ${name}`);
   } catch (err) {
     failures++;
@@ -62,7 +73,7 @@ module.exports = {
 `;
 
 (async () => {
-  const { parseFleet, render, PASS, FAIL, WARN, SKIP } = await import("../scripts/lib/checks.mjs");
+  const { parseFleet, render, checkPaperclip, checkEcosystem, PASS, FAIL, WARN, SKIP } = await import("../scripts/lib/checks.mjs");
 
   const dir = mkdtempSync(join(tmpdir(), "doctor-fleet-"));
   const write = (name, body) => {
@@ -178,8 +189,126 @@ module.exports = { apps: [ { env: {
     assert.ok(!out.includes("skipped"), "no skips must not print a skipped count");
   });
 
+  console.log("\nA bot on a Paperclip board");
+
+  const BOARD = (extra) => `
+module.exports = { apps: [ { env: {
+  BOT_NAME: 'product-owner',
+  DISCORD_TOKEN: process.env.PO_DISCORD_TOKEN,
+  CLAUDE_CWD: '/srv/po',
+  BOT_STATE_DIR: '/var/bot-data/product-owner',
+${extra}
+} } ] };
+`;
+  const KEYED = "  PAPERCLIP_URL: 'https://board.example/',\n  PAPERCLIP_API_KEY: process.env.PO_PAPERCLIP_API_KEY,";
+  const reply = (status, body) => async (url, init) => {
+    reply.seen = { url, auth: init.headers.authorization };
+    return { status, ok: status < 300, json: async () => body };
+  };
+
+  check("the board key is read as a variable NAME, never a value", () => {
+    const [bot] = parseFleet(write("pc.js", BOARD(KEYED)));
+    assert.strictEqual(bot.paperclipUrl, "https://board.example/");
+    assert.strictEqual(bot.paperclipKeyVar, "PO_PAPERCLIP_API_KEY");
+  });
+
+  await checkAsync("a bot on no board gets no line", async () => {
+    const [bot] = parseFleet(write("nopc.js", BOARD("")));
+    assert.strictEqual(await checkPaperclip(bot, "/srv/harness", {}, { fetch: reply(200, {}) }), null);
+  });
+
+  await checkAsync("half a board config warns that the connector is off", async () => {
+    const [bot] = parseFleet(write("half.js", BOARD("  PAPERCLIP_URL: 'https://board.example',")));
+    const r = await checkPaperclip(bot, "/srv/harness", {}, { fetch: reply(200, {}) });
+    assert.strictEqual(r.status, WARN);
+    assert.match(r.detail, /PAPERCLIP_API_KEY is not set/);
+  });
+
+  await checkAsync("a key the board takes passes, naming the agent it signs in as", async () => {
+    const [bot] = parseFleet(write("good.js", BOARD(KEYED)));
+    const r = await checkPaperclip(bot, "/srv/harness", { PO_PAPERCLIP_API_KEY: "k1" }, { fetch: reply(200, { name: "Product Owner" }) });
+    assert.strictEqual(r.status, PASS, r.detail);
+    assert.match(r.detail, /signed in as Product Owner/);
+    assert.strictEqual(reply.seen.url, "https://board.example/api/agents/me");
+    assert.ok(!r.detail.includes("k1"), "the key must never be printed");
+  });
+
+  await checkAsync("a key the board rejects fails, naming the variable and not its value", async () => {
+    const [bot] = parseFleet(write("revoked.js", BOARD(KEYED)));
+    const r = await checkPaperclip(bot, "/srv/harness", { PO_PAPERCLIP_API_KEY: "k2" }, { fetch: reply(401, {}) });
+    assert.strictEqual(r.status, FAIL);
+    assert.match(r.detail, /rejected PO_PAPERCLIP_API_KEY/);
+    assert.ok(!r.detail.includes("k2"));
+  });
+
+  await checkAsync("a CLAUDE_CWD inside the harness fails, as the bot itself would refuse it", async () => {
+    const [bot] = parseFleet(write("cwd.js", BOARD(KEYED).replace("'/srv/po'", "'/srv/harness/notes'")));
+    const r = await checkPaperclip(bot, "/srv/harness", { PO_PAPERCLIP_API_KEY: "k" }, { fetch: reply(200, {}) });
+    assert.strictEqual(r.status, FAIL);
+    assert.match(r.detail, /connector stays off/);
+  });
+
+  await checkAsync("a key not loaded in this shell warns instead of guessing", async () => {
+    const [bot] = parseFleet(write("unset.js", BOARD(KEYED)));
+    const r = await checkPaperclip(bot, "/srv/harness", {}, { fetch: reply(200, {}) });
+    assert.strictEqual(r.status, WARN);
+  });
+
+  console.log("\nDead settings: a setting something really reads is not dead");
+
+  const deadOf = (eco, files = {}, mcp = null) => {
+    const src = mkdtempSync(join(tmpdir(), "doctor-src-"));
+    writeFileSync(join(src, "bot.js"), "process.env.BOT_NAME; process.env.DISCORD_TOKEN; process.env.CLAUDE_CWD;");
+    for (const [rel, body] of Object.entries(files)) {
+      const p = join(src, rel);
+      mkdirSync(join(p, ".."), { recursive: true });
+      writeFileSync(p, body);
+    }
+    const cwd = mkdtempSync(join(tmpdir(), "doctor-cwd-"));
+    if (mcp) writeFileSync(join(cwd, ".mcp.json"), mcp);
+    const ecoFile = write(`eco-${Math.random().toString(36).slice(2)}.js`, eco.replace("__CWD__", cwd));
+    const line = checkEcosystem(ecoFile, src).find((r) => r.name === "ecosystem: dead settings");
+    rmSync(src, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+    return line;
+  };
+  const ECO = (keys) => `
+module.exports = { apps: [ { env: {
+  BOT_NAME: 'x',
+  DISCORD_TOKEN: process.env.X_DISCORD_TOKEN,
+  CLAUDE_CWD: '__CWD__',
+${keys.map((k) => `  ${k}: 'v',`).join("\n")}
+} } ] };
+`;
+
+  check("a switch read only by a pack hook (Python) is not dead", () => {
+    const line = deadOf(ECO(["BOT_MAIL_ALLOW"]), { "skill-pack/hooks/gate.py": 'os.environ.get("BOT_MAIL_ALLOW", "")' });
+    assert.strictEqual(line.status, PASS, line.detail);
+  });
+
+  check("a switch read only by a pack command (JS) is not dead", () => {
+    const line = deadOf(ECO(["BOT_LAND_PATHS"]), { "skill-pack/bin/land.mjs": "process.env.BOT_LAND_PATHS" });
+    assert.strictEqual(line.status, PASS, line.detail);
+  });
+
+  check("git and gh settings are theirs to read, not dead", () => {
+    const line = deadOf(ECO(["GIT_AUTHOR_NAME", "GH_TOKEN"]));
+    assert.strictEqual(line.status, PASS, line.detail);
+  });
+
+  check("a variable the bot's MCP config interpolates is not dead", () => {
+    const line = deadOf(ECO(["BOARD_KEY"]), {}, JSON.stringify({ mcpServers: { b: { headers: { k: "${BOARD_KEY}" } } } }));
+    assert.strictEqual(line.status, PASS, line.detail);
+  });
+
+  check("a setting nothing reads is still reported dead", () => {
+    const line = deadOf(ECO(["BOT_MAIL_ALLOW", "NOBODY_READS_THIS"]), { "skill-pack/hooks/gate.py": 'os.environ["BOT_MAIL_ALLOW"]' });
+    assert.strictEqual(line.status, WARN);
+    assert.strictEqual(line.detail, "NOBODY_READS_THIS");
+  });
+
   rmSync(dir, { recursive: true, force: true });
 
-  console.log(`\n${11 - failures} passed, ${failures} failed\n`);
+  console.log(`\n${passes} passed, ${failures} failed\n`);
   process.exit(failures ? 1 : 0);
 })();
