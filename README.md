@@ -224,7 +224,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `CLAUDE_CWD` | current dir | **Your** project repo — its `CLAUDE.md` is the bot's role |
 | `BOT_NAME` | `bot` | Instance name; scopes pid, log and session files |
 | `MCP_CONFIG` | *(none)* | Path to `.mcp.json` if not in `CLAUDE_CWD` |
-| `MCP_CONFIG_STRICT` | `false` | `true` loads ONLY the servers in `MCP_CONFIG` (`--strict-mcp-config`) |
+| `MCP_CONFIG_STRICT` | `false` | `true` loads ONLY the servers in `MCP_CONFIG` (`--strict-mcp-config`), or in `CLAUDE_CWD`'s own config when `MCP_CONFIG` is unset |
 | `MCP_CONFIG_EXTRA` | *(none)* | A second `--mcp-config` (path or inline JSON) beside `MCP_CONFIG` — e.g. one claude.ai connector as `claudeai-proxy` while strict drops the rest |
 | `BOT_SKILL_PACK` | `<harness>/skill-pack` | Harness-owned skills loaded into every bot. Empty disables |
 | `BOT_EXTRA_SKILL_PACKS` | *(none)* | Additional plugin directories, comma-separated |

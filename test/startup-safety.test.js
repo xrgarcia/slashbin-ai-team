@@ -416,9 +416,23 @@ check("restricted sessions deny what is not pre-approved, so MCP tools are gated
   assert.ok(/function summarizerArgs[\s\S]*?"--permission-mode", "dontAsk"/.test(perm), "summary runs must run in dontAsk");
 });
 
-check("MCP_CONFIG_STRICT makes MCP_CONFIG the only MCP source", () => {
-  assert.ok(/MCP_CONFIG_STRICT === "true" \? \["--strict-mcp-config"\]/.test(bot),
-    "MCP_CONFIG_STRICT=true must pass --strict-mcp-config");
+check("MCP_CONFIG_STRICT holds without MCP_CONFIG, and keeps the repo's own config", () => {
+  // Second-pass review of 2.7.0: with MCP_CONFIG unset, mcpArgs() returned []
+  // before looking at strict, so the host's servers stayed and EXTRA was dropped.
+  // Measured 2026-10-08: --strict-mcp-config alone also drops CLAUDE_CWD/.mcp.json.
+  const fn = /function mcpArgs\(\) \{[\s\S]*?\n\}/.exec(bot)[0];
+  const { mkdtempSync, writeFileSync, existsSync } = require("fs");
+  const dir = mkdtempSync(join(require("os").tmpdir(), "mcp-"));
+  const repoConfig = join(dir, ".mcp.json");
+  const run = (env) => new Function("process", "join", "existsSync", "CLAUDE_CWD", `${fn}; return mcpArgs();`)(
+    { env }, join, existsSync, dir);
+  assert.deepStrictEqual(run({ MCP_CONFIG_STRICT: "true" }), ["--strict-mcp-config"]);
+  writeFileSync(repoConfig, "{}");
+  assert.deepStrictEqual(run({ MCP_CONFIG_STRICT: "true", MCP_CONFIG_EXTRA: "{x}" }),
+    ["--mcp-config", repoConfig, "--mcp-config", "{x}", "--strict-mcp-config"]);
+  assert.deepStrictEqual(run({ MCP_CONFIG: "/a.json", MCP_CONFIG_STRICT: "true" }),
+    ["--mcp-config", "/a.json", "--strict-mcp-config"]);
+  assert.deepStrictEqual(run({}), [], "without strict, the repo's own config loads by itself");
 });
 
 check("MCP_CONFIG_EXTRA is a second --mcp-config, still under strict", () => {

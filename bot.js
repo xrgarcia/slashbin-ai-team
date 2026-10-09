@@ -185,12 +185,17 @@ function settingsArgs() {
 // MCP_CONFIG_EXTRA is a second --mcp-config (a path or an inline JSON string) for
 // servers that cannot live in the repo's .mcp.json, e.g. ONE claude.ai connector as
 // {"type":"claudeai-proxy","url":…,"id":…} — strict still drops every other one.
+//
+// Strict does not depend on MCP_CONFIG being set. With it unset, strict names the
+// repo's own .mcp.json, which --strict-mcp-config would otherwise drop with the rest.
 function mcpArgs() {
-  if (!process.env.MCP_CONFIG) return [];
+  const strict = process.env.MCP_CONFIG_STRICT === "true";
+  const repoConfig = join(CLAUDE_CWD, ".mcp.json");
+  const own = process.env.MCP_CONFIG || (strict && existsSync(repoConfig) ? repoConfig : "");
   return [
-    "--mcp-config", process.env.MCP_CONFIG,
+    ...(own ? ["--mcp-config", own] : []),
     ...(process.env.MCP_CONFIG_EXTRA ? ["--mcp-config", process.env.MCP_CONFIG_EXTRA] : []),
-    ...(process.env.MCP_CONFIG_STRICT === "true" ? ["--strict-mcp-config"] : []),
+    ...(strict ? ["--strict-mcp-config"] : []),
   ];
 }
 

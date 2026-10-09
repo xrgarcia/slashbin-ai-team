@@ -40,7 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`MCP_CONFIG_STRICT=true`** loads only the servers in `MCP_CONFIG`
-  (`--strict-mcp-config`), so a bot cannot see the host's other MCP servers.
+  (`--strict-mcp-config`), so a bot cannot see the host's other MCP servers. With
+  `MCP_CONFIG` unset it keeps the repo's own `.mcp.json` in `CLAUDE_CWD`.
 - **`MCP_CONFIG_EXTRA`** — a second `--mcp-config` (a path or inline JSON) that
   strict mode still honours, so a bot can keep strict on and name the one
   claude.ai connector it needs as a `claudeai-proxy` server.
