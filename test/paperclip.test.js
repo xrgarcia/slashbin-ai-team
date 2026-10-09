@@ -263,6 +263,27 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.strictEqual(b.writes.length, 2, "the re-wake was acknowledged twice");
   });
 
+  await check("a bot that dies mid-answer does not run the ask again after a restart", async () => {
+    // Second-pass review of 2.7.0: the attempt was saved only after the run, so
+    // a crash in between ran the ask twice — a second email, a second record.
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    let runs = running;
+    const b = board({ runs, comments });
+    const fetch = async (url, init) => url.endsWith("/issues/iss-1/runs")
+      ? { ok: true, text: async () => JSON.stringify(runs) } : b.fetch(url, init);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let calls = 0, started;
+    const inRun = new Promise((r) => { started = r; });
+    createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: () => { calls++; started(); return new Promise(() => {}); } }).tick();   // dies mid-run
+    await inRun;
+    runs = [{ id: "run-2", agentId: ME.id, status: "running" }];
+    await createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: async () => { calls++; return "the answer"; } }).tick();
+    assert.strictEqual(calls, 1, "the ask ran a second time");
+    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-2", FALLBACK_REPLY]]);
+  });
+
   await check("a re-wake note that fails to send is retried until it lands, never dropped", async () => {
     // Second-pass review of 2.7.0: the run was marked handled though its note
     // never reached the board, so the board waited on it for good.
