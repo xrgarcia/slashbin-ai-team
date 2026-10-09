@@ -49,13 +49,13 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.strictEqual(pickOpenRun(runs, ME.id, new Set(["c"])), null);
   });
 
-  await check("the ask is the wake comment, else the latest human one — never the bot's own", () => {
+  await check("the ask is the latest comment from a person still on the thread — never the bot's own", () => {
     const comments = [{ id: "h1", authorAgentId: null, createdAt: "1" }, { id: "h2", authorAgentId: null, createdAt: "2" },
       { id: "r", authorAgentId: ME.id, createdAt: "3" }];
-    assert.strictEqual(askOf(comments, "h1", ME.id).id, "h1");
-    assert.strictEqual(askOf(comments, undefined, ME.id).id, "h2");
-    assert.strictEqual(askOf(comments, "r", ME.id).id, "h2", "a run woken by the bot's own comment is not a new ask");
-    assert.strictEqual(askOf([], undefined, ME.id), null);
+    assert.strictEqual(askOf(comments, ME.id).id, "h2", "the newest comment from a person, as the prompt says");
+    assert.strictEqual(askOf([...comments, { id: "h3", authorAgentId: null, createdAt: "4", deletedAt: "5" }], ME.id).id, "h2",
+      "a deleted comment is not on the thread the bot sees");
+    assert.strictEqual(askOf([], ME.id), null);
   });
 
   await check("the prompt carries the task and its thread", () => {
@@ -225,6 +225,31 @@ const poller = (b, answer) => createPaperclipPoller({
     await make().tick();
     assert.strictEqual(calls, 1, "a re-wake answered the same ask twice");
     assert.strictEqual(b.writes.length, 1);
+  });
+
+  await check("an answer is filed under the comment it answers, not the one that woke the run", async () => {
+    // Second-pass review of 2.7.0: comment B arrived before A's wake ran, the
+    // answer to B was saved under A, and B's own wake ran B again.
+    const comments = [{ id: "A", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask A" },
+      { id: "B", authorAgentId: null, createdAt: "2026-01-02T00:00:30Z", body: "ask B" }];
+    const b = board({ runs: running, comments, wakeCommentId: "A" });
+    let runs = running, failPatch = 1;
+    const fetch = async (url, init) => {
+      const path = url.replace(/^.*\/api/, "");
+      if (init.method === "PATCH" && failPatch-- > 0) return { ok: false, status: 502, text: async () => "bad gateway" };
+      if (path === "/issues/iss-1/runs") return { ok: true, text: async () => JSON.stringify(runs) };
+      if (path === "/heartbeat-runs/run-2") return { ok: true, text: async () => JSON.stringify({ contextSnapshot: { wakeCommentId: "B" } }) };
+      return b.fetch(url, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let calls = 0;
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: async () => { calls++; return "answer to B"; } });
+    await make().tick();                                            // A's wake answers B; the post fails
+    runs = [{ id: "run-2", agentId: ME.id, status: "running" }];    // B's wake
+    await make().tick();
+    assert.strictEqual(calls, 1, "B was run twice");
+    assert.deepStrictEqual(b.writes.map((w) => w.body.comment), ["answer to B"]);
   });
 
   await check("one task whose post keeps failing does not hold up the rest of the inbox", async () => {
