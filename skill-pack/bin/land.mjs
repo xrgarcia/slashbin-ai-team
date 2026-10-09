@@ -18,8 +18,10 @@
  *   - a path with no change to land
  *   - a checkout with commits not yet on its upstream (landing would publish them)
  *   - a checkout behind its upstream that cannot fast-forward
- * Other files, staged or not, are left exactly as they were. If the push is
- * rejected the commit is undone and the edits stay in the working tree.
+ * Other files, staged or not, are left exactly as they were. The commit is built
+ * outside the checkout and pushed by its id, so a commit another session makes
+ * meanwhile is never published or undone by it, a rejected push leaves nothing
+ * behind, and local commit hooks do not run (the server's still do).
  *
  * The repo is the bot's project (CLAUDE_CWD), never the current directory, so a
  * `cd` elsewhere cannot point it at another checkout. Who the commit is by and
@@ -31,7 +33,9 @@
  * Exit codes: 0 landed | 1 refused or failed (nothing pushed).
  */
 import { execFileSync } from "child_process";
-import { isAbsolute, relative, resolve, sep } from "path";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { isAbsolute, join, relative, resolve, sep } from "path";
 import { pathToFileURL } from "url";
 
 function fail(msg) {
@@ -148,31 +152,44 @@ function main() {
     if (!ff.ok) fail(`could not catch up with ${upstream.out}: ${ff.out}`);
   }
 
-  const added = tryGit(root, ["--literal-pathspecs", "add", "--", ...rels]);
-  if (!added.ok) fail(`git add failed: ${added.out}`);
-  const committed = tryGit(root, ["--literal-pathspecs", "commit", "--quiet", "--only", "-m", message, "--", ...rels]);
-  if (!committed.ok) fail(`git commit failed: ${committed.out}`);
-  const sha = git(root, ["rev-parse", "--short", "HEAD"]);
-  const undo = () => {
-    tryGit(root, ["reset", "--soft", "HEAD~1"]);
-    tryGit(root, ["--literal-pathspecs", "restore", "--staged", "--", ...rels]);
-  };
+  // The commit is built beside the checkout, never in it: another session can
+  // commit here at any moment, so HEAD is never trusted to be this commit. It is
+  // made from the upstream tip plus the checked files in a private index, pushed
+  // by its id, and only then does the checkout move to it. A rejected push
+  // leaves nothing to undo, and no local commit hook can add to it.
+  const base = git(root, ["rev-parse", "@{u}"]);
+  const scratch = mkdtempSync(join(tmpdir(), "land-"));
+  let sha;
+  try {
+    const env = { ...process.env, GIT_INDEX_FILE: join(scratch, "index") };
+    const step = (args) => {
+      try { return git(root, args, { env }); }
+      catch (e) { fail(`git ${args[0] === "--literal-pathspecs" ? args[1] : args[0]} failed: ${`${e.stderr || ""}`.trim() || e.message}`); }
+    };
+    step(["read-tree", base]);
+    step(["--literal-pathspecs", "add", "-A", "--", ...rels]);
+    const tree = step(["write-tree"]);
+    sha = step(["commit-tree", tree, "-p", base, "-m", message]);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+  const short = sha.slice(0, 7);
 
-  // What is pushed is the commit, not the list: a commit hook can stage more
-  // than was named. Every path the commit touches must be one that was checked.
-  const inCommit = git(root, ["diff", "--name-only", "--no-renames", "-z", "HEAD~1", "HEAD"]).split("\0").filter(Boolean);
+  // What is pushed is the commit, not the list: every path it touches must be
+  // one that was checked.
+  const inCommit = git(root, ["diff", "--name-only", "--no-renames", "-z", base, sha]).split("\0").filter(Boolean);
   const extra = inCommit.filter((f) => !rels.includes(f));
-  if (extra.length) {
-    undo();
-    fail(`a commit hook added ${extra.join(", ")} to the commit, which this bot was not asked to land; the commit was undone and every change is still in the working tree`);
-  }
+  if (extra.length) fail(`the commit would also carry ${extra.join(", ")}, which this bot was not asked to land`);
 
-  const pushed = tryGit(root, ["push", "--quiet", remote, `HEAD:refs/heads/${branch}`]);
-  if (!pushed.ok) {
-    undo();
-    fail(`the push was rejected, so the commit was undone and the edits are still in the working tree: ${pushed.out}`);
-  }
-  process.stdout.write(`landed ${sha} on ${upstream.out}: ${rels.join(", ")}\n`);
+  const pushed = tryGit(root, ["push", "--quiet", remote, `${sha}:refs/heads/${branch}`]);
+  if (!pushed.ok) fail(`the push was rejected, and every edit is still in the working tree: ${pushed.out}`);
+
+  // A compare-and-swap: the checkout moves to the landed commit only if no one
+  // has committed in it since the check.
+  const moved = tryGit(root, ["update-ref", "-m", `land: ${message.split("\n")[0]}`, "HEAD", sha, base]);
+  if (moved.ok) tryGit(root, ["--literal-pathspecs", "reset", "--quiet", sha, "--", ...rels]);
+  else process.stderr.write(`[land] ${short} is on ${upstream.out}, but another commit was made in this checkout meanwhile, so the checkout was left where it is; whoever made that commit must rebase it onto ${upstream.out}.\n`);
+  process.stdout.write(`landed ${short} on ${upstream.out}: ${rels.join(", ")}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

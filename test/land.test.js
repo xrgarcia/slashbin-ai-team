@@ -197,7 +197,7 @@ check("a checkout behind its upstream fast-forwards first, then lands", () => {
   rmSync(f.dir, { recursive: true, force: true });
 });
 
-check("a rejected push undoes the commit and keeps the edit", () => {
+check("a rejected push leaves no commit behind and keeps the edit", () => {
   const f = fixture();
   const before = g(f.repo, "rev-parse", "HEAD");
   writeFileSync(join(f.origin, "hooks", "pre-receive"), "#!/bin/sh\necho refused by the server >&2\nexit 1\n", { mode: 0o755 });
@@ -208,19 +208,49 @@ check("a rejected push undoes the commit and keeps the edit", () => {
   rmSync(f.dir, { recursive: true, force: true });
 });
 
-check("a commit hook that stages more than was named is caught before the push", () => {
+check("a commit hook cannot add to what lands", () => {
   // Second-pass review of 2.7.0: a pre-commit `git add -A` put RULES.md in the
-  // commit, and land pushed it while reporting only the named file.
+  // commit, and land pushed it while reporting only the named file. The commit
+  // is now built outside the checkout, where no local hook runs.
   const f = fixture();
-  const before = g(f.repo, "rev-parse", "HEAD");
   writeFileSync(join(f.repo, ".git", "hooks", "pre-commit"), "#!/bin/sh\ngit add -A\n", { mode: 0o755 });
   writeFileSync(join(f.repo, "notes", "company.md"), "v2\n");
   writeFileSync(join(f.repo, "RULES.md"), "someone else's edit\n");
-  refused(land(f.repo, ["-m", "x", "notes/company.md"]), /commit hook added RULES\.md/);
-  assert.strictEqual(remoteHead(f), before, "the extra file was pushed");
-  assert.strictEqual(g(f.repo, "rev-parse", "HEAD"), before);
-  assert.strictEqual(readFileSync(join(f.repo, "RULES.md"), "utf8"), "someone else's edit\n");
-  assert.strictEqual(readFileSync(join(f.repo, "notes", "company.md"), "utf8"), "v2\n");
+  const r = land(f.repo, ["-m", "x", "notes/company.md"]);
+  assert.strictEqual(r.code, 0, r.err);
+  assert.strictEqual(g(f.repo, "diff", "--name-only", "HEAD~1", remoteHead(f)), "notes/company.md", "more than the named file was pushed");
+  assert.strictEqual(g(f.repo, "status", "--porcelain"), "M RULES.md");
+  rmSync(f.dir, { recursive: true, force: true });
+});
+
+// Another session committing in the same checkout while land is pushing.
+const RACE = "#!/bin/sh\nunset GIT_INDEX_FILE\necho other > RULES.md\ngit -c core.hooksPath=/dev/null commit --quiet -m other -- RULES.md\n";
+
+check("a commit another session makes after land's is never published by it", () => {
+  // Second-pass review of 2.7.0: land pushed HEAD, so a commit that landed on
+  // top of its own went out unchecked.
+  const f = fixture();
+  writeFileSync(join(f.repo, ".git", "hooks", "pre-push"), RACE, { mode: 0o755 });
+  writeFileSync(join(f.repo, "notes", "company.md"), "v2\n");
+  const r = land(f.repo, ["-m", "x", "notes/company.md"]);
+  assert.strictEqual(r.code, 0, r.err);
+  assert.match(r.err, /checkout was left where it is/);
+  assert.strictEqual(g(f.repo, "log", "--format=%s", "-1"), "other", "the other session's commit was moved");
+  assert.strictEqual(g(f.repo, "log", "--format=%s", "-1", remoteHead(f)), "x");
+  assert.strictEqual(g(f.repo, "diff", "--name-only", "HEAD~1", remoteHead(f)), "notes/company.md", "the other session's commit was pushed");
+  rmSync(f.dir, { recursive: true, force: true });
+});
+
+check("a failed push never undoes another session's commit", () => {
+  // Second-pass review of 2.7.0: the undo was `reset --soft HEAD~1`, which took
+  // back whichever commit was on top.
+  const f = fixture();
+  writeFileSync(join(f.origin, "hooks", "pre-receive"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  writeFileSync(join(f.repo, ".git", "hooks", "pre-push"), RACE, { mode: 0o755 });
+  writeFileSync(join(f.repo, "notes", "company.md"), "v2\n");
+  refused(land(f.repo, ["-m", "x", "notes/company.md"]), /push was rejected/);
+  assert.strictEqual(g(f.repo, "log", "--format=%s", "-2"), "other\ninit", "a commit was taken back");
+  assert.strictEqual(g(f.repo, "status", "--porcelain"), "M notes/company.md");
   rmSync(f.dir, { recursive: true, force: true });
 });
 

@@ -29,7 +29,7 @@ you name. It refuses, and pushes nothing, when:
 - a file is outside the paths you may land: your instructions are not yours to change
 - a file has no change
 - the checkout holds someone else's commit that is not pushed yet
-- the push is rejected: the commit is undone and your edit stays on disk
+- the push is rejected: nothing was committed and your edit stays on disk
 
 A refusal says why. Do not try another way to commit; tell whoever asked that
 the change is saved on disk but not landed, and why.
