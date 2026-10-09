@@ -164,7 +164,7 @@ const poller = (b, answer) => createPaperclipPoller({
     let lost = 1;
     const flaky = async (url, init) => {
       if (init.method === "PATCH" && lost-- > 0) {
-        comments.push({ id: "a", authorAgentId: ME.id, createdAt: "2026-01-02T00:02:00Z", body: JSON.parse(init.body).comment });
+        comments.push({ id: "a", authorAgentId: ME.id, createdByRunId: init.headers["x-paperclip-run-id"], createdAt: "2026-01-02T00:02:00Z", body: JSON.parse(init.body).comment });
         return { ok: false, status: 504, text: async () => "gateway timeout" };
       }
       return b.fetch(url, init);
@@ -245,7 +245,7 @@ const poller = (b, answer) => createPaperclipPoller({
       const path = url.replace(/^.*\/api/, "");
       if (path === "/issues/iss-1/runs") return { ok: true, text: async () => JSON.stringify(runs) };
       if (path === "/heartbeat-runs/run-2") return { ok: true, text: async () => JSON.stringify({ contextSnapshot: {} }) };
-      if (init.method === "PATCH") comments.push({ id: "a", authorAgentId: ME.id, createdAt: "2026-01-02T00:02:00Z", body: JSON.parse(init.body).comment });
+      if (init.method === "PATCH") comments.push({ id: "a", authorAgentId: ME.id, createdByRunId: init.headers["x-paperclip-run-id"], createdAt: "2026-01-02T00:02:00Z", body: JSON.parse(init.body).comment });
       return b.fetch(url, init);
     };
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
@@ -261,6 +261,33 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer"], ["run-2", ALREADY_ANSWERED]]);
     await make().tick();
     assert.strictEqual(b.writes.length, 2, "the re-wake was acknowledged twice");
+  });
+
+  await check("a re-wake note that fails to send is retried until it lands, never dropped", async () => {
+    // Second-pass review of 2.7.0: the run was marked handled though its note
+    // never reached the board, so the board waited on it for good.
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    const b = board({ runs: running, comments });
+    let runs = running, down = 0;
+    const fetch = async (url, init) => {
+      const path = url.replace(/^.*\/api/, "");
+      if (path === "/issues/iss-1/runs") return { ok: true, text: async () => JSON.stringify(runs) };
+      if (init.method === "PATCH" && down-- > 0) return { ok: false, status: 503, text: async () => "unavailable" };
+      if (init.method === "PATCH") comments.push({ id: `a${comments.length}`, authorAgentId: ME.id, createdByRunId: init.headers["x-paperclip-run-id"], createdAt: "2026-01-02T00:02:00Z", body: JSON.parse(init.body).comment });
+      return b.fetch(url, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let calls = 0;
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: async () => { calls++; return "the answer"; } });
+    await make().tick();
+    runs = [{ id: "run-2", agentId: ME.id, status: "running" }];
+    down = 1;
+    await make().tick();          // the note fails, unapplied
+    await make().tick();          // a restarted bot retries it
+    await make().tick();          // and does not send it again once it landed
+    assert.strictEqual(calls, 1, "the task ran again");
+    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer"], ["run-2", ALREADY_ANSWERED]]);
   });
 
   await check("an answer is filed under the comment it answers, not the one that woke the run", async () => {
