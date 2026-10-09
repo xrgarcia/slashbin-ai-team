@@ -104,6 +104,44 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies, {});
   });
 
+  await check("a progress comment written during the run does not stop the saved answer being posted", async () => {
+    // Second-pass review of 2.7.0: the progress note looked like an answer, so the
+    // run was marked handled and the real answer was never posted.
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    const b = board({ runs: running, comments, wakeCommentId: "w" });
+    let failPatch = 1;
+    const flaky = async (url, init) => (init.method === "PATCH" && failPatch-- > 0)
+      ? { ok: false, status: 502, text: async () => "bad gateway" } : b.fetch(url, init);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let calls = 0;
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch: flaky,
+      answer: async () => { calls++; comments.push({ id: "p", authorAgentId: ME.id, createdAt: "2026-01-02T00:01:00Z", body: "working on it" }); return "the answer"; } });
+    await make().tick();          // runs; writes a progress note; the post fails
+    await make().tick();          // a restarted bot
+    assert.strictEqual(calls, 1);
+    assert.deepStrictEqual(b.writes.map((w) => w.body.comment), ["the answer"]);
+    assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies, {});
+  });
+
+  await check("a saved answer whose post landed but whose response was lost is not posted twice", async () => {
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    const b = board({ runs: running, comments, wakeCommentId: "w" });
+    let lost = 1;
+    const flaky = async (url, init) => {
+      if (init.method === "PATCH" && lost-- > 0) {
+        comments.push({ id: "a", authorAgentId: ME.id, createdAt: "2026-01-02T00:02:00Z", body: JSON.parse(init.body).comment });
+        return { ok: false, status: 504, text: async () => "gateway timeout" };
+      }
+      return b.fetch(url, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch: flaky,
+      answer: async () => "the answer" });
+    await make().tick(); await make().tick();
+    assert.strictEqual(b.writes.length, 0, "the answer was posted a second time");
+    assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies, {});
+  });
+
   await check("one task whose post keeps failing does not hold up the rest of the inbox", async () => {
     // Second-pass review of 2.7.0: a failure on task 1 left the loop, so task 2
     // was never reached on any tick.
