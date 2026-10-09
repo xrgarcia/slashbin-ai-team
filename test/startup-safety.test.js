@@ -364,9 +364,8 @@ check("bypass keeps BOT_PERMISSION_DENY", () => {
   const fn = /function permissionArgs[\s\S]*?\n}/.exec(bot)[0];
   const bypass = /if \(PERMISSION_MODE === "bypass"\) \{[\s\S]*?\n  \}/.exec(fn);
   assert.ok(bypass, "bypass branch not found");
-  assert.ok(/const deny = \[PERMISSION_DENY, \.\.\.extraDeny\]/.test(fn) && /\["--disallowedTools", \.\.\.deny\]/.test(fn),
-    "the deny list is no longer built from BOT_PERMISSION_DENY");
-  assert.ok(/\.\.\.denyArgs/.test(bypass[0]), "the bypass branch drops the deny list");
+  assert.ok(/PERMISSION_DENY \? \["--disallowedTools", PERMISSION_DENY\]/.test(bypass[0]),
+    "the bypass branch drops the deny list");
 });
 
 check("BOT_SETTINGS reaches every session", () => {

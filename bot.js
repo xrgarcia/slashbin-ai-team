@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, privateMemoryDeny, boardSettings } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, privateMemoryDeny, boardArgs, boardSettings } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -142,23 +142,35 @@ const PERMISSION_DENY = (process.env.BOT_PERMISSION_DENY || "").trim();
 // Summarisation reads a transcript that is already in its prompt. It never needs
 // to write, edit or execute anything.
 const SUMMARIZER_TOOLS = process.env.BOT_SUMMARIZER_TOOLS || "Read";
+// A Paperclip board run's tools and pre-approvals, whatever the bot's mode. The
+// board is read by people outside the bot's channels, so the default is the
+// read-only built-ins, confined to the working directory, and nothing else.
+const BOARD_TOOLS = process.env.BOT_BOARD_TOOLS || "Read,Glob,Grep";
+const BOARD_PERMISSION_ALLOW = (process.env.BOT_BOARD_PERMISSION_ALLOW || "").trim();
 
 /**
  * The permission flags for one invocation.
  * `bypass` reproduces the historical behaviour byte-for-byte — that is the
  * documented one-line upgrade for anyone already running this harness.
  */
-function permissionArgs(kind = "session", extraDeny = []) {
+function permissionArgs(kind = "session") {
   // A summary run reads untrusted chat text and needs no tools: narrow in every mode.
   if (kind === "summarizer") {
     return summarizerArgs({ tools: SUMMARIZER_TOOLS, deny: PERMISSION_DENY, settings: SESSION_SETTINGS });
   }
-  const deny = [PERMISSION_DENY, ...extraDeny].filter(Boolean);
-  const denyArgs = deny.length ? ["--disallowedTools", ...deny] : [];
+  // A board run answers people outside the bot's Discord channels: least
+  // privilege in every mode, and no reach into Discord memory.
+  if (kind === "board") {
+    return boardArgs({ tools: BOARD_TOOLS, allow: BOARD_PERMISSION_ALLOW,
+      deny: [PERMISSION_DENY, ...privateMemoryDeny(privateMemoryPaths())].filter(Boolean) });
+  }
   if (PERMISSION_MODE === "bypass") {
     // Deny rules still hold under bypass (measured): nothing prompts, but a denied
     // tool or path stays denied. Unset, the argv is the historical one.
-    return ["--allow-dangerously-skip-permissions", "--dangerously-skip-permissions", ...denyArgs];
+    return [
+      "--allow-dangerously-skip-permissions", "--dangerously-skip-permissions",
+      ...(PERMISSION_DENY ? ["--disallowedTools", PERMISSION_DENY] : []),
+    ];
   }
   return [
     "--tools", ALLOWED_TOOLS,
@@ -166,7 +178,7 @@ function permissionArgs(kind = "session", extraDeny = []) {
     // The bot's own uploads folder is always readable; dontAsk would deny it.
     "--allowedTools", attachmentReadRule(ATTACHMENTS_DIR),
     ...(PERMISSION_ALLOW ? [PERMISSION_ALLOW] : []),
-    ...denyArgs,
+    ...(PERMISSION_DENY ? ["--disallowedTools", PERMISSION_DENY] : []),
   ];
 }
 
@@ -176,12 +188,12 @@ function permissionArgs(kind = "session", extraDeny = []) {
 const SESSION_SETTINGS = (process.env.BOT_SETTINGS || "").trim();
 function settingsArgs({ board = false } = {}) {
   if (!board) return SESSION_SETTINGS ? ["--settings", SESSION_SETTINGS] : [];
-  // A board run sandboxes the shell away from Discord memory, on top of the bot's
-  // own settings. Read per run: a settings file that cannot be read fails the run
+  // A board run sandboxes any shell it is allowed to the working directory, on
+  // top of the bot's own settings. Read per run: a settings file that cannot be read fails the run
   // rather than starting it without the sandbox.
   const base = !SESSION_SETTINGS ? null
     : JSON.parse(SESSION_SETTINGS.startsWith("{") ? SESSION_SETTINGS : readFileSync(SESSION_SETTINGS, "utf8"));
-  return ["--settings", JSON.stringify(boardSettings(base, privateMemoryPaths()))];
+  return ["--settings", JSON.stringify(boardSettings(base, privateMemoryPaths(), CLAUDE_CWD))];
 }
 
 // MCP_CONFIG adds servers; it does not remove the host's. MCP_CONFIG_STRICT=true
@@ -1907,8 +1919,8 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 
     const args = [
       "--output-format", "stream-json",
-      // A run whose reply lands outside Discord cannot read Discord's memory either.
-      ...permissionArgs("session", opts.noBufferContext ? privateMemoryDeny(privateMemoryPaths()) : []),
+      // A run whose reply lands outside Discord gets least privilege.
+      ...permissionArgs(opts.noBufferContext ? "board" : "session"),
       ...skillPackArgs(),
       "--verbose",
       "--max-turns", String(CLAUDE_MAX_TURNS),

@@ -68,14 +68,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a denied tool or path stays denied. Unset, the bypass argv is unchanged.
 - **Paperclip connector.** Opt-in with `PAPERCLIP_URL` and `PAPERCLIP_API_KEY`: the
   bot polls its Paperclip inbox, answers each open task through the same run path
-  as Discord (same tools, permissions and MCP config), and posts the reply under
-  the run. Board runs get one session per task, never see the Discord buffer, and
+  as Discord, and posts the reply under the run. A board run gets least privilege
+  in every mode, `bypass` included: `BOT_BOARD_TOOLS` (read-only built-ins by
+  default) in `dontAsk`, confined to the working directory, plus whatever
+  `BOT_BOARD_PERMISSION_ALLOW` names. Board runs get one session per task, never see the Discord buffer, and
   the key is scrubbed from Claude's environment. Nor can a board run reach Discord
   memory any other way: the memory stores (buffer, summaries, uploads, sessions,
   scheduled jobs) are left out of its environment, so recall reports them
-  unavailable, each path carries a read deny rule in every permission mode, and the
-  shell runs in Claude Code's sandbox with those paths unreadable (no stepping
-  outside it; a host without the sandbox fails the run rather than running it open). The bot's
+  unavailable, each path carries a read deny rule, and any shell a board run is
+  allowed runs in Claude Code's sandbox confined to the working directory (no
+  stepping outside it; a host without the sandbox fails the run rather than
+  running it open). The bot's
   Discord token and bridge token are withheld from a board run as well. An answer whose post fails is
   kept (across a restart) and re-posted; the task is never run twice. A comment
   that lands while the bot is answering keeps the task open, so it is answered next;
