@@ -8,7 +8,7 @@
  * permission system alone would have let through. Runs against a scratch
  * checkout and a local bare remote; no network.
  */
-const { mkdtempSync, writeFileSync, mkdirSync, rmSync, unlinkSync } = require("fs");
+const { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync, unlinkSync } = require("fs");
 const { tmpdir } = require("os");
 const { join } = require("path");
 const { spawnSync, execFileSync } = require("child_process");
@@ -205,6 +205,22 @@ check("a rejected push undoes the commit and keeps the edit", () => {
   refused(land(f.repo, ["-m", "x", "notes/company.md"]), /push was rejected/);
   assert.strictEqual(g(f.repo, "rev-parse", "HEAD"), before);
   assert.strictEqual(g(f.repo, "status", "--porcelain"), "M notes/company.md");
+  rmSync(f.dir, { recursive: true, force: true });
+});
+
+check("a commit hook that stages more than was named is caught before the push", () => {
+  // Second-pass review of 2.7.0: a pre-commit `git add -A` put RULES.md in the
+  // commit, and land pushed it while reporting only the named file.
+  const f = fixture();
+  const before = g(f.repo, "rev-parse", "HEAD");
+  writeFileSync(join(f.repo, ".git", "hooks", "pre-commit"), "#!/bin/sh\ngit add -A\n", { mode: 0o755 });
+  writeFileSync(join(f.repo, "notes", "company.md"), "v2\n");
+  writeFileSync(join(f.repo, "RULES.md"), "someone else's edit\n");
+  refused(land(f.repo, ["-m", "x", "notes/company.md"]), /commit hook added RULES\.md/);
+  assert.strictEqual(remoteHead(f), before, "the extra file was pushed");
+  assert.strictEqual(g(f.repo, "rev-parse", "HEAD"), before);
+  assert.strictEqual(readFileSync(join(f.repo, "RULES.md"), "utf8"), "someone else's edit\n");
+  assert.strictEqual(readFileSync(join(f.repo, "notes", "company.md"), "utf8"), "v2\n");
   rmSync(f.dir, { recursive: true, force: true });
 });
 

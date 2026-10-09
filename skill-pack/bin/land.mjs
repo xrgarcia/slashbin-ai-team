@@ -153,11 +153,23 @@ function main() {
   const committed = tryGit(root, ["--literal-pathspecs", "commit", "--quiet", "--only", "-m", message, "--", ...rels]);
   if (!committed.ok) fail(`git commit failed: ${committed.out}`);
   const sha = git(root, ["rev-parse", "--short", "HEAD"]);
+  const undo = () => {
+    tryGit(root, ["reset", "--soft", "HEAD~1"]);
+    tryGit(root, ["--literal-pathspecs", "restore", "--staged", "--", ...rels]);
+  };
+
+  // What is pushed is the commit, not the list: a commit hook can stage more
+  // than was named. Every path the commit touches must be one that was checked.
+  const inCommit = git(root, ["diff", "--name-only", "--no-renames", "-z", "HEAD~1", "HEAD"]).split("\0").filter(Boolean);
+  const extra = inCommit.filter((f) => !rels.includes(f));
+  if (extra.length) {
+    undo();
+    fail(`a commit hook added ${extra.join(", ")} to the commit, which this bot was not asked to land; the commit was undone and every change is still in the working tree`);
+  }
 
   const pushed = tryGit(root, ["push", "--quiet", remote, `HEAD:refs/heads/${branch}`]);
   if (!pushed.ok) {
-    tryGit(root, ["reset", "--soft", "HEAD~1"]);
-    tryGit(root, ["--literal-pathspecs", "restore", "--staged", "--", ...rels]);
+    undo();
     fail(`the push was rejected, so the commit was undone and the edits are still in the working tree: ${pushed.out}`);
   }
   process.stdout.write(`landed ${sha} on ${upstream.out}: ${rels.join(", ")}\n`);

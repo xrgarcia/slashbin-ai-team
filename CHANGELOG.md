@@ -59,8 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (globs, `!` excludes) names what may land, unset means landing is off. Every
   concrete file git would commit is checked, so naming a folder cannot carry an
   excluded file out with it, and a wildcard is a literal name. It
-  refuses a checkout with unpushed commits and undoes the commit if the push is
-  rejected.
+  refuses a checkout with unpushed commits, checks the commit itself before
+  pushing (a commit hook that stages extra files is caught and the commit undone),
+  and undoes the commit if the push is rejected.
 - **`BOT_SETTINGS`** layers Claude Code settings (a path or inline JSON) over every
   session through `--settings` — e.g. a sandbox around the shell.
 - **`BOT_PERMISSION_DENY` now also applies in `bypass` mode.** Nothing prompts, but
