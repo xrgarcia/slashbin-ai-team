@@ -3,7 +3,7 @@
  * and never sees the Discord conversation buffer.
  */
 const assert = require("assert");
-const { readFileSync, mkdtempSync } = require("fs");
+const { readFileSync, writeFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
 const { pickOpenRun, askOf, askKey, buildTaskPrompt, createPaperclipPoller, FALLBACK_REPLY } = require("../lib/paperclip");
@@ -94,6 +94,26 @@ const poller = (b, answer) => createPaperclipPoller({
     const p = poller(b, async () => { calls++; return "x"; });
     await p.tick(); await p.tick();
     assert.strictEqual(calls, 1);
+  });
+
+  await check("an answered ask stays answered across a restart, however many came after it", async () => {
+    // Second-pass review of 2.7.0: answeredAsks kept only the newest 5,000, so an
+    // older task re-woken after a restart ran again.
+    const runs = [{ id: "run-1", agentId: ME.id, status: "running" }];
+    const b = board({ runs });
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let calls = 0;
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile,
+      answer: async () => { calls++; return "the answer"; }, log: silent, fetch: b.fetch });
+    await make().tick();
+    const s = JSON.parse(readFileSync(stateFile, "utf8"));
+    s.answeredAsks.push(...Array.from({ length: 6000 }, (_, i) => `other-${i}:k`));
+    writeFileSync(stateFile, JSON.stringify(s));
+    runs.splice(0, 1, { id: "run-2", agentId: ME.id, status: "running" });
+    await make().tick();          // a re-wake after a restart; the state is saved back
+    runs.splice(0, 1, { id: "run-3", agentId: ME.id, status: "running" });
+    await make().tick();          // and again
+    assert.strictEqual(calls, 1, "the task ran again");
   });
 
   await check("a failed post is retried without running the task again, even across a restart", async () => {
