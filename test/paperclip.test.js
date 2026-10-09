@@ -142,6 +142,54 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies, {});
   });
 
+  await check("a saved answer survives Paperclip re-waking the task under a new run", async () => {
+    // Second-pass review of 2.7.0: saved answers were keyed by run id, so a
+    // re-wake under run-2 found nothing and ran the same ask again.
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    const b = board({ runs: running, comments, wakeCommentId: "w" });
+    let runs = running, failPatch = 1;
+    const flaky = async (url, init) => {
+      const path = url.replace(/^.*\/api/, "");
+      if (init.method === "PATCH" && failPatch-- > 0) return { ok: false, status: 502, text: async () => "bad gateway" };
+      if (path === "/issues/iss-1/runs") return { ok: true, text: async () => JSON.stringify(runs) };
+      if (path === "/heartbeat-runs/run-2") return { ok: true, text: async () => JSON.stringify({ contextSnapshot: {} }) };
+      return b.fetch(url, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let calls = 0;
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch: flaky,
+      answer: async () => { calls++; return "the answer"; } });
+    await make().tick();                                            // run-1 answers; the post fails
+    runs = [{ id: "run-2", agentId: ME.id, status: "running" }];    // Paperclip re-wakes the open task
+    await make().tick();
+    assert.strictEqual(calls, 1, "the same ask ran twice");
+    assert.deepStrictEqual(b.writes.map((w) => [w.body.comment, w.runId]), [["the answer", "run-2"]]);
+  });
+
+  await check("a new ask on the same task is answered, and an earlier unposted answer goes out with it", async () => {
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    const b = board({ runs: running, comments, wakeCommentId: "w" });
+    let runs = running, failPatch = 1;
+    const flaky = async (url, init) => {
+      const path = url.replace(/^.*\/api/, "");
+      if (init.method === "PATCH" && failPatch-- > 0) return { ok: false, status: 502, text: async () => "bad gateway" };
+      if (path === "/issues/iss-1/runs") return { ok: true, text: async () => JSON.stringify(runs) };
+      if (path === "/heartbeat-runs/run-2") return { ok: true, text: async () => JSON.stringify({ contextSnapshot: { wakeCommentId: "w2" } }) };
+      return b.fetch(url, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const answers = ["first answer", "second answer"];
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch: flaky,
+      answer: async () => answers.shift() });
+    await make().tick();
+    comments.push({ id: "w2", authorAgentId: null, createdAt: "2026-01-02T00:05:00Z", body: "another ask" });
+    runs = [{ id: "run-2", agentId: ME.id, status: "running" }];
+    await make().tick();
+    assert.deepStrictEqual(b.writes.map((w) => w.body.comment), ["first answer\n\n---\n\nsecond answer"],
+      "the earlier ask's unposted answer must go out with the new one, not be dropped");
+    assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies, {});
+  });
+
   await check("one task whose post keeps failing does not hold up the rest of the inbox", async () => {
     // Second-pass review of 2.7.0: a failure on task 1 left the loop, so task 2
     // was never reached on any tick.
@@ -168,7 +216,7 @@ const poller = (b, answer) => createPaperclipPoller({
     await p.tick(); await p.tick();
     assert.deepStrictEqual(writes, ["PATCH /issues/iss-2"]);
     assert.deepStrictEqual(asked, ["T-1", "T-2"], "each task runs once; task 1 only retries its post");
-    assert.deepStrictEqual(Object.keys(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies), ["run-1"]);
+    assert.deepStrictEqual(Object.keys(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies), ["iss-1:task"]);
   });
 
   await check("no unposted answer is dropped, however many pile up across a restart", async () => {
