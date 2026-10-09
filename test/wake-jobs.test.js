@@ -30,11 +30,11 @@ function freshState() {
 }
 
 /** Run the CLI. Returns { ok, out } — never throws, so a rejection is assertable. */
-function cli(file, args) {
+function cli(file, args, env = {}) {
   try {
     const out = execFileSync("node", [CLI, ...args], {
       encoding: "utf8",
-      env: { ...process.env, BOT_SCHEDULES_FILE: file, BOT_CHANNEL_ID: "999", BOT_TIMEZONE: "America/Chicago" },
+      env: { ...process.env, BOT_SCHEDULES_FILE: file, BOT_CHANNEL_ID: "999", BOT_TIMEZONE: "America/Chicago", ...env },
       stdio: ["ignore", "pipe", "pipe"],
     });
     return { ok: true, out };
@@ -56,6 +56,22 @@ check("--in 20m stores an absolute instant twenty minutes out", () => {
   assert.ok(!j.cron, "a wake job must carry no cron, or the cron path would try to evaluate it");
   const delta = Date.parse(j.runAt) - before;
   assert.ok(delta > 19 * 60_000 && delta < 21 * 60_000, `runAt is ${Math.round(delta / 60_000)}m out, expected 20`);
+});
+
+check("a follow-up from a Paperclip task is refused, not booked to a channel that never fires", () => {
+  // Second-pass review of 2.7.0: a board run's conversation id is not a Discord
+  // channel, so the job reported success and the scheduler could never resolve it.
+  for (const args of [["wake", "--in", "20m", "--prompt", "x"], ["add", "--cron", "0 7 * * 1", "--prompt", "x", "--by", "u"]]) {
+    const f = freshState();
+    const r = cli(f, args, { BOT_CHANNEL_ID: "paperclip-T-1" });
+    assert.ok(!r.ok, `${args[0]} was booked into a Paperclip task`);
+    assert.match(r.out, /Nothing was booked/);
+    let saved = [];
+    try { saved = jobs(f); } catch { /* no file written */ }
+    assert.deepStrictEqual(saved, []);
+  }
+  assert.ok(cli(freshState(), ["wake", "--in", "20m", "--prompt", "x", "--channel", "123"], { BOT_CHANNEL_ID: "paperclip-T-1" }).ok,
+    "an explicit Discord channel is still allowed");
 });
 
 check("a bare number is refused rather than guessed", () => {

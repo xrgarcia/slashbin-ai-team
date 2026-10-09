@@ -69,7 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as Discord (same tools, permissions and MCP config), and posts the reply under
   the run. Board runs get one session per task, never see the Discord buffer, and
   the key is scrubbed from Claude's environment. An answer whose post fails is
-  kept (across a restart) and re-posted; the task is never run twice.
+  kept (across a restart) and re-posted; the task is never run twice. A board task
+  cannot book a follow-up: `schedule.mjs` refuses any destination that is not a
+  Discord channel, rather than saving a job that would never fire.
 
 ### Fixed
 
