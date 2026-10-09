@@ -49,7 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git commit`/`push` allow rule sees only the command's prefix, so it would let a
   bot commit anyone's uncommitted edits or publish unpushed local commits. The
   skill pack's `land` command is the bot's only way to commit: `BOT_LAND_PATHS`
-  (globs, `!` excludes) names what may land, unset means landing is off. It
+  (globs, `!` excludes) names what may land, unset means landing is off. Every
+  concrete file git would commit is checked, so naming a folder cannot carry an
+  excluded file out with it, and a wildcard is a literal name. It
   refuses a checkout with unpushed commits and undoes the commit if the push is
   rejected.
 - **`BOT_SETTINGS`** layers Claude Code settings (a path or inline JSON) over every

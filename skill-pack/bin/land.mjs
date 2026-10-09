@@ -13,6 +13,8 @@
  * BOT_LAND_PATHS. Refused, before anything is written:
  *   - BOT_LAND_PATHS unset (landing is off by default)
  *   - a path outside the repo, or one that matches no pattern, or matches a `!` pattern
+ *   - a folder or pattern that would carry ANY file failing that check: every
+ *     concrete file git would commit is checked, not just the string given
  *   - a path with no change to land
  *   - a checkout with commits not yet on its upstream (landing would publish them)
  *   - a checkout behind its upstream that cannot fast-forward
@@ -70,6 +72,24 @@ export function allowed(rel, patterns) {
   return include.some((p) => globToRegex(p).test(rel)) && !exclude.some((p) => globToRegex(p).test(rel));
 }
 
+/**
+ * The concrete files a path would commit: a file, or every changed file under a
+ * folder. Literal pathspecs, so `*` in a name is a character, never a wildcard.
+ * A rename reports both sides; both must be landable.
+ */
+function changedFiles(root, rel) {
+  const out = execFileSync("git", ["-C", root, "--literal-pathspecs", "status", "--porcelain=v1", "-z",
+    "--untracked-files=all", "--", rel], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const parts = out.split("\0").filter(Boolean);
+  const files = [];
+  for (let i = 0; i < parts.length; i++) {
+    const code = parts[i].slice(0, 2);
+    files.push(parts[i].slice(3));
+    if (code[0] === "R" || code[0] === "C") files.push(parts[++i]);
+  }
+  return files;
+}
+
 export function parsePatterns(raw) {
   return (raw || "").split(",").map((p) => p.trim()).filter(Boolean);
 }
@@ -103,9 +123,14 @@ function main() {
     const abs = isAbsolute(p) ? p : resolve(root, p);
     const rel = relative(root, abs).split(sep).join("/");
     if (!rel || rel.startsWith("..") || isAbsolute(rel)) fail(`${p} is outside this bot's repo`);
-    if (!allowed(rel, patterns)) fail(`${rel} is not a file this bot may land (allowed: ${patterns.join(", ")})`);
-    if (!git(root, ["status", "--porcelain", "--", rel])) fail(`${rel} has no change to land`);
-    rels.push(rel);
+    // The check is on what git would commit, not on the string: a folder lands
+    // when every changed file under it is allowed, and is refused if any is not.
+    const files = changedFiles(root, rel);
+    if (!files.length) fail(`${rel} has no change to land`);
+    for (const file of files) {
+      if (!allowed(file, patterns)) fail(`${file}${file === rel ? "" : ` (under ${rel})`} is not a file this bot may land (allowed: ${patterns.join(", ")})`);
+      if (!rels.includes(file)) rels.push(file);
+    }
   }
 
   const upstream = tryGit(root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
@@ -123,16 +148,16 @@ function main() {
     if (!ff.ok) fail(`could not catch up with ${upstream.out}: ${ff.out}`);
   }
 
-  const added = tryGit(root, ["add", "--", ...rels]);
+  const added = tryGit(root, ["--literal-pathspecs", "add", "--", ...rels]);
   if (!added.ok) fail(`git add failed: ${added.out}`);
-  const committed = tryGit(root, ["commit", "--quiet", "--only", "-m", message, "--", ...rels]);
+  const committed = tryGit(root, ["--literal-pathspecs", "commit", "--quiet", "--only", "-m", message, "--", ...rels]);
   if (!committed.ok) fail(`git commit failed: ${committed.out}`);
   const sha = git(root, ["rev-parse", "--short", "HEAD"]);
 
   const pushed = tryGit(root, ["push", "--quiet", remote, `HEAD:refs/heads/${branch}`]);
   if (!pushed.ok) {
     tryGit(root, ["reset", "--soft", "HEAD~1"]);
-    tryGit(root, ["restore", "--staged", "--", ...rels]);
+    tryGit(root, ["--literal-pathspecs", "restore", "--staged", "--", ...rels]);
     fail(`the push was rejected, so the commit was undone and the edits are still in the working tree: ${pushed.out}`);
   }
   process.stdout.write(`landed ${sha} on ${upstream.out}: ${rels.join(", ")}\n`);

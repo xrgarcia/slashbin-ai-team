@@ -117,6 +117,45 @@ check("a `!` pattern carves a file out of an allowed directory", () => {
   rmSync(f.dir, { recursive: true, force: true });
 });
 
+check("naming a folder cannot carry an excluded file out with it", () => {
+  // Second-pass review of 2.7.0: `skills/guarded` matched `skills/**`, and git
+  // then committed skills/guarded/SKILL.md, which `!skills/guarded/**` excludes.
+  const f = fixture();
+  const before = remoteHead(f);
+  writeFileSync(join(f.repo, "skills", "guarded", "SKILL.md"), "unguarded\n");
+  writeFileSync(join(f.repo, "skills", "guarded", "new.md"), "new, also excluded\n");
+  refused(land(f.repo, ["-m", "x", "skills/guarded"]), /skills\/guarded\/(SKILL|new)\.md \(under skills\/guarded\) is not a file/);
+  refused(land(f.repo, ["-m", "x", "skills"]), /\(under skills\) is not a file/);
+  refused(land(f.repo, ["-m", "x", "skills/"]), /is not a file/);
+  assert.strictEqual(remoteHead(f), before);
+  assert.strictEqual(g(f.repo, "rev-parse", "HEAD"), before);
+  rmSync(f.dir, { recursive: true, force: true });
+});
+
+check("a wildcard is a literal name, never a pattern git expands", () => {
+  const f = fixture();
+  const before = remoteHead(f);
+  writeFileSync(join(f.repo, "skills", "guarded", "SKILL.md"), "unguarded\n");
+  refused(land(f.repo, ["-m", "x", "skills/*"]), /no change to land/);
+  refused(land(f.repo, ["-m", "x", "skills/**"]), /no change to land/);
+  refused(land(f.repo, ["-m", "x", ":(glob)skills/**"]), /no change to land|not a file/);
+  assert.strictEqual(remoteHead(f), before);
+  rmSync(f.dir, { recursive: true, force: true });
+});
+
+check("a folder whose changes are all allowed lands every one of them", () => {
+  const f = fixture();
+  writeFileSync(join(f.repo, "notes", "company.md"), "v2\n");
+  writeFileSync(join(f.repo, "notes", "people.md"), "new\n");
+  writeFileSync(join(f.repo, "RULES.md"), "someone else's edit\n");
+  const r = land(f.repo, ["-m", "notes", "notes"]);
+  assert.strictEqual(r.code, 0, r.err);
+  assert.deepStrictEqual(g(f.repo, "show", "--name-only", "--format=", "HEAD").split("\n").sort(),
+    ["notes/company.md", "notes/people.md"]);
+  assert.match(g(f.repo, "status", "--porcelain"), /^M RULES\.md$/m);
+  rmSync(f.dir, { recursive: true, force: true });
+});
+
 check("a path that climbs out of the repo is refused", () => {
   const f = fixture();
   refused(land(f.repo, ["-m", "x", "notes/../../origin.git/HEAD"]), /outside this bot's repo/);

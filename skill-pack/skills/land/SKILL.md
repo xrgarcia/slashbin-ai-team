@@ -16,7 +16,8 @@ node ${CLAUDE_PLUGIN_ROOT}/bin/land.mjs --message "<what changed and why>" <file
 ```
 
 Write the command with the path exactly as it appears above, already filled in.
-Name every file you changed, relative to your repo root. The message is the
+Name every file you changed, relative to your repo root. A folder lands every
+changed file under it, and only if each one is a file you may land. The message is the
 record: what changed and who it came from, e.g.
 `company.md: ops is run by <name> (told by <who>, <date>)`.
 
