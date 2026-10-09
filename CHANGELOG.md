@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write tools. Restricted sessions (and the summarizer) now run in `dontAsk` mode,
   which denies anything not pre-approved. `BOT_PERMISSION_ALLOW` is the
   pre-approval list. **Upgrading:** a restricted bot that relied on MCP tools must
-  name them in `BOT_PERMISSION_ALLOW`. `bypass` bots are unchanged.
+  name them in `BOT_PERMISSION_ALLOW`. A restricted bot can always read its own
+  uploads folder (`BOT_ATTACHMENTS_DIR`) without a rule, so files people send it
+  stay readable. `bypass` bots are unchanged.
 - **Mail gate.** A permission rule sees a tool's name, never its arguments, so
   allowing Gmail's `send_message` allowed mail to anyone. With
   `BOT_MAIL_ALLOWED_RECIPIENTS` set, the skill pack's `PreToolUse` gate requires
@@ -43,6 +45,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`REPLY_FINAL_TEXT_ONLY=true`** posts only the text written after the last tool
   call, so a working note written before a tool call never reaches the channel.
   Off by default; every bot that does not set it replies exactly as before.
+- **`land` — a restricted bot commits and pushes only the files it names.** A raw
+  `git commit`/`push` allow rule sees only the command's prefix, so it would let a
+  bot commit anyone's uncommitted edits or publish unpushed local commits. The
+  skill pack's `land` command is the bot's only way to commit: `BOT_LAND_PATHS`
+  (globs, `!` excludes) names what may land, unset means landing is off. It
+  refuses a checkout with unpushed commits and undoes the commit if the push is
+  rejected.
+- **`BOT_SETTINGS`** layers Claude Code settings (a path or inline JSON) over every
+  session through `--settings` — e.g. a sandbox around the shell.
+- **`BOT_PERMISSION_DENY` now also applies in `bypass` mode.** Nothing prompts, but
+  a denied tool or path stays denied. Unset, the bypass argv is unchanged.
+- **Paperclip connector.** Opt-in with `PAPERCLIP_URL` and `PAPERCLIP_API_KEY`: the
+  bot polls its Paperclip inbox, answers each open task through the same run path
+  as Discord (same tools, permissions and MCP config), and posts the reply under
+  the run. Board runs get one session per task, never see the Discord buffer, and
+  the key is scrubbed from Claude's environment.
 
 ### Fixed
 

@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -161,7 +161,9 @@ function permissionArgs(kind = "session") {
   return [
     "--tools", ALLOWED_TOOLS,
     "--permission-mode", "dontAsk",
-    ...(PERMISSION_ALLOW ? ["--allowedTools", PERMISSION_ALLOW] : []),
+    // The bot's own uploads folder is always readable; dontAsk would deny it.
+    "--allowedTools", attachmentReadRule(ATTACHMENTS_DIR),
+    ...(PERMISSION_ALLOW ? [PERMISSION_ALLOW] : []),
     ...(PERMISSION_DENY ? ["--disallowedTools", PERMISSION_DENY] : []),
   ];
 }

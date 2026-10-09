@@ -5,7 +5,9 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { resolvePermissionMode, VALID_MODES } = require("../lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule } = require("../lib/permission-mode");
+const { readFileSync } = require("fs");
+const { join } = require("path");
 
 let failures = 0;
 function check(name, fn) {
@@ -55,6 +57,30 @@ check("an empty per-bot value is not a choice — it falls through", () => {
 check("whitespace around a value does not create an invalid mode", () => {
   const { mode } = resolvePermissionMode({ BOT_PERMISSION_MODE: "  bypass  " });
   assert.strictEqual(mode, "bypass");
+});
+
+console.log("\nPermission mode — a restricted bot can read its own uploads");
+
+check("the attachment rule is an absolute Read rule on the folder", () => {
+  // `//` is how a permission rule spells an absolute path. A single `/` would be
+  // read relative to the settings file and never match the saved upload.
+  assert.strictEqual(attachmentReadRule("/data/bot/attachments"), "Read(//data/bot/attachments/**)");
+  assert.strictEqual(attachmentReadRule("/data/bot/attachments/"), "Read(//data/bot/attachments/**)");
+});
+
+check("a relative folder is resolved before it becomes a rule", () => {
+  assert.match(attachmentReadRule("rel/attachments"), /^Read\(\/\/.+\/rel\/attachments\/\*\*\)$/);
+});
+
+check("restricted sessions pass the rule, ahead of BOT_PERMISSION_ALLOW", () => {
+  // Measured 2026-10-08: under dontAsk a Read outside CLAUDE_CWD answers DENIED
+  // with no rule and succeeds with this one, alone or after another allow entry.
+  const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  const fn = bot.slice(bot.indexOf("function permissionArgs("), bot.indexOf("function settingsArgs("));
+  assert.match(fn, /"--allowedTools", attachmentReadRule\(ATTACHMENTS_DIR\)/);
+  assert.match(fn, /PERMISSION_ALLOW \? \[PERMISSION_ALLOW\]/);
+  const bypass = fn.slice(0, fn.indexOf('if (kind === "summarizer")'));
+  assert.ok(!bypass.includes("attachmentReadRule"), "bypass argv must stay the historical one");
 });
 
 console.log("\nPermission mode — backward compatibility");
