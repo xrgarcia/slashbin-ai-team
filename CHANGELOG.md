@@ -80,7 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sent — carries a read deny rule, and any shell a board run is
   allowed runs in Claude Code's sandbox confined to the working directory and
   the system folders (no stepping outside it; a host without the sandbox fails
-  the run rather than running it open). The bot's
+  the run rather than running it open). Claude Code's project auto-memory,
+  shared with the Discord sessions in the same folder, is off for a board run.
+  The bot's
   Discord token and bridge token are withheld from a board run as well, and so is
   the whole harness folder (its `.env`, logs and default state): a bot whose
   `CLAUDE_CWD` is the harness folder gives board runs nothing to read. An answer whose post fails is
