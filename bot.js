@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, privateMemoryDeny } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -148,18 +148,17 @@ const SUMMARIZER_TOOLS = process.env.BOT_SUMMARIZER_TOOLS || "Read";
  * `bypass` reproduces the historical behaviour byte-for-byte — that is the
  * documented one-line upgrade for anyone already running this harness.
  */
-function permissionArgs(kind = "session") {
+function permissionArgs(kind = "session", extraDeny = []) {
   // A summary run reads untrusted chat text and needs no tools: narrow in every mode.
   if (kind === "summarizer") {
     return summarizerArgs({ tools: SUMMARIZER_TOOLS, deny: PERMISSION_DENY, settings: SESSION_SETTINGS });
   }
+  const deny = [PERMISSION_DENY, ...extraDeny].filter(Boolean);
+  const denyArgs = deny.length ? ["--disallowedTools", ...deny] : [];
   if (PERMISSION_MODE === "bypass") {
     // Deny rules still hold under bypass (measured): nothing prompts, but a denied
     // tool or path stays denied. Unset, the argv is the historical one.
-    return [
-      "--allow-dangerously-skip-permissions", "--dangerously-skip-permissions",
-      ...(PERMISSION_DENY ? ["--disallowedTools", PERMISSION_DENY] : []),
-    ];
+    return ["--allow-dangerously-skip-permissions", "--dangerously-skip-permissions", ...denyArgs];
   }
   return [
     "--tools", ALLOWED_TOOLS,
@@ -167,7 +166,7 @@ function permissionArgs(kind = "session") {
     // The bot's own uploads folder is always readable; dontAsk would deny it.
     "--allowedTools", attachmentReadRule(ATTACHMENTS_DIR),
     ...(PERMISSION_ALLOW ? [PERMISSION_ALLOW] : []),
-    ...(PERMISSION_DENY ? ["--disallowedTools", PERMISSION_DENY] : []),
+    ...denyArgs,
   ];
 }
 
@@ -1098,6 +1097,11 @@ const botExchanges = new Map();
 
 // --- Session continuity: track Claude session IDs per channel for --resume ---
 const SESSION_FILE = join(STATE_DIR, "sessions.json");
+// Where each PRIVATE_MEMORY_ENV variable points, in the same order: Discord
+// memory a board run is denied by path as well as by variable.
+function privateMemoryPaths() {
+  return [HISTORY_DIR, BUFFER_FILE, ATTACHMENTS_DIR, SESSION_FILE, JOB_HISTORY_FILE, SCHEDULES_FILE];
+}
 LEGACY_STATE.push([join(__dirname, `.${BOT_NAME}-sessions.json`), SESSION_FILE]);
 // Moved out of the summaries directory: a schedule is the user's, and losing it
 // to a re-clone is the kind of failure nobody notices until a job stops firing.
@@ -1897,7 +1901,8 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 
     const args = [
       "--output-format", "stream-json",
-      ...permissionArgs("session"),
+      // A run whose reply lands outside Discord cannot read Discord's memory either.
+      ...permissionArgs("session", opts.noBufferContext ? privateMemoryDeny(privateMemoryPaths()) : []),
       ...skillPackArgs(),
       "--verbose",
       "--max-turns", String(CLAUDE_MAX_TURNS),
@@ -1943,6 +1948,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     cleanEnv.BOT_JOB_HISTORY_FILE = JOB_HISTORY_FILE;
     cleanEnv.BOT_SCHEDULES_FILE = SCHEDULES_FILE;
     cleanEnv.BOT_CHANNEL_ID = String(channelId);
+    if (opts.noBufferContext) for (const name of PRIVATE_MEMORY_ENV) delete cleanEnv[name];
 
     delete cleanEnv.CLAUDECODE;
     delete cleanEnv.PAPERCLIP_API_KEY;

@@ -5,14 +5,17 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs } = require("../lib/permission-mode");
-const { readFileSync } = require("fs");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, privateMemoryDeny } = require("../lib/permission-mode");
+const { readFileSync, writeFileSync, mkdtempSync, mkdirSync } = require("fs");
 const { join } = require("path");
+const { tmpdir } = require("os");
+const { spawnSync } = require("child_process");
 
-let failures = 0;
+let failures = 0, passes = 0;
 function check(name, fn) {
   try {
     fn();
+    passes++;
     console.log(`  ok   ${name}`);
   } catch (err) {
     failures++;
@@ -136,5 +139,62 @@ check("an unrecognised mode is returned as-is for the caller to reject", () => {
   assert.ok(!VALID_MODES.includes(mode));
 });
 
-console.log(`\n${8 - failures} passed, ${failures} failed\n`);
+console.log("\nBoard runs — no reach into Discord memory");
+
+// Second-pass review of 2.7.0: a board task that asked the bot to recall got the
+// Discord buffer back through the remember skill, which finds its stores through
+// the environment. Run the real recall script with the environment a board run
+// gets, and with the one a Discord run gets, against the same planted secret.
+check("recall finds nothing private with a board run's environment", () => {
+  const root = mkdtempSync(join(tmpdir(), "mem-"));
+  const summaries = join(root, "history"), attachments = join(root, "uploads");
+  mkdirSync(summaries); mkdirSync(attachments);
+  const secret = "zebra-ledger-7731";
+  // The query is echoed back, so look for what each store holds, not for the query.
+  const held = { buffer: "BUFFER-PAYLOAD", summary: "SUMMARY-PAYLOAD", upload: "upload-payload.txt" };
+  writeFileSync(join(root, "buffer.txt"), `[#private] Ray: the ${secret} figure ${held.buffer}\n`);
+  writeFileSync(join(summaries, "2026-10-08-private.md"), `> 3 messages summarized\nRay said the ${secret} figure ${held.summary}.\n`);
+  writeFileSync(join(attachments, held.upload), `${secret}\n`);
+  writeFileSync(join(root, "sessions.json"), "{}");
+  const discordEnv = { ...process.env, BOT_BUFFER_FILE: join(root, "buffer.txt"), BOT_SUMMARIES_DIR: summaries,
+    BOT_ATTACHMENTS_DIR: attachments, BOT_SESSIONS_FILE: join(root, "sessions.json"),
+    BOT_JOB_HISTORY_FILE: join(root, "job-history.jsonl"), BOT_SCHEDULES_FILE: join(root, "schedules.json") };
+  const recall = (env) => spawnSync(process.execPath, [join(__dirname, "..", "skill-pack", "bin", "recall.mjs"), secret],
+    { env, encoding: "utf8" }).stdout;
+  const discord = recall(discordEnv);
+  for (const [store, text] of Object.entries(held)) {
+    assert.ok(discord.includes(text), `the ${store} is not reachable even from Discord — the test proves nothing`);
+  }
+  const boardEnv = { ...discordEnv };
+  for (const name of PRIVATE_MEMORY_ENV) delete boardEnv[name];
+  const out = recall(boardEnv);
+  for (const [store, text] of Object.entries(held)) {
+    assert.ok(!out.includes(text), `a board run's recall returned the Discord ${store}`);
+  }
+  assert.match(out, /UNAVAILABLE/, "recall must say the stores are not available, not that nothing matched");
+});
+
+check("every Discord memory path is denied to the read tools by path, file and folder alike", () => {
+  const rules = privateMemoryDeny(["/state/buffer.txt", "/state/history/"]);
+  for (const r of ["Read(//state/buffer.txt)", "Read(//state/history)", "Read(//state/history/**)"]) {
+    assert.ok(rules.includes(r), `missing ${r} in ${JSON.stringify(rules)}`);
+  }
+});
+
+check("a board run drops every memory variable and denies the path each one names", () => {
+  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  // The paths denied must be the paths the variables point at, in the same order,
+  // so a new store published to Discord runs cannot be left open to board runs.
+  const paths = src.match(/function privateMemoryPaths\(\) \{\s*return \[([^\]]+)\]/)[1].split(",").map((x) => x.trim());
+  assert.deepStrictEqual(paths, PRIVATE_MEMORY_ENV.map((name) => {
+    const m = src.match(new RegExp(`cleanEnv\\.${name} = (\\w+);`));
+    assert.ok(m, `${name} is no longer published — update PRIVATE_MEMORY_ENV`);
+    return m[1];
+  }));
+  assert.match(src, /if \(opts\.noBufferContext\) for \(const name of PRIVATE_MEMORY_ENV\) delete cleanEnv\[name\];/);
+  assert.match(src, /permissionArgs\("session", opts\.noBufferContext \? privateMemoryDeny\(privateMemoryPaths\(\)\) : \[\]\)/);
+  assert.match(src, /noBufferContext: true/, "the Paperclip run no longer marks itself as a board run");
+});
+
+console.log(`\n${passes} passed, ${failures} failed\n`);
 process.exit(failures ? 1 : 0);

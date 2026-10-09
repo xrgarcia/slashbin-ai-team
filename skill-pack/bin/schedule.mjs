@@ -54,7 +54,7 @@ function destination() {
   }
   return channel;
 }
-if (!SCHEDULES) die("BOT_SCHEDULES_FILE is not set — this harness is too old to support scheduling from chat.");
+if (!SCHEDULES) die("BOT_SCHEDULES_FILE is not set — this run cannot schedule: it is a board task, or the harness is too old to support scheduling from chat.");
 
 const load = () => { try { return JSON.parse(readFileSync(SCHEDULES, "utf8")); } catch { return []; } };
 const save = (jobs) => { mkdirSync(dirname(SCHEDULES), { recursive: true }); writeFileSync(SCHEDULES, JSON.stringify(jobs, null, 2) + "\n"); };

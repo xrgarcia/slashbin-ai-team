@@ -70,7 +70,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bot polls its Paperclip inbox, answers each open task through the same run path
   as Discord (same tools, permissions and MCP config), and posts the reply under
   the run. Board runs get one session per task, never see the Discord buffer, and
-  the key is scrubbed from Claude's environment. An answer whose post fails is
+  the key is scrubbed from Claude's environment. Nor can a board run reach Discord
+  memory any other way: the memory stores (buffer, summaries, uploads, sessions,
+  scheduled jobs) are left out of its environment, so recall reports them
+  unavailable, and each path carries a read deny rule in every permission mode. An answer whose post fails is
   kept (across a restart) and re-posted; the task is never run twice. A comment
   that lands while the bot is answering keeps the task open, so it is answered next;
   a re-wake of an answered task gets a short note under its run, never a second run.
