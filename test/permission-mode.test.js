@@ -86,6 +86,19 @@ check("restricted sessions pass the rule, ahead of BOT_PERMISSION_ALLOW", () => 
   assert.ok(bypass.length > 0 && !bypass.includes("attachmentReadRule"), "bypass argv must stay the historical one");
 });
 
+check("restricted sessions read no settings file, so only the bot's list approves a tool", () => {
+  // dontAsk honors an approval from any settings source: a user's or the repo's
+  // `mcp__shell` would otherwise run with BOT_PERMISSION_ALLOW empty.
+  const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  const fn = bot.slice(bot.indexOf("function permissionArgs("), bot.indexOf("function settingsArgs("));
+  const restricted = fn.slice(fn.indexOf('"--tools", ALLOWED_TOOLS'));
+  assert.match(restricted, /"--setting-sources", "",\s*"--add-dir", CLAUDE_CWD,/);
+  const bypass = fn.slice(fn.indexOf('if (PERMISSION_MODE === "bypass")'), fn.indexOf('"--tools", ALLOWED_TOOLS'));
+  assert.ok(!bypass.includes("--setting-sources"), "bypass argv must stay the historical one");
+  // --add-dir loads that folder's CLAUDE.md only with this set.
+  assert.match(bot, /if \(opts\.noBufferContext \|\| PERMISSION_MODE === "restricted"\) cleanEnv\.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";/);
+});
+
 console.log("\nPermission mode — a summary run is narrow in every mode");
 
 check("summary flags: read-only tools, nothing prompts, no MCP servers", () => {

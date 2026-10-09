@@ -175,6 +175,12 @@ function permissionArgs(kind = "session") {
   return [
     "--tools", ALLOWED_TOOLS,
     "--permission-mode", "dontAsk",
+    // dontAsk honors an approval from any settings file, so a user's or the
+    // repo's `mcp__shell` would run without BOT_PERMISSION_ALLOW naming it. No
+    // settings file is read; the bot's own come in through BOT_SETTINGS, and
+    // CLAUDE.md through --add-dir (with CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD).
+    "--setting-sources", "",
+    "--add-dir", CLAUDE_CWD,
     // The bot's own uploads folder is always readable; dontAsk would deny it.
     "--allowedTools", attachmentReadRule(ATTACHMENTS_DIR),
     ...(PERMISSION_ALLOW ? [PERMISSION_ALLOW] : []),
@@ -1983,10 +1989,10 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       // the same CLAUDE_CWD and loads at startup, before any tool runs. Off here
       // and in boardSettings; the CLI reads this variable first.
       cleanEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
-      // No settings file is read for a board run (boardArgs); its CLAUDE.md
-      // comes in through --add-dir, which loads one only with this set.
-      cleanEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";
     }
+    // A board or restricted run reads no settings file (permissionArgs); its
+    // CLAUDE.md comes in through --add-dir, which loads one only with this set.
+    if (opts.noBufferContext || PERMISSION_MODE === "restricted") cleanEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";
 
     delete cleanEnv.CLAUDECODE;
     delete cleanEnv.PAPERCLIP_API_KEY;

@@ -15,8 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restricted session could reach a shell-running MCP server and Klaviyo's send and
   write tools. Restricted sessions (and the summarizer) now run in `dontAsk` mode,
   which denies anything not pre-approved. `BOT_PERMISSION_ALLOW` is the
-  pre-approval list. **Upgrading:** a restricted bot that relied on MCP tools must
-  name them in `BOT_PERMISSION_ALLOW`. A restricted bot can always read its own
+  pre-approval list. `dontAsk` would honor an approval from any settings file, so a
+  restricted session reads none: only `BOT_SETTINGS` applies, and CLAUDE.md still
+  loads. **Upgrading:** a restricted bot that relied on MCP tools must name them in
+  `BOT_PERMISSION_ALLOW`; hooks, deny rules or approvals it took from a user or
+  repo settings file move into `BOT_SETTINGS`, `BOT_PERMISSION_ALLOW` or
+  `BOT_PERMISSION_DENY`. A restricted bot can always read its own
   uploads folder (`BOT_ATTACHMENTS_DIR`) without a rule, so files people send it
   stay readable. `bypass` sessions are unchanged.
 - **Summaries run narrow in every mode.** Buffer-rotation, hourly and

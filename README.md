@@ -167,7 +167,7 @@ Any MCP server works. In `restricted` mode an MCP tool runs only if `BOT_PERMISS
 
 | `BOT_PERMISSION_MODE` | Behaviour |
 |---|---|
-| `restricted` *(default)* | Only `BOT_ALLOWED_TOOLS` — read-only built-ins by default. Runs in `dontAsk` mode: anything else, MCP tools included, is denied unless `BOT_PERMISSION_ALLOW` pre-approves it |
+| `restricted` *(default)* | Only `BOT_ALLOWED_TOOLS` — read-only built-ins by default. Runs in `dontAsk` mode: anything else, MCP tools included, is denied unless `BOT_PERMISSION_ALLOW` pre-approves it. No user or repo settings file is read, so none can approve a tool; put the bot's own settings in `BOT_SETTINGS`. CLAUDE.md still loads |
 | `bypass` | Every tool, no permission prompts. `BOT_PERMISSION_DENY` still applies; pair it with a `BOT_SETTINGS` sandbox to keep the shell off the rest of the machine |
 
 **Use `bypass` only for a bot you intend to let write code and run commands, and only alongside a real `ALLOWED_USERS`.** In that configuration anyone who can reach the bot can run commands on your machine. It warns on every start.
