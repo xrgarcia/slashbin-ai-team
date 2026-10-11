@@ -21,6 +21,18 @@ Refused, with BOT_CALENDAR_NO_ATTENDEES set:
   - any argument this hook does not know, so a new connector field cannot carry
     a guest past it
 
+Refused, with BOT_CALENDAR_OWN_EVENTS also set:
+  - update_event and delete_event on an eventId the bot did not create. This hook
+    cannot see an existing event's title or guests, so "only change your own
+    events" cannot be checked from the arguments. bot_calendar_ledger.py records
+    the id of every event the bot creates, in calendar-events under BOT_STATE_DIR,
+    one per line; an id that is not there is not the bot's. A missing or
+    unreadable ledger refuses every update and delete.
+
+Refused, with BOT_CALENDAR_TITLE_PREFIX also set (e.g. "Bot:"):
+  - a create_event whose summary does not start with it
+  - an update_event that sets a summary not starting with it
+
 Answering an invitation (respond_to_event) is not this hook's job: the bot's
 permission list denies the tool outright.
 
@@ -61,8 +73,31 @@ def refuse(reason):
     return 2
 
 
+def on(value):
+    return (value or "").strip().lower() in ("1", "true", "yes")
+
+
+def ledger_path():
+    state = os.environ.get("BOT_STATE_DIR", "").strip()
+    return os.path.join(state, "calendar-events") if state else None
+
+
+def own_events():
+    """The ids of the events this bot created, or None when the ledger cannot be read."""
+    path = ledger_path()
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return {line.strip() for line in f if line.strip()}
+    except FileNotFoundError:
+        return set()
+    except Exception:
+        return None
+
+
 def main():
-    if os.environ.get("BOT_CALENDAR_NO_ATTENDEES", "").strip().lower() not in ("1", "true", "yes"):
+    if not on(os.environ.get("BOT_CALENDAR_NO_ATTENDEES")):
         return 0
     try:
         data = json.load(sys.stdin)
@@ -86,6 +121,17 @@ def main():
         return refuse(f"calendarId {cal!r}; this bot writes only to the primary calendar")
     if tool != "create_event" and args.get("notificationLevel") != "NONE":
         return refuse('pass notificationLevel: "NONE", so no change emails anyone')
+    prefix = os.environ.get("BOT_CALENDAR_TITLE_PREFIX", "").strip()
+    if prefix and (tool == "create_event" or "summary" in args):
+        if not str(args.get("summary") or "").startswith(prefix):
+            return refuse(f"the title must start with {prefix!r}")
+    if tool != "create_event" and on(os.environ.get("BOT_CALENDAR_OWN_EVENTS")):
+        mine = own_events()
+        if mine is None:
+            return refuse("this bot's event ledger cannot be read, so no event can be shown to be its own")
+        if str(args.get("eventId") or "") not in mine:
+            return refuse("this bot did not create that event, so it may not change or delete it; "
+                          "ask the calendar's owner instead")
     return 0
 
 

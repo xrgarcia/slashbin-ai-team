@@ -19,6 +19,14 @@
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bot_calendar_gate.py\"" }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__claude_ai_Google_Calendar__create_event",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bot_calendar_ledger.py\"" }
+        ]
+      }
     ]
   }
 }

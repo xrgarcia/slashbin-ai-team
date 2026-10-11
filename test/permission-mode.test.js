@@ -221,8 +221,8 @@ check("recall finds nothing private with a board run's environment", () => {
   const secret = "zebra-ledger-7731";
   // The query is echoed back, so look for what each store holds, not for the query.
   const held = { buffer: "BUFFER-PAYLOAD", summary: "SUMMARY-PAYLOAD", upload: "upload-payload.txt" };
-  writeFileSync(join(root, "buffer.txt"), `[#private] Ray: the ${secret} figure ${held.buffer}\n`);
-  writeFileSync(join(summaries, "2026-10-08-private.md"), `> 3 messages summarized\nRay said the ${secret} figure ${held.summary}.\n`);
+  writeFileSync(join(root, "buffer.txt"), `[#private] Owner: the ${secret} figure ${held.buffer}\n`);
+  writeFileSync(join(summaries, "2026-10-08-private.md"), `> 3 messages summarized\nThe owner said the ${secret} figure ${held.summary}.\n`);
   writeFileSync(join(attachments, held.upload), `${secret}\n`);
   writeFileSync(join(root, "sessions.json"), "{}");
   const discordEnv = { ...process.env, BOT_BUFFER_FILE: join(root, "buffer.txt"), BOT_SUMMARIES_DIR: summaries,
