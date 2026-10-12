@@ -4,17 +4,18 @@
 
 *Product Owner, Engineering Manager, SRE — coordinating autonomously to ship software.*
 
-**Build AI employees for your business on Discord. Give each one a role, connect it to your tools, and let them work together — across one product or across an entire portfolio.**
+**Build AI employees for your business. Give each one a role, memory, your tools and a schedule; run it on Claude Code or Codex; talk to it on Discord, and optionally assign it work on a Paperclip board.**
 
 [![CI](https://github.com/xrgarcia/slashbin-ai-team/actions/workflows/ci.yml/badge.svg)](https://github.com/xrgarcia/slashbin-ai-team/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-- **Cost:** $0 marginal under your Claude Max plan. Each bot runs through the Claude Code CLI — no API charges, no SaaS subscription, no per-bot fees.
+- **Your choice of agent:** each bot runs on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or the [OpenAI Codex CLI](https://github.com/openai/codex), chosen per bot with `BOT_RUNTIME`. A bot uses only the CLI you pick — for replies, summaries, scheduled jobs and board tasks — billed however that CLI is signed in. [Runtimes →](docs/runtimes.md)
+- **Discord, plus an optional board:** people reach a bot in Discord; with [Paperclip](#paperclip) set, it also answers tasks assigned to it on a board, read-only or with engineering tools, never with access to its Discord memory.
 - **Focused context:** Each bot's `CLAUDE.md` is its job description. A PO bot loads product context, an SRE bot loads ops context. Separated context produces sharper output than one generalist juggling every role in one window.
 - **Async parallelism:** While you DM the PO, the EM bot can be reviewing a PR and the SRE bot can be watching a deploy. Multiple bots = multiple things happening at once, not role-play.
 - **Safe to leave running:** an agent that can merge a PR needs guarantees about what happens when it crashes. [See below.](#why-safe-to-leave-running)
 
-Built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI. Each bot gets full access to your codebase, MCP servers, and tools — not a chatbot wrapper, but a real AI teammate that can read code, query databases, create issues, and ship work.
+Each bot drives a real agent CLI against your codebase, MCP servers and tools — not a chatbot wrapper, but an AI teammate that can read code, query databases, create issues and ship work, as far as you allow it.
 
 ```bash
 git clone https://github.com/xrgarcia/slashbin-ai-team.git
@@ -261,7 +262,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | Variable | Default | Description |
 |---|---|---|
 | `BOT_RUNTIME` | `claude` | The agent CLI this bot runs on: `claude` (Claude Code) or `codex` (OpenAI Codex CLI). Every run the bot makes — Discord, scheduled jobs, summaries, board tasks — uses it, and `npm run doctor` checks only it. No fallback to the other, and a session is never moved between them: after a switch each channel starts fresh. Anything else stops the bot at startup. See [docs/runtimes.md](docs/runtimes.md) |
-| `BOT_MODEL` | CLI default | The model, for whichever runtime is selected, e.g. `claude-opus-5` or `gpt-5-codex` |
+| `BOT_MODEL` | CLI default | The model, for whichever runtime is selected, e.g. `claude-opus-5` on Claude |
 | `CLAUDE_MODEL` | CLI default | Claude only: the model when `BOT_MODEL` is unset, as before. Set on a Codex bot, it stops the bot at startup |
 | `SUMMARIZE_MODEL` | the bot's model | A cheaper model is fine here; it must belong to the bot's runtime |
 | `CLAUDE_BIN` | `claude` | Path to the Claude Code CLI |
@@ -391,7 +392,7 @@ An agent can sit on more than one board — the same bot as a seat in two compan
 
 The shell's network goes through Claude Code's proxy and `socat`. If `socat` or `bwrap` lives outside the system folders (under a home folder, say), add its folder — and any folder a wrapper script loads from — to `BOT_BOARD_READ_PATHS`, or every request from the shell fails; `doctor:fleet` warns when it finds one.
 
-To turn it on, set `BOT_BOARD_EXECUTION=engineering` (and the paths and hosts the work needs) for that bot and restart it; to turn it off, remove the setting or set `readonly` and restart. Verify by assigning the bot a board task that edits a file in `CLAUDE_CWD`: in `engineering` the change lands and the task closes; in `readonly` the reply says it could not, and the task is left **blocked**. Full guide, prerequisites and symptom-to-fix: [docs/paperclip-board-execution.md](docs/paperclip-board-execution.md).
+To turn it on, set `BOT_BOARD_EXECUTION=engineering` (and the paths and hosts the work needs) for that bot and restart it; to turn it off, remove the setting or set `readonly` and restart. Verify by assigning the bot a board task that edits a file in `CLAUDE_CWD`: in `engineering` the change lands and the task closes; in `readonly` the reply says it could not, and the task is left **blocked**. Full guide, prerequisites and symptom-to-fix: [docs/paperclip-board-execution.md](docs/paperclip-board-execution.md). A bot on Codex takes board tasks in the same two modes with no network; [what differs](docs/paperclip-board-execution.md#on-codex).
 
 A run that could not do what was asked ends its reply with `PAPERCLIP-OUTCOME: blocked`; the bot removes that line and leaves the task **blocked** with the reply as its comment, instead of **done**. A person's comment on it reopens it. A refused board request is logged with Paperclip's reason code, e.g. `HTTP 403 cross_issue_influence_run_context_required`.
 
@@ -570,11 +571,11 @@ The harness is dumb transport here — **what the emoji means is yours to define
 ## Architecture
 
 ```
-Discord message
+Discord message, or a Paperclip task
   → bot.js (discord.js)
-  → spawn `claude` --output-format stream-json
-  → stream events back as Discord messages
-  → session id saved for continuity
+  → spawn the bot's runtime: `claude` (stream-json) or `codex exec` (--json)
+  → events normalized, progress shown, one reply posted
+  → session id saved for continuity, tagged with its runtime
 ```
 
 - **CLI spawn, not SDK** — inherits every built-in tool and MCP support for free
@@ -585,7 +586,7 @@ Discord message
 ## Prerequisites
 
 - Node.js 18+
-- Claude Code CLI, installed and authenticated
+- One agent CLI per bot, installed and signed in: Claude Code (the default), or the Codex CLI for a bot with `BOT_RUNTIME=codex`. See [docs/runtimes.md](docs/runtimes.md)
 
 ## Troubleshooting
 
@@ -601,6 +602,7 @@ Run **`npm run doctor`** first — it checks most of this and prints no secrets.
 | Hangs, then exit code 143 | Timeout — raise `CLAUDE_TIMEOUT_MS`, or an MCP server is unreachable |
 | `Error: spawn E2BIG`, usually on the first message after a restart | Too much remembered context for one command line — lower `CONTEXT_MAX_BYTES` or `SUMMARY_LOOKBACK_HOURS`. See [Memory](#memory) |
 | Second bot crashes at startup | `WS_PORT` collision — one port per bot |
+| Exits at startup naming a setting "Claude Code syntax" | A Claude-only setting on a `BOT_RUNTIME=codex` bot — see [docs/runtimes.md](docs/runtimes.md) |
 
 ## Contributing
 

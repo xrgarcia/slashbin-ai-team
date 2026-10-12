@@ -1,7 +1,7 @@
 {
   "name": "slashbin-ai-team",
   "version": "2.8.0",
-  "description": "Run a team of AI coworkers in Discord. Powered by Claude Code — safe enough to leave running.",
+  "description": "Run a team of AI coworkers in Discord, each on Claude Code or Codex, with optional Paperclip board work. Safe enough to leave running.",
   "keywords": [
     "claude",
     "claude-code",

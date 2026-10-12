@@ -84,6 +84,29 @@ remove `PAPERCLIP_URL` or `PAPERCLIP_API_KEY`.
 5. **Discord.** Message the bot on Discord as usual; the reply is unchanged by the
    mode.
 
+## On Codex
+
+A bot with `BOT_RUNTIME=codex` ([runtimes.md](runtimes.md)) takes board tasks on
+Codex with the same two modes and the same closed folders. Codex expresses them as a
+permission profile rather than a tool list:
+
+- **Both modes** run with no user config or rules files, nothing that prompts, no
+  network, no web search, no MCP servers, no sub-agents, and every Discord memory and
+  harness folder denied. Every run has a shell: in `readonly` it can read
+  `CLAUDE_CWD` and write nothing.
+- **`engineering`** makes `CLAUDE_CWD` and `BOT_BOARD_WRITE_PATHS` writable and
+  `BOT_BOARD_READ_PATHS` readable, plus a private temp folder.
+- **Refused, connector off:** `BOT_BOARD_NETWORK_ALLOW` (Codex profiles cannot
+  allow single hosts, so a Codex board run has no network: pushing and `gh` need a
+  Claude bot); the Claude tool settings (`BOT_BOARD_TOOLS`,
+  `BOT_BOARD_ENGINEERING_TOOLS`, `BOT_BOARD_PERMISSION_ALLOW`); a Discord memory
+  folder inside `CLAUDE_CWD` **in either mode**, because the `readonly` shell can
+  read the repo's history too; a Codex version other than 0.162.x.
+- **Prerequisites:** the Codex CLI signed in, and `bwrap` on Linux.
+
+Verify exactly as above. The startup line reads
+`Paperclip board runs: <mode>` with `runtime: codex` among its fields.
+
 ## Outcomes
 
 A run that could not do what was asked ends its reply with
@@ -95,8 +118,8 @@ blocked task reopens it, and the bot picks it up again.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Log: `Paperclip connector off — <reason>` | A `BOT_BOARD_*` value breaks a rule above, or `CLAUDE_CWD` is the harness or state folder |
-| Log: `… is the bot's Discord memory and lies inside CLAUDE_CWD …` | `engineering` with summaries (or other memory) kept in the repo | Move `BOT_HISTORY_DIR` out of `CLAUDE_CWD` and clear it from the repo's history, or keep the bot `readonly` | Fix the named value, restart |
+| Log: `Paperclip connector off — <reason>` | A `BOT_BOARD_*` value breaks a rule above, or `CLAUDE_CWD` is the harness or state folder | Fix the named value, restart |
+| Log: `… is the bot's Discord memory and lies inside CLAUDE_CWD …` | `engineering` (or any mode on Codex) with summaries or other memory kept in the repo | Move `BOT_HISTORY_DIR` out of `CLAUDE_CWD` and clear it from the repo's history, or keep the bot `readonly` on Claude |
 | Task blocked, reply says no Edit/Write/Bash | Bot is in `readonly` | Set `BOT_BOARD_EXECUTION=engineering`, restart, check the startup log |
 | Shell commands fail with `bwrap` errors | A read path contains `CLAUDE_CWD` or a write path, or the sandbox is missing | Name sibling folders instead; install `bwrap`/`socat` |
 | Every network call from the shell fails | `socat` unreadable inside the sandbox | Add its folder (and its wrapper's) to `BOT_BOARD_READ_PATHS`; see `doctor:fleet` |
@@ -105,4 +128,6 @@ blocked task reopens it, and the bot picks it up again.
 | Log: `HTTP 403 cross_issue_influence_run_context_required` | A write reached Paperclip without the agent's run behind it — e.g. a comment posted with the agent key from a script or another session, not from the task's own run | Make the write from a run: assign the task to the agent and let the bot answer it, or send the call from inside that run with its `X-Paperclip-Run-Id`. Never switch to a board or admin key — that hides who acted |
 | Log: `HTTP 403 …` with another code | Paperclip refused the write; the code names the rule | Look the code up in Paperclip's issue-write denial reasons; the response's `whoCanAct` and `sanctionedPath` say who may do it and how |
 | Log: `HTTP 401` | Key wrong or revoked | Issue the agent a new key; update `PAPERCLIP_API_KEY` |
+| Log: `… tested on Codex 0.162.x, this host has …` | A Codex bot on an untested version | Install 0.162.x for board work, or run the bot on Claude |
+| Log: `BOT_BOARD_NETWORK_ALLOW: a host allow list is not available on Codex` | Codex profiles allow all hosts or none | Remove it (the run has no network), or run the bot on Claude |
 | Task stays `todo`, nothing in the log | Not assigned to this agent, or the connector is off | Check the assignee and the startup log |
