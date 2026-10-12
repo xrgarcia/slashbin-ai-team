@@ -6,7 +6,7 @@ const assert = require("assert");
 const { readFileSync, readdirSync, writeFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { paperclipBoards, pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED, OUTCOME_MARK, outcomeOf, refusal } = require("../lib/paperclip");
+const { paperclipBoards, pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED, UNBLOCK_ACTION, OUTCOME_MARK, outcomeOf, refusal } = require("../lib/paperclip");
 
 const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
 let pass = 0, fail = 0;
@@ -16,6 +16,8 @@ async function check(label, fn) {
 }
 const silent = { info() {}, warn() {}, error() {}, child() { return silent; } };
 const ME = { id: "agent-1", name: "Bot" };
+// Paperclip refuses a block that names no one to unblock it; an agent may name only itself.
+const UNBLOCK = { owner: { agentId: ME.id }, action: UNBLOCK_ACTION };
 
 function board({ runs, comments = [], wakeCommentId }) {
   const writes = [], activity = [];
@@ -847,7 +849,7 @@ const poller = (b, answer) => createPaperclipPoller({
       const b = board({ runs: running });
       await poller(b, async () => `I could not run the tests: Bash is not available here. The owner can enable it.\n\n${tail}`).tick();
       assert.deepStrictEqual(b.writes.map((w) => w.body),
-        [{ status: "blocked", comment: "I could not run the tests: Bash is not available here. The owner can enable it." }], tail);
+        [{ status: "blocked", unblockDescriptor: UNBLOCK, comment: "I could not run the tests: Bash is not available here. The owner can enable it." }], tail);
       assert.ok(b.writes.every((w) => w.body.status !== "done"), "a blocked answer closed the task as done");
     }
     const b = board({ runs: running });
@@ -878,7 +880,7 @@ const poller = (b, answer) => createPaperclipPoller({
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     await createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
       answer: async () => `No key.\n${OUTCOME_MARK} blocked` }).tick();
-    assert.deepStrictEqual(writes, [{ status: "blocked", comment: "No key." }, { status: "todo" }]);
+    assert.deepStrictEqual(writes, [{ status: "blocked", unblockDescriptor: UNBLOCK, comment: "No key." }, { status: "todo" }]);
     assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).closing, {});
   });
 

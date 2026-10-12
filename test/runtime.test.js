@@ -71,9 +71,7 @@ check("every Claude-only setting refuses a Codex bot, and none refuses a Claude 
 section("Codex — the command line for each kind of run");
 
 const releaseDir = "/opt/codex-release";
-// The state and harness folders exist: a missing one outside the repo is left out of the profile.
-const OUT = mkdtempSync(join(tmpdir(), "rt-")), STATE = join(OUT, "state"), HARNESS = join(OUT, "harness");
-require("fs").mkdirSync(STATE); require("fs").mkdirSync(HARNESS);
+const STATE = "/srv/state", HARNESS = "/srv/harness";
 const boardFs = (execution, extra = {}) => cx.boardFilesystem({
   cwd: "/srv/repo", denied: ["/srv/repo/.bot-history", STATE, HARNESS, ...(extra.denied ?? [])],
   policy: { execution, readPaths: [], writePaths: [], network: [], ...extra }, releaseDir, expand: (p) => p, tmpDir: extra.tmpDir ?? null,
@@ -112,12 +110,14 @@ check("the board profile: readonly reads the repo, engineering writes it; privat
   assert.strictEqual(boardFs("readonly", { readPaths: ["/srv/lib"] })["/srv/lib"], undefined, "readonly takes no extra folders");
 });
 
-check("a missing denied folder outside the run's folders is left out — bubblewrap cannot mount over it", () => {
-  // Live 2026-10-12: a never-created attachments folder kept every Codex board run from starting.
+check("a denied folder inside another denied folder is hidden with it, not named twice — bubblewrap cannot mount inside a hidden folder", () => {
+  // Live 2026-10-12: the state folder and the attachments folder in it kept every Codex board run from starting.
   const ro = boardFs("readonly", { denied: [join(STATE, "attachments"), "/srv/repo/uploads"] });
   assert.strictEqual(ro[join(STATE, "attachments")], undefined);
-  assert.strictEqual(ro["/srv/repo/uploads"], "deny", "inside the repo it stays: a run that cannot hide it does not start");
-  assert.strictEqual(boardFs("engineering", { writePaths: ["/srv/out"], denied: ["/srv/out/x"] })["/srv/out/x"], "deny", "inside a write path it stays");
+  assert.strictEqual(ro[STATE], "deny");
+  assert.strictEqual(ro["/srv/repo/uploads"], "deny", "a folder the run is given still names its own denials");
+  const eng = boardFs("engineering", { writePaths: [join(STATE, "out")], denied: [join(STATE, "out", "x")] });
+  assert.strictEqual(eng[join(STATE, "out", "x")], "deny", "a given folder between the two keeps the inner denial");
 });
 
 check("a restricted session reads its repo and its uploads, and writes nothing", () => {

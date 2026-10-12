@@ -118,8 +118,9 @@ A run that could not do what was asked ends its reply with
 `PAPERCLIP-OUTCOME: blocked`. The bot strips that line, posts the rest as the
 comment, and leaves the task **blocked** instead of **done**. A run that failed or
 died with no reply is the same: the bot posts its "could not answer" message and
-leaves the task **blocked**. A person commenting on a blocked task reopens it, and the
-bot picks it up again.
+leaves the task **blocked**. Paperclip blocks a task only when the write names who
+unblocks it, and an agent may name only itself, so the bot names itself: a person
+commenting on a blocked task reopens it, and the bot picks it up again.
 
 ## Symptom → fix
 
