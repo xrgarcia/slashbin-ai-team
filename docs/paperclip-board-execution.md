@@ -49,7 +49,15 @@ Restart the bot. Rules a setting must meet, or the connector stays off and logs 
   or harness folder;
 - a read path must not contain `CLAUDE_CWD` or a write path — name the folders beside
   them instead (the sandbox cannot open a writable folder inside a read-only one);
-- a host is a plain name such as `github.com` or `*.example.com`.
+- a host is a plain name such as `github.com` or `*.example.com`;
+- none of the bot's Discord memory folders — `BOT_HISTORY_DIR` (summaries),
+  `BOT_STATE_DIR`, attachments, outbox — may lie inside `CLAUDE_CWD`. The sandbox
+  hides them from the shell by path, but a shell with `git` reads every committed
+  copy straight from the repo's history, and sees the folder as deleted, so a
+  "commit everything" would remove it. Move the folder out of `CLAUDE_CWD` first;
+  if it was ever committed, its history is still readable, so also remove it from
+  the repo's history or give board runs a repo that never held it. `readonly` has
+  no shell and is unaffected.
 
 ## Disable
 
@@ -87,7 +95,8 @@ blocked task reopens it, and the bot picks it up again.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Log: `Paperclip connector off — <reason>` | A `BOT_BOARD_*` value breaks a rule above, or `CLAUDE_CWD` is the harness or state folder | Fix the named value, restart |
+| Log: `Paperclip connector off — <reason>` | A `BOT_BOARD_*` value breaks a rule above, or `CLAUDE_CWD` is the harness or state folder |
+| Log: `… is the bot's Discord memory and lies inside CLAUDE_CWD …` | `engineering` with summaries (or other memory) kept in the repo | Move `BOT_HISTORY_DIR` out of `CLAUDE_CWD` and clear it from the repo's history, or keep the bot `readonly` | Fix the named value, restart |
 | Task blocked, reply says no Edit/Write/Bash | Bot is in `readonly` | Set `BOT_BOARD_EXECUTION=engineering`, restart, check the startup log |
 | Shell commands fail with `bwrap` errors | A read path contains `CLAUDE_CWD` or a write path, or the sandbox is missing | Name sibling folders instead; install `bwrap`/`socat` |
 | Every network call from the shell fails | `socat` unreadable inside the sandbox | Add its folder (and its wrapper's) to `BOT_BOARD_READ_PATHS`; see `doctor:fleet` |

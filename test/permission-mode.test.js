@@ -404,6 +404,12 @@ check("engineering: a policy that would open what a board run must not reach is 
   assert.match(probs({ BOT_BOARD_READ_PATHS: "/srv/code" })[0], /contains \/srv\/code\/repo/);
   assert.match(probs({ BOT_BOARD_READ_PATHS: "/srv", BOT_BOARD_WRITE_PATHS: "/srv/scratch" }).join(" "), /\/srv\/scratch/);
   assert.match(probs({ BOT_BOARD_NETWORK_ALLOW: "https://x.example.com/path" })[0], /not a host name/);
+  // Discord memory inside CLAUDE_CWD: a shell reads it back through version
+  // control, so engineering is refused; readonly (no shell) is unaffected.
+  const nested = ["/srv/harness", "/srv/code/repo/bot-history"];
+  assert.match(boardPolicyProblems(resolveBoardPolicy({ BOT_BOARD_EXECUTION: "engineering" }), nested, "/srv/code/repo")[0],
+    /\/srv\/code\/repo\/bot-history.*inside CLAUDE_CWD.*version control/);
+  assert.deepStrictEqual(boardPolicyProblems(resolveBoardPolicy({}), nested, "/srv/code/repo"), []);
   // bot.js turns board pickup off on any problem, and says so.
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
   assert.match(src, /else if \(PAPERCLIP_BOARDS\.length && BOARD_POLICY_PROBLEMS\.length\) \{\n  for \(const problem of BOARD_POLICY_PROBLEMS\) log\.error\(`Paperclip connector off — \$\{problem\}`\);/);

@@ -521,9 +521,9 @@ export async function checkPaperclip(bot, harnessDir, env = process.env, { fetch
       "Set both to put this bot on the board, or neither.");
   }
   // The same test the bot makes at startup (bot.js), against the folders known
-  // here: the bot's state folder and the harness.
+  // here: the bot's state and summaries folders and the harness.
   const { boardCwdDenied } = require_("../../lib/permission-mode.js");
-  const denied = [bot.stateDir, harnessDir].filter(Boolean);
+  const denied = [bot.stateDir, bot.historyDir, harnessDir].filter(Boolean);
   if (bot.claudeCwd && boardCwdDenied(denied, bot.claudeCwd)) {
     return bad(name, `connector stays off: CLAUDE_CWD ${bot.claudeCwd} is the harness or state folder, or inside one`,
       "A board run cannot keep that folder closed. Point CLAUDE_CWD at the folder board tasks should read.");

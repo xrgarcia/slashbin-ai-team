@@ -261,6 +261,10 @@ ${extra}
     const r3 = await checkPaperclip(bad, "/srv/harness", { PO_PAPERCLIP_API_KEY: "k" }, { fetch: reply(200, {}) });
     assert.strictEqual(r3.status, FAIL);
     assert.match(r3.detail, /connector stays off: BOT_BOARD_WRITE_PATHS/);
+    // Summaries inside CLAUDE_CWD: readable to an engineering shell through version control.
+    const r4 = await checkPaperclip({ ...e, historyDir: `${e.claudeCwd}/bot-history` }, "/srv/harness", { PO_PAPERCLIP_API_KEY: "k" }, { fetch: reply(200, {}) });
+    assert.strictEqual(r4.status, FAIL);
+    assert.match(r4.detail, /bot-history.*inside CLAUDE_CWD/);
   });
 
   await checkAsync("engineering mode warns when the sandbox's network helper sits where the shell cannot read it", async () => {
