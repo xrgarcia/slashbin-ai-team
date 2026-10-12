@@ -257,12 +257,15 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `BOT_LAND_PATHS` | *(none)* | Comma-separated globs, relative to the bot's repo (`CLAUDE_CWD`), of the files the pack's `land` skill may commit and push to the checkout's upstream branch; `!glob` excludes, e.g. `notes/**,skills/**,!skills/guarded/**`. It lands only the files it is named, refuses a checkout with unpushed commits, and pushes the exact commit it checked (built outside the checkout, so another session's commit is never published and local commit hooks do not run); a rejected push leaves nothing behind. Pair it with `Edit(...)` rules on the same paths and an allow rule for the command. Unset, landing is off |
 | `BOT_SUMMARIZER_TOOLS` | `Read` | Tools a summary run may use, in every mode. Summaries never get MCP servers or the skip flags, and take `BOT_PERMISSION_DENY` and `BOT_SETTINGS` |
 
-### Claude
+### Agent runtime
 | Variable | Default | Description |
 |---|---|---|
-| `CLAUDE_MODEL` | CLI default | e.g. `claude-opus-5` |
-| `SUMMARIZE_MODEL` | `CLAUDE_MODEL` | A cheaper model is fine here |
-| `CLAUDE_BIN` | `claude` | Path to the CLI |
+| `BOT_RUNTIME` | `claude` | The agent CLI this bot runs on: `claude` (Claude Code) or `codex` (OpenAI Codex CLI). Every run the bot makes — Discord, scheduled jobs, summaries, board tasks — uses it, and `npm run doctor` checks only it. No fallback to the other, and a session is never moved between them: after a switch each channel starts fresh. Anything else stops the bot at startup. See [docs/runtimes.md](docs/runtimes.md) |
+| `BOT_MODEL` | CLI default | The model, for whichever runtime is selected, e.g. `claude-opus-5` or `gpt-5-codex` |
+| `CLAUDE_MODEL` | CLI default | Claude only: the model when `BOT_MODEL` is unset, as before. Set on a Codex bot, it stops the bot at startup |
+| `SUMMARIZE_MODEL` | the bot's model | A cheaper model is fine here; it must belong to the bot's runtime |
+| `CLAUDE_BIN` | `claude` | Path to the Claude Code CLI |
+| `CODEX_BIN` | `codex` | Path to the Codex CLI, signed in with `codex login` |
 | `CLAUDE_MAX_TURNS` | `100` | Steps per request before a cap-out |
 | `CLAUDE_TIMEOUT_MS` | `3600000` | Max wall time per request |
 | `SESSION_TIMEOUT_MS` | `1800000` | Idle time before a channel starts fresh |

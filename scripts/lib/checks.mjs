@@ -48,6 +48,36 @@ export async function checkClaudeCli(bin = process.env.CLAUDE_BIN || "claude") {
 }
 
 /**
+ * The CLI of the runtime a bot is set to (BOT_RUNTIME), and only that one: a
+ * Codex bot needs no Claude install, and the reverse. On Codex the sign-in is
+ * checked too, since its CLI runs without one and fails on the first message.
+ *
+ * @param {NodeJS.ProcessEnv} env the bot's settings
+ */
+export async function checkRuntimeCli(env = process.env, { exec = run } = {}) {
+  const { resolveRuntime } = require_("../../lib/runtime/index.js");
+  const rt = resolveRuntime(env);
+  const name = `Agent CLI (${rt.name})`;
+  if (rt.problems.length) {
+    return bad(name, rt.problems.join("; "), "The bot refuses to start with these. Fix each setting named; see docs/runtimes.md.");
+  }
+  if (rt.name === "claude") return { ...(await checkClaudeCli(rt.bin)), name };
+  let version;
+  try {
+    const { stdout } = await exec(rt.bin, ["--version"], { timeout: 15000 });
+    version = stdout.trim().split("\n")[0];
+  } catch {
+    return bad(name, `'${rt.bin}' not found or not runnable`, "Install the Codex CLI and make sure it is on PATH, or set CODEX_BIN. See docs/runtimes.md.");
+  }
+  try {
+    await exec(rt.bin, ["login", "status"], { timeout: 15000 });
+  } catch {
+    return bad(name, `${version}, not signed in`, "Run `codex login` as the user the bot runs as.");
+  }
+  return ok(name, `${version}, signed in${rt.model ? `; model ${rt.model}` : ""}`);
+}
+
+/**
  * Prove the token works by asking Discord who it belongs to. On success we report
  * the bot's username — the token itself is never echoed, logged, or returned.
  */
@@ -434,6 +464,9 @@ export function parseFleet(file) {
       claudeCwd: pick("CLAUDE_CWD"),
       wsPort: pick("WS_PORT"),
       permissionMode: pick("BOT_PERMISSION_MODE"),
+      // The runtime and every setting resolveRuntime reads, as literals.
+      runtimeEnv: Object.fromEntries(["BOT_RUNTIME", "BOT_MODEL", "CODEX_BIN", "CLAUDE_BIN", "CLAUDE_MODEL", "SUMMARIZE_MODEL",
+        ...require_("../../lib/runtime/index.js").CLAUDE_ONLY_SETTINGS].map((k) => [k, pick(k)]).filter(([, v]) => v != null)),
       stateDir: pick("BOT_STATE_DIR"),
       historyDir: pick("BOT_HISTORY_DIR"),
       allowedUsers: pick("ALLOWED_USERS"),
@@ -492,6 +525,7 @@ export async function checkFleet(file, harnessDir, env = process.env) {
         "This bot starts in `restricted` and cannot write files or run commands. Set BOT_PERMISSION_MODE_DEFAULT once for the host, or BOT_PERMISSION_MODE on this bot."));
     }
 
+    out.push({ ...(await checkRuntimeCli(b.runtimeEnv)), name: `${label}: runtime` });
     out.push({ ...checkAllowlist(b.allowedUsers), name: `${label}: ALLOWED_USERS` });
     out.push({ ...checkStateDir(b.stateDir, b.historyDir, harnessDir), name: `${label}: state dir` });
     out.push({
@@ -565,11 +599,21 @@ export async function checkPaperclip(bot, harnessDir, env = process.env, { fetch
  * The sandbox hides everything outside the system folders, so a socat or
  * bwrap installed under a home folder is invisible to the shell's own sandbox.
  */
-export function boardPolicyOf(bot, denied, { which = whichBin } = {}) {
+export function boardPolicyOf(bot, denied, { which = whichBin, codex: codexInfo = null } = {}) {
   const { resolveBoardPolicy, boardPolicyProblems, SYSTEM_READ } = require_("../../lib/permission-mode.js");
   const policy = resolveBoardPolicy(bot.boardEnv ?? {});
-  const problems = boardPolicyProblems(policy, denied, bot.claudeCwd || "");
+  const codex = bot.runtimeEnv?.BOT_RUNTIME === "codex";
+  const problems = boardPolicyProblems(policy, denied, bot.claudeCwd || "", { shellInEveryMode: codex });
   const eng = policy.execution === "engineering";
+  if (codex) {
+    // The same tests bot.js makes at startup on a Codex bot (lib/runtime/codex.js).
+    const cx = require_("../../lib/runtime/codex.js");
+    const bin = bot.runtimeEnv.CODEX_BIN || "codex";
+    const info = codexInfo ?? { version: cx.codexVersion(bin), releaseDir: cx.codexReleaseDir(bin) };
+    problems.push(...cx.codexBoardProblems(policy, info));
+    const summary = `${policy.execution} on Codex ${info.version ?? "(not installed)"} (${eng ? `reads and writes the working directory${policy.writePaths.length ? `, ${policy.writePaths.join(", ")}` : ""}` : "reads the working directory"}; no network)`;
+    return { policy, problems, summary, unreadable: [] };
+  }
   const summary = eng
     ? `engineering (${policy.tools}; reads ${policy.readPaths.join(", ") || "the working directory only"}; writes the working directory${policy.writePaths.length ? `, ${policy.writePaths.join(", ")}` : ""}; hosts ${policy.network.join(", ") || "the bot's own"})`
     : `readonly (${policy.tools})`;

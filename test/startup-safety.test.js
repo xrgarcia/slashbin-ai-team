@@ -278,9 +278,10 @@ check("there is exactly ONE summarization implementation", () => {
   const promptCopies = [bot, sum, core].filter((f) => /Topics discussed/.test(f)).length;
   assert.strictEqual(promptCopies, 1, "the summarization prompt exists in more than one file");
 
-  assert.ok(!/spawn\(CLAUDE_BIN/.test(sum), "summarize.js still spawns Claude itself");
-  // bot.js keeps exactly one spawn — the agent. Summarization is not it.
-  assert.strictEqual((bot.match(/spawn\(CLAUDE_BIN/g) || []).length, 1,
+  assert.ok(!/spawn\((CLAUDE_BIN|RUNTIME\.bin)/.test(sum), "summarize.js still spawns Claude itself");
+  // bot.js keeps exactly one spawn — the agent, on whichever runtime is set.
+  // Summarization is not it.
+  assert.strictEqual((bot.match(/spawn\((CLAUDE_BIN|RUNTIME\.bin)/g) || []).length, 1,
     "bot.js should spawn Claude once (the agent); summarization goes through the module");
 
   for (const f of [bot, sum]) {

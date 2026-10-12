@@ -113,7 +113,7 @@ check("the channel block is assembled into the prompt HEAD, where clamping canno
   );
   // From the declaration onward: the head's own definition is a template literal
   // too, and it is the one thing that cannot be required to contain itself.
-  const assembly = SRC.slice(SRC.indexOf("let systemPrompt;"), SRC.indexOf("const args = ["));
+  const assembly = SRC.slice(SRC.indexOf("let systemPrompt;"), SRC.search(/const args = (CODEX \? \[\] : )?\[/));
   // Every template literal systemPrompt can be assigned — both ternary arms
   // included — has to open with the head. One that does not is a path where the
   // channel's instructions are appended last and clamped away first.

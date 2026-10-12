@@ -271,7 +271,7 @@ check("a board run drops every memory variable and denies the path each one name
   }
   // The withholding runs after every variable is set and before the spawn.
   const at = (re) => src.search(re);
-  assert.ok(at(/cleanEnv\.BOT_CHANNEL_ID = /) < at(/withheldFromBoard\(name\)\) delete/) && at(/withheldFromBoard\(name\)\) delete/) < at(/spawn\(CLAUDE_BIN, safeArgs/),
+  assert.ok(at(/cleanEnv\.BOT_CHANNEL_ID = /) < at(/withheldFromBoard\(name\)\) delete/) && at(/withheldFromBoard\(name\)\) delete/) < at(/spawn\(RUNTIME\.bin, safeArgs/),
     "the credentials are removed before they are set, or after the spawn");
   assert.match(src, /deny: \[PERMISSION_DENY, \.\.\.privateMemoryDeny\(boardDeniedPaths\(\), BOARD_ENGINEERING \? \["Read", "Edit"\] : \["Read"\]\)\]/, "the board run no longer denies the memory paths");
   // Second pass on e4411f4: files already sent to Discord sit in the outbox,

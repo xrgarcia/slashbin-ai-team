@@ -151,16 +151,16 @@ console.log("\nno un-clamped spawn survives in the codebase\n");
 
 check("bot.js spawns the clamped argument list, never the raw one", () => {
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.ok(/spawn\(CLAUDE_BIN,\s*safeArgs/.test(src),
+  assert.ok(/spawn\(RUNTIME\.bin,\s*safeArgs/.test(src),
     "bot.js must spawn clamped args — an un-clamped spawn re-arms E2BIG");
-  assert.ok(!/spawn\(CLAUDE_BIN,\s*args\b/.test(src));
+  assert.ok(!/spawn\([\w.]+,\s*args\b/.test(src));
 });
 
 check("summarize-core.js spawns the clamped argument list too", () => {
   const src = readFileSync(join(__dirname, "..", "lib", "summarize-core.js"), "utf8");
-  assert.ok(/spawn\(claudeBin,\s*safeArgs/.test(src),
+  assert.ok(/spawn\(bin,\s*safeArgs/.test(src),
     "the summarizer passes a whole transcript through argv — it needs the same clamp");
-  assert.ok(!/spawn\(claudeBin,\s*args\b/.test(src));
+  assert.ok(!/spawn\([\w.]+,\s*args\b/.test(src));
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

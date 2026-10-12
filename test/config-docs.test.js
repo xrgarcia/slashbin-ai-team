@@ -31,6 +31,9 @@ if (existsSync(PACK_BIN)) {
 const LIB = join(REPO, "lib");
 if (existsSync(LIB)) {
   for (const f of readdirSync(LIB)) if (f.endsWith(".js")) SOURCES.push(join("lib", f));
+  // The runtime resolver (lib/runtime) reads BOT_RUNTIME and the model settings.
+  const RUNTIME_LIB = join(LIB, "runtime");
+  if (existsSync(RUNTIME_LIB)) for (const f of readdirSync(RUNTIME_LIB)) if (f.endsWith(".js")) SOURCES.push(join("lib", "runtime", f));
 }
 const read = new Set();
 for (const f of SOURCES) {
