@@ -267,19 +267,17 @@ export function checkEcosystem(file, sourceDir) {
     for (const f of readdirSync(sourceDir)) {
       if (/\.(js|mjs|cjs)$/.test(f) && !f.startsWith("ecosystem")) files.push(join(sourceDir, f));
     }
+    const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(join(d, e.name)) : /\.(js|mjs|cjs|py|sh)$/.test(e.name) ? [join(d, e.name)] : []);
+    // lib/ in full: reading only its top level reported BOT_RUNTIME as dead once
+    // its resolution lived in lib/runtime/ — the setting that picks the CLI.
     const libDir = join(sourceDir, "lib");
-    if (existsSync(libDir)) {
-      for (const f of readdirSync(libDir)) {
-        if (/\.(js|mjs|cjs)$/.test(f)) files.push(join(libDir, f));
-      }
-    }
+    if (existsSync(libDir)) files.push(...walk(libDir));
     // The pack's hooks and commands run as the bot's children and read its
     // environment too. Leaving them out reported BOT_MAIL_*, BOT_CALENDAR_NO_ATTENDEES
     // and BOT_LAND_PATHS as dead: the switches that turn the mail, calendar and
     // land gates on, recommended for deletion.
     const pack = join(sourceDir, "skill-pack");
-    const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
-      e.isDirectory() ? walk(join(d, e.name)) : /\.(js|mjs|cjs|py|sh)$/.test(e.name) ? [join(d, e.name)] : []);
     if (existsSync(pack)) files.push(...walk(pack));
     for (const file of files) {
       const src = readFileSync(file, "utf8");

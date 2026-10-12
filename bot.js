@@ -573,7 +573,9 @@ log.info({ runtime: RUNTIME.name, source: RUNTIME.source, bin: RUNTIME.bin, mode
 if (CODEX && !RUNTIME.version) log.error({ bin: RUNTIME.bin }, "BOT_RUNTIME=codex but the Codex CLI did not run — install it, sign in (codex login), or set CODEX_BIN");
 // Built once: what a Codex bypass session connects to.
 const CODEX_MCP = CODEX && PERMISSION_MODE === "bypass" ? codexMcp() : null;
-for (const { name, reason } of CODEX_MCP?.skipped ?? []) log.warn({ server: name, reason }, "MCP server not available on Codex — skipped");
+// Not passed by the harness; the session still loads the Codex config, so a
+// server defined there (the repo's .codex/config.toml, ~/.codex) is available.
+for (const { name, reason } of CODEX_MCP?.skipped ?? []) log.warn({ server: name, reason }, "MCP server not passed to Codex — skipped; define it in the Codex config if the bot needs it");
 // A malformed inline BOT_SETTINGS would fail every session, one message at a time.
 if (SESSION_SETTINGS.startsWith("{")) {
   try {

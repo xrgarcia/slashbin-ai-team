@@ -310,6 +310,11 @@ ${keys.map((k) => `  ${k}: 'v',`).join("\n")}
 } } ] };
 `;
 
+  check("a setting read only in a lib/ subfolder is not dead (BOT_RUNTIME in lib/runtime/)", () => {
+    const line = deadOf(ECO(["BOT_RUNTIME"]), { "lib/runtime/index.js": "const raw = (env.BOT_RUNTIME || '').trim();" });
+    assert.strictEqual(line.status, PASS, line.detail);
+  });
+
   check("a switch read only by a pack hook (Python) is not dead", () => {
     const line = deadOf(ECO(["BOT_MAIL_ALLOW"]), { "skill-pack/hooks/gate.py": 'os.environ.get("BOT_MAIL_ALLOW", "")' });
     assert.strictEqual(line.status, PASS, line.detail);

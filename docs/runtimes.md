@@ -60,7 +60,7 @@ To go back, remove `BOT_RUNTIME` (or set `claude`) and restart.
 | Area | Claude | Codex |
 |---|---|---|
 | Restricted session | `BOT_ALLOWED_TOOLS` (read tools, web fetch and search), MCP servers | Reads `CLAUDE_CWD` and the uploads folder; no writes, no network, no web search, no MCP servers |
-| Bypass session | Every tool, MCP servers from `MCP_CONFIG` or the repo's `.mcp.json` | Unsandboxed, the operator's own Codex config, plus the bot's local (stdio) MCP servers from the same files; HTTP/SSE servers are skipped and logged |
+| Bypass session | Every tool, MCP servers from `MCP_CONFIG` or the repo's `.mcp.json` | Unsandboxed, the operator's own Codex config, plus the bot's local (stdio) MCP servers from the same files; HTTP/SSE servers there are skipped and logged — define those in the Codex config instead |
 | Board run, `readonly` | Read tools only, no shell | A shell inside a read-only profile, no network |
 | Board run, `engineering` | Sandboxed shell, host allow list | Sandboxed shell, **no network**; `BOT_BOARD_NETWORK_ALLOW` is refused |
 | Step cap | `CLAUDE_MAX_TURNS` | None; `CLAUDE_TIMEOUT_MS` bounds a run |
@@ -109,6 +109,6 @@ to start and the log names each one; unset them or go back to `claude`:
 | Doctor: `Agent CLI (codex)` FAIL, not signed in | No Codex login on this host user | `codex login` as the user the bot runs as |
 | Every reply fails with `Codex exited with code 1` | Sign-in expired, or the model is not on the account | `codex login status`; check `BOT_MODEL` |
 | Restricted replies fail with a sandbox error | No `bwrap` | Install bubblewrap |
-| Log: `MCP server not available on Codex — skipped` | An HTTP/SSE server in the MCP config | Use a stdio server, or keep this bot on Claude |
+| Log: `MCP server not passed to Codex — skipped` | An HTTP/SSE server in the MCP config | Define it in the Codex config the session loads — the repo's `.codex/config.toml` (trusted project) or `~/.codex/config.toml` — with its credentials from the environment (`env_http_headers`, `bearer_token_env_var`) or a header helper, never literal; check with `codex mcp list` in `CLAUDE_CWD` |
 | Log: `Paperclip connector off — … tested on Codex 0.162.x` | Another Codex version | Install 0.162.x for board work; Discord keeps working |
 | After switching, the bot has forgotten the conversation | Sessions are not moved between runtimes | Expected; the summaries still carry the channel's memory |

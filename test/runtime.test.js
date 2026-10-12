@@ -171,6 +171,9 @@ check("Discord memory inside the repo keeps a Codex board off in readonly too â€
   const codex = boardPolicyProblems(resolveBoardPolicy({}), denied, "/srv/repo", { shellInEveryMode: true });
   assert.strictEqual(codex.length, 1);
   assert.match(codex[0], /on Codex every board run has a shell, readonly included/);
+  assert.match(codex[0], /^BOT_RUNTIME=codex: /, "named by the setting the operator did set");
+  const eng = boardPolicyProblems(resolveBoardPolicy({ BOT_BOARD_EXECUTION: "engineering" }), denied, "/srv/repo", { shellInEveryMode: true });
+  assert.match(eng[0], /^BOT_BOARD_EXECUTION=engineering: /);
   assert.ok(!/keep board runs readonly/.test(codex[0]), "readonly is no remedy on Codex");
 });
 
