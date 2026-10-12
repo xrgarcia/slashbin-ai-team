@@ -353,6 +353,8 @@ const poller = (b, answer) => createPaperclipPoller({
     const b = board({ runs: running });
     await poller(b, async () => { throw new Error("boom"); }).tick();
     assert.strictEqual(b.writes[0].body.comment, FALLBACK_REPLY);
+    // Live 2026-10-12: a Codex run that never started closed its task `done`.
+    assert.strictEqual(b.writes[0].body.status, "blocked", "a failed run is not a done task");
   });
 
   await check("a run is answered once across ticks", async () => {

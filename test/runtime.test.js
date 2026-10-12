@@ -71,8 +71,11 @@ check("every Claude-only setting refuses a Codex bot, and none refuses a Claude 
 section("Codex — the command line for each kind of run");
 
 const releaseDir = "/opt/codex-release";
+// The state and harness folders exist: a missing one outside the repo is left out of the profile.
+const OUT = mkdtempSync(join(tmpdir(), "rt-")), STATE = join(OUT, "state"), HARNESS = join(OUT, "harness");
+require("fs").mkdirSync(STATE); require("fs").mkdirSync(HARNESS);
 const boardFs = (execution, extra = {}) => cx.boardFilesystem({
-  cwd: "/srv/repo", denied: ["/srv/repo/.bot-history", "/srv/state", "/srv/harness"],
+  cwd: "/srv/repo", denied: ["/srv/repo/.bot-history", STATE, HARNESS, ...(extra.denied ?? [])],
   policy: { execution, readPaths: [], writePaths: [], network: [], ...extra }, releaseDir, expand: (p) => p, tmpDir: extra.tmpDir ?? null,
 });
 
@@ -102,11 +105,19 @@ check("the board profile: readonly reads the repo, engineering writes it; privat
   assert.strictEqual(ro[":minimal"], "read");
   assert.strictEqual(ro[releaseDir], "read");
   assert.deepStrictEqual(ro[":workspace_roots"], { ".": "read", ".bot-history": "deny" });
-  for (const d of ["/srv/repo/.bot-history", "/srv/state", "/srv/harness"]) assert.strictEqual(ro[d], "deny", d);
+  for (const d of ["/srv/repo/.bot-history", STATE, HARNESS]) assert.strictEqual(ro[d], "deny", d);
   const eng = boardFs("engineering", { readPaths: ["/srv/lib"], writePaths: ["/srv/out"], tmpDir: "/tmp/b-1" });
   assert.strictEqual(eng[":workspace_roots"]["."], "write");
   assert.deepStrictEqual([eng["/srv/lib"], eng["/srv/out"], eng["/tmp/b-1"]], ["read", "write", "write"]);
   assert.strictEqual(boardFs("readonly", { readPaths: ["/srv/lib"] })["/srv/lib"], undefined, "readonly takes no extra folders");
+});
+
+check("a missing denied folder outside the run's folders is left out — bubblewrap cannot mount over it", () => {
+  // Live 2026-10-12: a never-created attachments folder kept every Codex board run from starting.
+  const ro = boardFs("readonly", { denied: [join(STATE, "attachments"), "/srv/repo/uploads"] });
+  assert.strictEqual(ro[join(STATE, "attachments")], undefined);
+  assert.strictEqual(ro["/srv/repo/uploads"], "deny", "inside the repo it stays: a run that cannot hide it does not start");
+  assert.strictEqual(boardFs("engineering", { writePaths: ["/srv/out"], denied: ["/srv/out/x"] })["/srv/out/x"], "deny", "inside a write path it stays");
 });
 
 check("a restricted session reads its repo and its uploads, and writes nothing", () => {
