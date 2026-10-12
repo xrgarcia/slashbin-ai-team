@@ -385,6 +385,7 @@ An agent can sit on more than one board — the same bot as a seat in two compan
 | `BOT_BOARD_PERMISSION_ALLOW` | *(none)* | Board runs, either mode: permission rules pre-approved, e.g. `mcp__my-db` |
 | `BOT_BOARD_READ_PATHS` | *(none)* | `engineering` only: comma-separated absolute folders a board run may read besides `CLAUDE_CWD`, e.g. sibling repos. Must not contain `CLAUDE_CWD` or a write path — name the folders beside it |
 | `BOT_BOARD_WRITE_PATHS` | *(none)* | `engineering` only: comma-separated absolute folders a board run may write besides `CLAUDE_CWD` |
+| `BOT_BOARD_DENY_FILES` | *(none)* | Board runs, either mode: comma-separated file-name patterns a board run may not read anywhere in `CLAUDE_CWD` or the read and write paths, added to the built-in list (`.mcp.json`, `.env`, `.env.*` except `.env.example`/`.sample`/`.template`, `.npmrc`, `.netrc`, `.git-credentials`, `.pgpass`, `.dev.vars`, `*.pem`, `*.key`, SSH keys, `credentials.json`, `service-account*.json`). `*` and `?` match; a leading `!` exempts a name |
 | `BOT_BOARD_NETWORK_ALLOW` | *(none)* | `engineering` only: comma-separated host names a board run's shell may reach, added to any `allowedDomains` in `BOT_SETTINGS`, e.g. `github.com,api.github.com` |
 
 #### Engineering board runs

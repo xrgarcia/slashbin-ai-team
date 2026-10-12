@@ -273,7 +273,7 @@ check("a board run drops every memory variable and denies the path each one name
   const at = (re) => src.search(re);
   assert.ok(at(/cleanEnv\.BOT_CHANNEL_ID = /) < at(/withheldFromBoard\(name\)\) delete/) && at(/withheldFromBoard\(name\)\) delete/) < at(/spawn\(RUNTIME\.bin, safeArgs/),
     "the credentials are removed before they are set, or after the spawn");
-  assert.match(src, /deny: \[PERMISSION_DENY, \.\.\.privateMemoryDeny\(boardDeniedPaths\(\), BOARD_ENGINEERING \? \["Read", "Edit"\] : \["Read"\]\)\]/, "the board run no longer denies the memory paths");
+  assert.match(src, /deny: \[PERMISSION_DENY, \.\.\.privateMemoryDeny\(boardReadDeniedPaths\(\), BOARD_ENGINEERING \? \["Read", "Edit"\] : \["Read"\]\)\]/, "the board run no longer denies the memory paths");
   // Second pass on e4411f4: files already sent to Discord sit in the outbox,
   // which can be moved anywhere, including inside CLAUDE_CWD.
   const denied = /function boardDeniedPaths\(\) \{[\s\S]*?\n\}/.exec(src)[0];
@@ -350,7 +350,7 @@ check("a board run's shell is sandboxed to the working directory, on top of the 
   assert.deepStrictEqual(loose.sandbox.filesystem.denyWrite, ["/repo/.git"]);
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
   assert.match(src, /\.\.\.settingsArgs\(\{ board: Boolean\(opts\.noBufferContext\), tmpDir: boardTmp \}\)/, "the board run no longer gets the sandbox");
-  assert.match(src, /boardSettings\(base, boardDeniedPaths\(\), CLAUDE_CWD, \{ \.\.\.BOARD_POLICY, tmpDir \}\)/);
+  assert.match(src, /boardSettings\(base, boardReadDeniedPaths\(\), CLAUDE_CWD, \{ \.\.\.BOARD_POLICY, tmpDir \}\)/);
   // Second pass on 3c32d35: a relative BOT_SETTINGS read from the harness folder
   // failed every board run while Discord sessions, run in CLAUDE_CWD, found it.
   assert.match(src, /readFileSync\(resolve\(CLAUDE_CWD, SESSION_SETTINGS\), "utf8"\)/, "a relative settings file is read from the wrong folder");
@@ -420,6 +420,31 @@ check("bot.js: an engineering run gets a private temp folder, removed when the r
   assert.match(src, /mkdtempSync\(join\(require\("os"\)\.tmpdir\(\), `\$\{BOT_NAME\}-board-`\)\)|mkdtempSync\(join\(os\.tmpdir\(\), `\$\{BOT_NAME\}-board-`\)\)/);
   assert.match(src, /if \(boardTmp\) cleanEnv\.TMPDIR = boardTmp;/);
   assert.ok((src.match(/rmSync\(boardTmp, \{ recursive: true, force: true \}\)/g) || []).length >= 1, "the private temp folder is never removed");
+});
+
+check("credential files in reach of a board run are denied in every mode; a template is not", () => {
+  const { boardSecretFiles, DEFAULT_BOARD_SECRET_FILES } = require("../lib/permission-mode");
+  const repo = mkdtempSync(join(tmpdir(), "secret-files-"));
+  for (const d of ["sub", "node_modules/x", ".git"]) mkdirSync(join(repo, d), { recursive: true });
+  for (const f of [".mcp.json", ".env", "sub/.env.local", "sub/deploy.pem", ".env.example", "app.js", "node_modules/x/.env", ".git/.env", "custom.secret"]) writeFileSync(join(repo, f), "x");
+  const rel = (list) => list.filter((p) => p.startsWith(repo)).map((p) => p.slice(repo.length + 1)).sort();
+  for (const execution of ["", "engineering"]) {
+    const policy = resolveBoardPolicy({ BOT_BOARD_EXECUTION: execution });
+    assert.deepStrictEqual(policy.secretFiles, DEFAULT_BOARD_SECRET_FILES);
+    assert.deepStrictEqual([...new Set(rel(boardSecretFiles([repo], policy.secretFiles)))], [".env", ".mcp.json", "sub/.env.local", "sub/deploy.pem"]);
+  }
+  // BOT_BOARD_DENY_FILES adds a pattern; the defaults stay.
+  const added = resolveBoardPolicy({ BOT_BOARD_DENY_FILES: "*.secret" });
+  assert.ok(rel(boardSecretFiles([repo], added.secretFiles)).includes("custom.secret"));
+  assert.ok(rel(boardSecretFiles([repo], added.secretFiles)).includes(".mcp.json"));
+  // Kept apart from the Discord memory: a .env in CLAUDE_CWD never turns engineering off.
+  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.match(src, /boardPolicyProblems\(BOARD_POLICY, boardDeniedPaths\(\), CLAUDE_CWD/);
+  // Every board call site denies them: the read rules, the sandbox, and the Codex profile.
+  assert.match(src, /privateMemoryDeny\(boardReadDeniedPaths\(\)/);
+  assert.match(src, /boardSettings\(base, boardReadDeniedPaths\(\), CLAUDE_CWD/);
+  assert.match(src, /denied: boardReadDeniedPaths\(\), policy: BOARD_POLICY/);
+  assert.match(src, /return \[\.\.\.boardDeniedPaths\(\), \.\.\.boardSecretFiles\(roots, BOARD_POLICY\.secretFiles\)\];/, "the run-time deny list dropped the Discord memory");
 });
 
 console.log(`\n${passes} passed, ${failures} failed\n`);

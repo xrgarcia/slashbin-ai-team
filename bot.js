@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -177,7 +177,7 @@ function permissionArgs(kind = "session") {
   // privilege in every mode, and no reach into Discord memory.
   if (kind === "board") {
     return boardArgs({ tools: BOARD_POLICY.tools, allow: [BOARD_POLICY.allow, ...boardEngineeringRules(CLAUDE_CWD, BOARD_POLICY)], cwd: CLAUDE_CWD,
-      deny: [PERMISSION_DENY, ...privateMemoryDeny(boardDeniedPaths(), BOARD_ENGINEERING ? ["Read", "Edit"] : ["Read"])].filter(Boolean) });
+      deny: [PERMISSION_DENY, ...privateMemoryDeny(boardReadDeniedPaths(), BOARD_ENGINEERING ? ["Read", "Edit"] : ["Read"])].filter(Boolean) });
   }
   if (PERMISSION_MODE === "bypass") {
     // Deny rules still hold under bypass (measured): nothing prompts, but a denied
@@ -215,7 +215,7 @@ function settingsArgs({ board = false, tmpDir = null } = {}) {
   // CLAUDE_CWD, where Claude itself would resolve it for a Discord session.
   const base = !SESSION_SETTINGS ? null
     : JSON.parse(SESSION_SETTINGS.startsWith("{") ? SESSION_SETTINGS : readFileSync(resolve(CLAUDE_CWD, SESSION_SETTINGS), "utf8"));
-  return ["--settings", JSON.stringify(boardSettings(base, boardDeniedPaths(), CLAUDE_CWD, { ...BOARD_POLICY, tmpDir }))];
+  return ["--settings", JSON.stringify(boardSettings(base, boardReadDeniedPaths(), CLAUDE_CWD, { ...BOARD_POLICY, tmpDir }))];
 }
 
 // MCP_CONFIG adds servers; it does not remove the host's. MCP_CONFIG_STRICT=true
@@ -1195,6 +1195,14 @@ function privateMemoryPaths() {
 function boardDeniedPaths() {
   return [...privateMemoryPaths(), STATE_DIR, OUTBOX_DIR, ...new Set([__dirname, process.cwd()])];
 }
+// What one board run cannot read: the folders above, plus every credential file
+// (an MCP config, an env file — see DEFAULT_BOARD_SECRET_FILES) in the folders it
+// can reach, found as the run starts. Kept apart from boardDeniedPaths: a .env in
+// CLAUDE_CWD is denied by path, it does not turn engineering off.
+function boardReadDeniedPaths() {
+  const roots = [CLAUDE_CWD, ...BOARD_POLICY.readPaths, ...BOARD_POLICY.writePaths];
+  return [...boardDeniedPaths(), ...boardSecretFiles(roots, BOARD_POLICY.secretFiles)];
+}
 LEGACY_STATE.push([join(__dirname, `.${BOT_NAME}-sessions.json`), SESSION_FILE]);
 // Moved out of the summaries directory: a schedule is the user's, and losing it
 // to a re-clone is the kind of failure nobody notices until a job stops firing.
@@ -2038,7 +2046,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
         releaseDir: RUNTIME.releaseDir,
         readDirs: [ATTACHMENTS_DIR],
         filesystem: opts.noBufferContext ? codexRuntime.boardFilesystem({
-          cwd: CLAUDE_CWD, denied: boardDeniedPaths(), policy: BOARD_POLICY, releaseDir: RUNTIME.releaseDir, tmpDir: boardTmp, expand: expandPath,
+          cwd: CLAUDE_CWD, denied: boardReadDeniedPaths(), policy: BOARD_POLICY, releaseDir: RUNTIME.releaseDir, tmpDir: boardTmp, expand: expandPath,
         }) : null,
         packs,
         mcp: CODEX_MCP?.servers,

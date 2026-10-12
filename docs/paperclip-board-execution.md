@@ -11,7 +11,10 @@ what such a run may do. Discord behaviour does not change with it, in either mod
 
 What stays closed in **both** modes: the bot's Discord memory (buffer, summaries,
 sessions, uploads, scheduled jobs, the state folder, the outbox), the harness folder
-(its `.env`, logs, default state), every settings file, project auto-memory, and the
+(its `.env`, logs, default state), every credential file in the folders a board run
+can reach (`.mcp.json`, `.env` and the rest of the built-in list, plus
+`BOT_BOARD_DENY_FILES` — denied to the read tools, the shell and Codex alike, found
+anew as each run starts), every settings file, project auto-memory, and the
 bot's own credentials (`DISCORD_TOKEN`, `BRIDGE_TOKEN`, Paperclip keys, `BOT_*`,
 `MCP_CONFIG*`). `engineering` adds tools and the folders and hosts you name; it never
 lifts those.
@@ -124,6 +127,7 @@ blocked task reopens it, and the bot picks it up again.
 | Shell commands fail with `bwrap` errors | A read path contains `CLAUDE_CWD` or a write path, or the sandbox is missing | Name sibling folders instead; install `bwrap`/`socat` |
 | Every network call from the shell fails | `socat` unreadable inside the sandbox | Add its folder (and its wrapper's) to `BOT_BOARD_READ_PATHS`; see `doctor:fleet` |
 | `CONNECT tunnel failed, response 403` / `deny network-outbound <host>` | Host not on the allow list | Add it to `BOT_BOARD_NETWORK_ALLOW` |
+| A file the task needs reads as denied (or, on Codex, as empty) | Its name is on the credential-file list | If it holds no secret, exempt it: `BOT_BOARD_DENY_FILES=!<name>`; if it does, the task must not read it |
 | Write refused in a folder you expected writable | Not `CLAUDE_CWD` and not in `BOT_BOARD_WRITE_PATHS`, or inside the state/harness folder | Add it to `BOT_BOARD_WRITE_PATHS`; state and harness are never writable |
 | Log: `HTTP 403 cross_issue_influence_run_context_required` | A write reached Paperclip without the agent's run behind it — e.g. a comment posted with the agent key from a script or another session, not from the task's own run | Make the write from a run: assign the task to the agent and let the bot answer it, or send the call from inside that run with its `X-Paperclip-Run-Id`. Never switch to a board or admin key — that hides who acted |
 | Log: `HTTP 403 …` with another code | Paperclip refused the write; the code names the rule | Look the code up in Paperclip's issue-write denial reasons; the response's `whoCanAct` and `sanctionedPath` say who may do it and how |
