@@ -13,7 +13,7 @@ const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, 
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
-const { createPaperclipPoller, replyCollector } = require("./lib/paperclip");
+const { createPaperclipPoller, paperclipBoards, replyCollector } = require("./lib/paperclip");
 
 // --- Logger ---
 const log = pino({
@@ -1996,6 +1996,8 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 
     delete cleanEnv.CLAUDECODE;
     delete cleanEnv.PAPERCLIP_API_KEY;
+    // Every board's key, not only the first: an extra board names its own.
+    for (const { keyEnv } of PAPERCLIP_BOARDS) delete cleanEnv[keyEnv];
     delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
     delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
     delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
@@ -2941,36 +2943,40 @@ setInterval(runScheduledJobs, SCHEDULE_CHECK_MS);
 
 // --- Paperclip ---
 // Tasks assigned to this bot on a Paperclip board, answered through the same
-// run path as Discord (see lib/paperclip.js). Off unless both are set.
-const PAPERCLIP_URL = process.env.PAPERCLIP_URL;
-const PAPERCLIP_API_KEY = process.env.PAPERCLIP_API_KEY;
+// run path as Discord (see lib/paperclip.js). Off unless a board is configured:
+// PAPERCLIP_URL with PAPERCLIP_API_KEY, plus any PAPERCLIP_EXTRA_BOARDS.
+const { boards: PAPERCLIP_BOARDS, problems: PAPERCLIP_PROBLEMS } = paperclipBoards(process.env);
+for (const problem of PAPERCLIP_PROBLEMS) log.warn(`Paperclip board off — ${problem}`);
 // The sandbox binds the working directory writable over its read denials, so a
 // CLAUDE_CWD that is the harness or state folder (or inside one) would open the
 // harness secrets file and the Discord stores to a board shell. Such a bot
 // answers no board.
 const PAPERCLIP_CWD_DENIED = boardCwdDenied(boardDeniedPaths(), CLAUDE_CWD);
-if (PAPERCLIP_URL && PAPERCLIP_API_KEY && PAPERCLIP_CWD_DENIED) {
+if (PAPERCLIP_BOARDS.length && PAPERCLIP_CWD_DENIED) {
   log.error({ cwd: CLAUDE_CWD }, "Paperclip connector off — CLAUDE_CWD is the harness or state folder, or inside one, which a board run cannot keep closed; point it at the folder board tasks should read");
-} else if (PAPERCLIP_URL && PAPERCLIP_API_KEY) {
-  const pLog = log.child({ component: "paperclip" });
-  const promptChannel = process.env.PAPERCLIP_PROMPT_CHANNEL || undefined;
-  const poller = createPaperclipPoller({
-    url: PAPERCLIP_URL,
-    apiKey: PAPERCLIP_API_KEY,
-    stateFile: join(STATE_DIR, "paperclip.json"),
-    log: pLog,
-    // One session per task, so a reply on the task continues its conversation.
-    answer: (prompt, issue) => {
-      const reply = replyCollector();
-      return runClaude(prompt, `paperclip-${issue.identifier}`, pLog.child({ paperclipTask: issue.identifier }),
-        reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true })
-        .then(() => reply.text());
-    },
-  });
-  setInterval(poller.tick, envInt("PAPERCLIP_POLL_MS", 15000, { min: 5000 }));
-  pLog.info({ url: PAPERCLIP_URL, promptChannel: promptChannel ?? null }, "Paperclip connector on");
-} else if (PAPERCLIP_URL || PAPERCLIP_API_KEY) {
-  log.warn("Paperclip connector off — PAPERCLIP_URL and PAPERCLIP_API_KEY must both be set");
+} else {
+  for (const board of PAPERCLIP_BOARDS) {
+    const pLog = log.child({ component: "paperclip", ...(board.id ? { board: board.id } : {}) });
+    const { promptChannel } = board;
+    // The first board keeps the names it has always had, so its answered asks
+    // and task sessions carry over; an extra board gets its own.
+    const tag = board.id ? `paperclip-${board.id}` : "paperclip";
+    const poller = createPaperclipPoller({
+      url: board.url,
+      apiKey: board.apiKey,
+      stateFile: join(STATE_DIR, `${tag}.json`),
+      log: pLog,
+      // One session per task, so a reply on the task continues its conversation.
+      answer: (prompt, issue) => {
+        const reply = replyCollector();
+        return runClaude(prompt, `${tag}-${issue.identifier}`, pLog.child({ paperclipTask: issue.identifier }),
+          reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true })
+          .then(() => reply.text());
+      },
+    });
+    setInterval(poller.tick, envInt("PAPERCLIP_POLL_MS", 15000, { min: 5000 }));
+    pLog.info({ url: board.url, promptChannel: promptChannel ?? null }, "Paperclip connector on");
+  }
 }
 
 // --- Process error handlers ---

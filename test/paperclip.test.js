@@ -6,7 +6,7 @@ const assert = require("assert");
 const { readFileSync, readdirSync, writeFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED } = require("../lib/paperclip");
+const { paperclipBoards, pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED } = require("../lib/paperclip");
 
 const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
 let pass = 0, fail = 0;
@@ -781,6 +781,61 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.strictEqual(plain.text(), "just text");
     assert.match(buildTaskPrompt({ identifier: "T-1", title: "Q" }, [], ME, "u"), /cannot attach a file/);
     assert.match(bot, /reply\.collect, \{\}, "paperclip"/, "the board run collects through replyCollector");
+  });
+
+  await check("boards: the first board is PAPERCLIP_URL; extra boards name their key's variable", () => {
+    const env = {
+      PAPERCLIP_URL: "https://one.example.com", PAPERCLIP_API_KEY: "k1", PAPERCLIP_PROMPT_CHANNEL: "123456789012345678",
+      PAPERCLIP_EXTRA_BOARDS: JSON.stringify([{ id: "two", url: "https://two.example.com", keyEnv: "TWO_KEY", promptChannel: "chan-2" }]),
+      TWO_KEY: "k2",
+    };
+    const { boards, problems } = paperclipBoards(env);
+    assert.deepStrictEqual(problems, []);
+    assert.deepStrictEqual(boards, [
+      { id: null, url: "https://one.example.com", apiKey: "k1", keyEnv: "PAPERCLIP_API_KEY", promptChannel: "123456789012345678" },
+      { id: "two", url: "https://two.example.com", apiKey: "k2", keyEnv: "TWO_KEY", promptChannel: "chan-2" },
+    ]);
+  });
+
+  await check("boards: an extra board works without a first one, and nothing configured is no board", () => {
+    const only = paperclipBoards({ PAPERCLIP_EXTRA_BOARDS: '[{"id":"two","url":"https://two.example.com","keyEnv":"TWO_KEY"}]', TWO_KEY: "k" });
+    assert.deepStrictEqual(only.boards.map((b) => b.id), ["two"]);
+    assert.strictEqual(only.boards[0].promptChannel, undefined);
+    assert.deepStrictEqual(paperclipBoards({}), { boards: [], problems: [] });
+  });
+
+  await check("boards: a broken entry is reported and skipped; the rest still come on", () => {
+    const env = {
+      PAPERCLIP_URL: "https://one.example.com", PAPERCLIP_API_KEY: "k1", OK_KEY: "k",
+      PAPERCLIP_EXTRA_BOARDS: JSON.stringify([
+        { id: "Bad Id", url: "https://a.example.com", keyEnv: "OK_KEY" },
+        { id: "nokey", url: "https://b.example.com", keyEnv: "MISSING_KEY" },
+        { id: "notavar", url: "https://c.example.com", keyEnv: "k" },
+        { id: "nourl", keyEnv: "OK_KEY" },
+        { id: "same", url: "https://ONE.example.com/", keyEnv: "OK_KEY" },
+        { id: "good", url: "https://d.example.com", keyEnv: "OK_KEY" },
+        { id: "good", url: "https://e.example.com", keyEnv: "OK_KEY" },
+      ]),
+    };
+    const { boards, problems } = paperclipBoards(env);
+    assert.deepStrictEqual(boards.map((b) => b.id), [null, "good"]);
+    assert.strictEqual(problems.length, 6, problems.join("\n"));
+    assert.ok(problems.some((p) => /MISSING_KEY is not set/.test(p)));
+    assert.ok(problems.some((p) => /already answered/.test(p)), "the same board twice would race for its runs");
+    assert.ok(problems.every((p) => !/\bk1\b|"k"/.test(p)), "a problem never carries a key");
+  });
+
+  await check("boards: half a first board, or extra boards that are not a JSON array, is reported", () => {
+    assert.match(paperclipBoards({ PAPERCLIP_URL: "https://one.example.com" }).problems[0], /must both be set/);
+    assert.match(paperclipBoards({ PAPERCLIP_EXTRA_BOARDS: "{oops" }).problems[0], /not JSON/);
+    assert.match(paperclipBoards({ PAPERCLIP_EXTRA_BOARDS: '{"id":"x"}' }).problems[0], /JSON array/);
+  });
+
+  await check("bot.js: every board's key is kept from Claude, and an extra board has its own state and sessions", () => {
+    assert.match(bot, /for \(const \{ keyEnv \} of PAPERCLIP_BOARDS\) delete cleanEnv\[keyEnv\]/);
+    assert.match(bot, /const tag = board\.id \? `paperclip-\$\{board\.id\}` : "paperclip";/);
+    assert.match(bot, /stateFile: join\(STATE_DIR, `\$\{tag\}\.json`\)/);
+    assert.match(bot, /runClaude\(prompt, `\$\{tag\}-\$\{issue\.identifier\}`/);
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

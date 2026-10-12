@@ -151,7 +151,7 @@ check("a bot whose CLAUDE_CWD is a denied folder answers no board", () => {
   const fsSettings = boardSettings(null, [join(tmp, "harness")], join(tmp, "alias")).sandbox.filesystem;
   assert.ok(!fsSettings.allowRead.some((p) => p.startsWith(tmp)), "the alias is still given an allowRead");
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.match(src, /const PAPERCLIP_CWD_DENIED = boardCwdDenied\(boardDeniedPaths\(\), CLAUDE_CWD\);\nif \(PAPERCLIP_URL && PAPERCLIP_API_KEY && PAPERCLIP_CWD_DENIED\) \{\n  log\.error/);
+  assert.match(src, /const PAPERCLIP_CWD_DENIED = boardCwdDenied\(boardDeniedPaths\(\), CLAUDE_CWD\);\nif \(PAPERCLIP_BOARDS\.length && PAPERCLIP_CWD_DENIED\) \{\n  log\.error/);
   assert.ok(src.indexOf("PAPERCLIP_CWD_DENIED) {") < src.indexOf("createPaperclipPoller({"), "the poller starts before the check");
 });
 

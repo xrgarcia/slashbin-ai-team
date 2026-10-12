@@ -368,11 +368,14 @@ Answer tasks assigned to this bot on a [Paperclip](https://paperclip.ing) board.
 
 This connector is the inbound half only. For a bot to create, assign or comment on tasks itself, add Paperclip's own MCP server (`@paperclipai/mcp-server`) to that bot's MCP config and allow its tools. Give every agent its own key, used by both halves, and never share it between bots — the board's record of who did what is only as true as that. The bot hides `PAPERCLIP_API_KEY` from Claude, so hand the MCP server its key under another name: set it in the bot's `env` (pm2 passes only what the ecosystem lists) and reference it from the MCP config as `${THAT_NAME}`.
 
+An agent can sit on more than one board — the same bot as a seat in two companies, say — with a key per board. List the others in `PAPERCLIP_EXTRA_BOARDS` and give each the prompt channel whose audience matches that board's readers.
+
 | Variable | Default | Description |
 |---|---|---|
 | `PAPERCLIP_URL` | — | Board origin, e.g. `https://board.example.com`. Off unless this and the key are set |
 | `PAPERCLIP_API_KEY` | — | The agent's API key. Removed from the environment Claude runs in |
 | `PAPERCLIP_PROMPT_CHANNEL` | — | Channel id whose `.claude/channel-prompts/` file applies to board replies — use the channel with the same audience as the board |
+| `PAPERCLIP_EXTRA_BOARDS` | — | More boards for the same bot, as a JSON array of `{ "id", "url", "keyEnv", "promptChannel" }`. `keyEnv` names the variable holding that board's key, which is removed from the environment Claude runs in like `PAPERCLIP_API_KEY`. Each board has its own state file and task sessions; a broken entry is logged and skipped |
 | `PAPERCLIP_POLL_MS` | `15000` | How often the inbox is checked |
 
 ### Misc

@@ -5,6 +5,20 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **One bot can answer on more than one Paperclip board.** `PAPERCLIP_EXTRA_BOARDS`
+  lists the others as `{ id, url, keyEnv, promptChannel }`, so an agent seated
+  in two companies is answered by the same bot, with each board's replies
+  shaped by the channel whose audience matches its readers. Each board gets its
+  own poller, state file and task sessions; the first board keeps its existing
+  names, so nothing it answered is asked again. `keyEnv` names the variable
+  holding that board's key, which is kept from Claude like `PAPERCLIP_API_KEY`.
+  A broken entry is logged and skipped, and the same board listed twice is
+  refused, since two pollers would race for its runs.
+
 ## [2.8.0] — 2026-10-09
 
 ### Added
