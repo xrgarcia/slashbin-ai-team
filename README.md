@@ -379,7 +379,7 @@ An agent can sit on more than one board — the same bot as a seat in two compan
 | `PAPERCLIP_PROMPT_CHANNEL` | — | Channel id whose `.claude/channel-prompts/` file applies to board replies — use the channel with the same audience as the board |
 | `PAPERCLIP_EXTRA_BOARDS` | — | More boards for the same bot, as a JSON array of `{ "id", "url", "keyEnv", "promptChannel" }`. `keyEnv` names the variable holding that board's key, which is removed from the environment Claude runs in like `PAPERCLIP_API_KEY`. Each board has its own state file and task sessions; a broken entry is logged and skipped |
 | `PAPERCLIP_POLL_MS` | `15000` | How often the inbox is checked |
-| `BOT_BOARD_EXECUTION` | `readonly` | How a board run executes: `readonly`, or `engineering` for a bot the board assigns real work. Anything else keeps the connector off |
+| `BOT_BOARD_EXECUTION` | `readonly` | How a board run executes: `readonly`, `engineering` for a bot the board assigns real work, or `parity` for a run built exactly as the bot's Discord session (less the Discord credentials and other channels' conversation). Anything else keeps the connector off |
 | `BOT_BOARD_TOOLS` | `Read,Glob,Grep` | `readonly` board runs: the built-in tools a board run gets |
 | `BOT_BOARD_ENGINEERING_TOOLS` | `Read,Glob,Grep,Edit,Write,Bash` | `engineering` board runs: the built-in tools a board run gets |
 | `BOT_BOARD_PERMISSION_ALLOW` | *(none)* | Board runs, either mode: permission rules pre-approved, e.g. `mcp__my-db` |
@@ -394,6 +394,8 @@ An agent can sit on more than one board — the same bot as a seat in two compan
 The shell's network goes through Claude Code's proxy and `socat`. If `socat` or `bwrap` lives outside the system folders (under a home folder, say), add its folder — and any folder a wrapper script loads from — to `BOT_BOARD_READ_PATHS`, or every request from the shell fails; `doctor:fleet` warns when it finds one.
 
 To turn it on, set `BOT_BOARD_EXECUTION=engineering` (and the paths and hosts the work needs) for that bot and restart it; to turn it off, remove the setting or set `readonly` and restart. Verify by assigning the bot a board task that edits a file in `CLAUDE_CWD`: in `engineering` the change lands and the task closes; in `readonly` the reply says it could not, and the task is left **blocked**. Full guide, prerequisites and symptom-to-fix: [docs/paperclip-board-execution.md](docs/paperclip-board-execution.md). A bot on Codex takes board tasks in the same two modes with no network; [what differs](docs/paperclip-board-execution.md#on-codex).
+
+`BOT_BOARD_EXECUTION=parity` lifts the least-privilege board run for a bot whose board readers are the same people as its Discord channels: on Claude or Codex, the run gets the Discord session's tools, MCP servers, settings, files, network and environment, in the bot's `BOT_PERMISSION_MODE`. Two things stay out — other channels' conversation and the Discord credentials (`DISCORD_TOKEN`, `BRIDGE_TOKEN`) — and the startup log names both.
 
 A run that could not do what was asked ends its reply with `PAPERCLIP-OUTCOME: blocked`; the bot removes that line and leaves the task **blocked** with the reply as its comment, instead of **done**. A person's comment on it reopens it. A refused board request is logged with Paperclip's reason code, e.g. `HTTP 403 cross_issue_influence_run_context_required`.
 

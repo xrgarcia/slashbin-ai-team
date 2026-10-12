@@ -2,12 +2,13 @@
 
 A bot with `PAPERCLIP_URL` and `PAPERCLIP_API_KEY` set answers the tasks a
 [Paperclip](https://paperclip.ing) board assigns it. `BOT_BOARD_EXECUTION` decides
-what such a run may do. Discord behaviour does not change with it, in either mode.
+what such a run may do. Discord behaviour does not change with it, in any mode.
 
 | Mode | A board run gets | Use it for |
 |---|---|---|
 | `readonly` (default) | `BOT_BOARD_TOOLS` (`Read,Glob,Grep`), confined to `CLAUDE_CWD` | Questions, reviews, status |
 | `engineering` | `BOT_BOARD_ENGINEERING_TOOLS` (`Read,Glob,Grep,Edit,Write,Bash`): edit and write in `CLAUDE_CWD` and the write paths, read the read paths, a sandboxed shell reaching only the listed hosts | Tasks that change code: edit, test, `git`, `gh` |
+| `parity` | Exactly what the bot's Discord session gets, in its `BOT_PERMISSION_MODE`: the same tools, MCP servers, settings, files, network and environment — except the two named below | A board that is the same people as the bot's Discord channels, assigning it the same work |
 
 What stays closed in **both** modes: the bot's Discord memory (buffer, summaries,
 sessions, uploads, scheduled jobs, the state folder, the outbox), the harness folder
@@ -18,6 +19,15 @@ anew as each run starts), every settings file, project auto-memory, and the
 bot's own credentials (`DISCORD_TOKEN`, `BRIDGE_TOKEN`, Paperclip keys, `BOT_*`,
 `MCP_CONFIG*`). `engineering` adds tools and the folders and hosts you name; it never
 lifts those.
+
+**`parity`** lifts all of it: the run is built as the bot's Discord session is, on
+Claude and Codex alike. It still does not carry two things a Discord session has:
+the other channels' conversation (the buffer is never put in a board run's prompt),
+and the Discord credentials (`DISCORD_TOKEN`, `BRIDGE_TOKEN`), so a run cannot log in
+or post as the bot. Paperclip keys are withheld from every run, Discord's included.
+Choose it only when everyone who reads the board may see what the bot's Discord
+sessions can reach — the board run's reply is posted there. The startup log reads
+`Paperclip board runs: parity — …`, naming both exceptions.
 
 ## Prerequisites
 
@@ -65,7 +75,8 @@ Restart the bot. Rules a setting must meet, or the connector stays off and logs 
 
 ## Disable
 
-Remove `BOT_BOARD_EXECUTION` (or set `readonly`) and restart. The other
+Remove `BOT_BOARD_EXECUTION` (or set `readonly`) and restart; the same takes a
+`parity` bot back to least privilege. The other
 `BOT_BOARD_*` engineering settings are then ignored. To stop board work entirely,
 remove `PAPERCLIP_URL` or `PAPERCLIP_API_KEY`.
 

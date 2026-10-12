@@ -5,7 +5,7 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules } = require("../lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, boardRunKind, withheldFromParityBoard } = require("../lib/permission-mode");
 const { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
@@ -96,7 +96,7 @@ check("restricted sessions read no settings file, so only the bot's list approve
   const bypass = fn.slice(fn.indexOf('if (PERMISSION_MODE === "bypass")'), fn.indexOf('"--tools", ALLOWED_TOOLS'));
   assert.ok(!bypass.includes("--setting-sources"), "bypass argv must stay the historical one");
   // --add-dir loads that folder's CLAUDE.md only with this set.
-  assert.match(bot, /if \(opts\.noBufferContext \|\| PERMISSION_MODE === "restricted"\) cleanEnv\.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";/);
+  assert.match(bot, /if \(narrowBoard \|\| PERMISSION_MODE === "restricted"\) cleanEnv\.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";/);
 });
 
 check("a board run gets none of the bot's own configuration, but keeps what the hooks read", () => {
@@ -290,7 +290,10 @@ check("a board run is least privilege in every mode — never bypass", () => {
   // own transcripts of Discord conversations, and any other bot's files on the
   // host. No list of private paths covers that; least privilege does.
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.match(src, /\.\.\.permissionArgs\(opts\.noBufferContext \? "board" : "session"\)/, "the board run no longer takes the board branch");
+  assert.match(src, /\.\.\.permissionArgs\(runKind\)/, "the board run no longer takes the board branch");
+  assert.match(src, /const runKind = opts\.noBufferContext \? BOARD_KIND : "session";/, "a Paperclip run no longer resolves its kind from the board policy");
+  assert.match(src, /const BOARD_KIND = boardRunKind\(BOARD_POLICY\);/);
+  assert.strictEqual(boardRunKind(resolveBoardPolicy({})), "board", "the default board run is no longer least privilege");
   const fn = /function permissionArgs[\s\S]*?\n}/.exec(src)[0];
   const board = fn.indexOf('kind === "board"'), bypass = fn.indexOf('PERMISSION_MODE === "bypass"');
   assert.ok(board > -1 && board < bypass, "the board branch must come before the bypass branch");
@@ -349,7 +352,7 @@ check("a board run's shell is sandboxed to the working directory, on top of the 
   assert.ok(!("allowWrite" in loose.sandbox.filesystem), "a board shell may write where the bot allows");
   assert.deepStrictEqual(loose.sandbox.filesystem.denyWrite, ["/repo/.git"]);
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.match(src, /\.\.\.settingsArgs\(\{ board: Boolean\(opts\.noBufferContext\), tmpDir: boardTmp \}\)/, "the board run no longer gets the sandbox");
+  assert.match(src, /\.\.\.settingsArgs\(\{ board: narrowBoard, tmpDir: boardTmp \}\)/, "the board run no longer gets the sandbox");
   assert.match(src, /boardSettings\(base, boardReadDeniedPaths\(\), CLAUDE_CWD, \{ \.\.\.BOARD_POLICY, tmpDir \}\)/);
   // Second pass on 3c32d35: a relative BOT_SETTINGS read from the harness folder
   // failed every board run while Discord sessions, run in CLAUDE_CWD, found it.
@@ -394,7 +397,7 @@ check("engineering: a policy that would open what a board run must not reach is 
   const denied = ["/srv/harness", "/srv/harness/state"];
   const probs = (env) => boardPolicyProblems(resolveBoardPolicy({ BOT_BOARD_EXECUTION: "engineering", ...env }), denied, "/srv/code/repo");
   assert.deepStrictEqual(probs({ BOT_BOARD_READ_PATHS: "/srv/code/other", BOT_BOARD_WRITE_PATHS: "/srv/scratch" }), []);
-  assert.match(boardPolicyProblems(resolveBoardPolicy({ BOT_BOARD_EXECUTION: "yolo" }), denied, "/r")[0], /not one of readonly, engineering/);
+  assert.match(boardPolicyProblems(resolveBoardPolicy({ BOT_BOARD_EXECUTION: "yolo" }), denied, "/r")[0], /not one of readonly, engineering, parity/);
   assert.match(probs({ BOT_BOARD_READ_PATHS: "relative/dir" })[0], /not an absolute path/);
   assert.match(probs({ BOT_BOARD_READ_PATHS: "/srv/harness/state/history" })[0], /private Discord memory/);
   assert.match(probs({ BOT_BOARD_WRITE_PATHS: "/srv/harness" })[0], /private Discord memory/);
@@ -445,6 +448,44 @@ check("credential files in reach of a board run are denied in every mode; a temp
   assert.match(src, /boardSettings\(base, boardReadDeniedPaths\(\), CLAUDE_CWD/);
   assert.match(src, /denied: boardReadDeniedPaths\(\), policy: BOARD_POLICY/);
   assert.match(src, /return \[\.\.\.boardDeniedPaths\(\), \.\.\.boardHistoryDenied\(privateMemoryPaths\(\)\), \.\.\.boardSecretFiles\(roots, BOARD_POLICY\.secretFiles\)\];/, "the run-time deny list dropped the Discord memory or its copies");
+});
+
+console.log("\nBoard runs — parity mode");
+
+check("parity runs a Paperclip task as the bot's Discord session", () => {
+  // An agent must have the same capabilities in Paperclip as in Discord.
+  // A parity board run takes the session branch — its tools, MCP
+  // servers, settings, filesystem and network — in whatever mode the bot runs.
+  const policy = resolveBoardPolicy({ BOT_BOARD_EXECUTION: "parity" });
+  assert.strictEqual(policy.parity, true);
+  assert.strictEqual(boardRunKind(policy), "session");
+  for (const execution of [undefined, "readonly", "engineering"]) {
+    const other = resolveBoardPolicy(execution ? { BOT_BOARD_EXECUTION: execution } : {});
+    assert.strictEqual(other.parity, false);
+    assert.strictEqual(boardRunKind(other), "board", `${execution || "the default"} stopped being least privilege`);
+  }
+  assert.deepStrictEqual(boardPolicyProblems(policy, ["/state"], "/state/repo"), [], "parity has no sandbox to refuse");
+  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.match(src, /const narrowBoard = runKind === "board";/);
+  assert.match(src, /kind: runKind,/, "the Codex run ignores the board policy");
+  assert.match(src, /filesystem: narrowBoard \? codexRuntime\.boardFilesystem\(/);
+  assert.match(src, /if \(!narrowBoard && CODEX_MCP\) Object\.assign\(cleanEnv, CODEX_MCP\.env\);/, "a parity Codex run lost its MCP keys");
+  assert.match(src, /CODEX && !BOARD_POLICY\.parity \? codexRuntime\.codexBoardProblems/);
+});
+
+check("a parity run withholds only the Discord credentials, and still sees no other channel", () => {
+  // The two named exceptions. Everything else a Discord session has — Doppler,
+  // MCP config, the BOT_* paths — a parity run has too.
+  for (const name of DISCORD_CREDENTIAL_ENV) assert.ok(withheldFromParityBoard(name), `${name} reaches a parity run`);
+  for (const name of ["MCP_CONFIG", "MCP_CONFIG_EXTRA", "BOT_STATE_DIR", "BOT_SCHEDULES_FILE", "DOPPLER_PROJECT", "DOPPLER_CONFIG", "GITHUB_TOKEN"]) {
+    assert.ok(!withheldFromParityBoard(name), `${name} is silently withheld from a parity run`);
+  }
+  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.match(src, /if \(opts\.noBufferContext && !narrowBoard\) \{\s*for \(const name of Object\.keys\(cleanEnv\)\) if \(withheldFromParityBoard\(name\)\) delete cleanEnv\[name\];/);
+  // The Paperclip connector keys are removed from every run, Discord's included.
+  assert.match(src, /for \(const \{ keyEnv \} of PAPERCLIP_BOARDS\) delete cleanEnv\[keyEnv\];/);
+  // Other channels' conversation stays out of the prompt in every board policy.
+  assert.match(src, /opts\.noBufferContext \? "" : buildContextPrompt/);
 });
 
 console.log(`\n${passes} passed, ${failures} failed\n`);

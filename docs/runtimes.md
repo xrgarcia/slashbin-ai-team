@@ -52,7 +52,8 @@ To go back, remove `BOT_RUNTIME` (or set `claude`) and restart.
 - **Permission modes.** `BOT_PERMISSION_MODE=restricted` and `bypass` mean the same
   thing on both.
 - **Board runs.** `BOT_BOARD_EXECUTION=readonly|engineering` and its paths, with the
-  same isolation of Discord memory. See
+  same isolation of Discord memory; `parity` runs the board task as the Codex
+  session, MCP servers included. See
   [paperclip-board-execution.md](paperclip-board-execution.md#on-codex).
 
 ## What differs on Codex

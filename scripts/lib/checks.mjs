@@ -603,6 +603,11 @@ export function boardPolicyOf(bot, denied, { which = whichBin, codex: codexInfo 
   const codex = bot.runtimeEnv?.BOT_RUNTIME === "codex";
   const problems = boardPolicyProblems(policy, denied, bot.claudeCwd || "", { shellInEveryMode: codex });
   const eng = policy.execution === "engineering";
+  // parity: the board run is the bot's Discord session, so there is no board
+  // profile or sandbox to check (bot.js skips codexBoardProblems too).
+  if (policy.parity) {
+    return { policy, problems, summary: "parity (as the Discord session, less the Discord credentials and other channels' conversation)", unreadable: [] };
+  }
   if (codex) {
     // The same tests bot.js makes at startup on a Codex bot (lib/runtime/codex.js).
     const cx = require_("../../lib/runtime/codex.js");

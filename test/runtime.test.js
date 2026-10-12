@@ -251,14 +251,15 @@ const bot = readFileSync(join(ROOT, "bot.js"), "utf8");
 check("Claude's command line is the one it always was", () => {
   assert.ok(bot.includes(`    const args = CODEX ? [] : [
       "--output-format", "stream-json",
-      // A run whose reply lands outside Discord gets least privilege.
-      ...permissionArgs(opts.noBufferContext ? "board" : "session"),
+      // A run whose reply lands outside Discord gets least privilege, unless
+      // its board policy is parity.
+      ...permissionArgs(runKind),
       ...skillPackArgs(),
       "--verbose",
       "--max-turns", String(CLAUDE_MAX_TURNS),
       ...(RUNTIME.model ? ["--model", RUNTIME.model] : []),
       ...mcpArgs(),
-      ...settingsArgs({ board: Boolean(opts.noBufferContext), tmpDir: boardTmp }),
+      ...settingsArgs({ board: narrowBoard, tmpDir: boardTmp }),
       "--append-system-prompt", systemPrompt,
     ];`), "the Claude argv changed");
   assert.match(bot, /\} else if \(resumeSessionId\) \{\n      args\.push\("--resume", resumeSessionId, "-p", "--", finalPrompt\);/);
@@ -276,7 +277,7 @@ check("a session is resumed only by the runtime that made it", () => {
 check("summaries and board checks go to the bot's runtime", () => {
   assert.strictEqual((bot.match(/runtime: RUNTIME,/g) || []).length, 2, "both summarizer call sites");
   assert.match(bot, /boardPolicyProblems\(BOARD_POLICY, boardDeniedPaths\(\), CLAUDE_CWD\)/);
-  assert.match(bot, /CODEX \? codexRuntime\.codexBoardProblems\(BOARD_POLICY, RUNTIME\) : \[\]/);
+  assert.match(bot, /CODEX && !BOARD_POLICY\.parity \? codexRuntime\.codexBoardProblems\(BOARD_POLICY, RUNTIME\) : \[\]/);
   assert.match(readFileSync(join(ROOT, "summarize.js"), "utf8"), /runtime: RUNTIME,/);
 });
 

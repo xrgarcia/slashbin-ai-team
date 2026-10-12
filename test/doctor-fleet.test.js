@@ -275,6 +275,9 @@ ${extra}
     const fixed = { ...bot, boardEnv: { ...bot.boardEnv, BOT_BOARD_READ_PATHS: "/opt/socat,/home/op/.local/bin" } };
     assert.deepStrictEqual(boardPolicyOf(fixed, ["/srv/harness"], { which }).unreadable, []);
     assert.deepStrictEqual(boardPolicyOf({ claudeCwd: "/srv/po" }, ["/srv/harness"], { which }).unreadable, [], "readonly runs no shell");
+    const parity = boardPolicyOf({ claudeCwd: "/srv/po", boardEnv: { BOT_BOARD_EXECUTION: "parity" }, runtimeEnv: { BOT_RUNTIME: "codex" } }, ["/srv/harness"], { which, codex: { version: null, releaseDir: null } });
+    assert.deepStrictEqual(parity.problems, [], "a parity bot was held to the board profile it does not use");
+    assert.match(parity.summary, /^parity/);
   });
 
   await checkAsync("a key not loaded in this shell warns instead of guessing", async () => {
