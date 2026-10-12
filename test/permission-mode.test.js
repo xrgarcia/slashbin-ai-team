@@ -444,7 +444,7 @@ check("credential files in reach of a board run are denied in every mode; a temp
   assert.match(src, /privateMemoryDeny\(boardReadDeniedPaths\(\)/);
   assert.match(src, /boardSettings\(base, boardReadDeniedPaths\(\), CLAUDE_CWD/);
   assert.match(src, /denied: boardReadDeniedPaths\(\), policy: BOARD_POLICY/);
-  assert.match(src, /return \[\.\.\.boardDeniedPaths\(\), \.\.\.boardSecretFiles\(roots, BOARD_POLICY\.secretFiles\)\];/, "the run-time deny list dropped the Discord memory");
+  assert.match(src, /return \[\.\.\.boardDeniedPaths\(\), \.\.\.boardHistoryDenied\(privateMemoryPaths\(\)\), \.\.\.boardSecretFiles\(roots, BOARD_POLICY\.secretFiles\)\];/, "the run-time deny list dropped the Discord memory or its copies");
 });
 
 console.log(`\n${passes} passed, ${failures} failed\n`);

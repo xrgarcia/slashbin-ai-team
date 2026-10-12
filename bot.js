@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -1197,13 +1197,14 @@ function privateMemoryPaths() {
 function boardDeniedPaths() {
   return [...privateMemoryPaths(), STATE_DIR, OUTBOX_DIR, ...new Set([__dirname, process.cwd()])];
 }
-// What one board run cannot read: the folders above, plus every credential file
-// (an MCP config, an env file — see DEFAULT_BOARD_SECRET_FILES) in the folders it
-// can reach, found as the run starts. Kept apart from boardDeniedPaths: a .env in
+// What one board run cannot read: the folders above, the other copies of the
+// memory where it lies in a git repository (its history and each worktree's
+// checkout), plus every credential file (an MCP config, an env file — see
+// DEFAULT_BOARD_SECRET_FILES) in the folders it can reach, found as the run starts. Kept apart from boardDeniedPaths: a .env in
 // CLAUDE_CWD is denied by path, it does not turn engineering off.
 function boardReadDeniedPaths() {
   const roots = [CLAUDE_CWD, ...BOARD_POLICY.readPaths, ...BOARD_POLICY.writePaths];
-  return [...boardDeniedPaths(), ...boardSecretFiles(roots, BOARD_POLICY.secretFiles)];
+  return [...boardDeniedPaths(), ...boardHistoryDenied(privateMemoryPaths()), ...boardSecretFiles(roots, BOARD_POLICY.secretFiles)];
 }
 LEGACY_STATE.push([join(__dirname, `.${BOT_NAME}-sessions.json`), SESSION_FILE]);
 // Moved out of the summaries directory: a schedule is the user's, and losing it
@@ -3064,7 +3065,7 @@ for (const problem of PAPERCLIP_PROBLEMS) log.warn(`Paperclip board off — ${pr
 // answers no board.
 // A board policy that cannot be held turns board pickup off, never loosens it.
 const BOARD_POLICY_PROBLEMS = [
-  ...boardPolicyProblems(BOARD_POLICY, boardDeniedPaths(), CLAUDE_CWD, { shellInEveryMode: CODEX }),
+  ...boardPolicyProblems(BOARD_POLICY, boardDeniedPaths(), CLAUDE_CWD),
   ...(CODEX ? codexRuntime.codexBoardProblems(BOARD_POLICY, RUNTIME) : []),
 ];
 const PAPERCLIP_CWD_DENIED = boardCwdDenied(boardDeniedPaths(), CLAUDE_CWD);

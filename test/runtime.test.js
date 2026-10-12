@@ -165,16 +165,30 @@ check("a Codex board run needs the CLI, a tested version and its release folder;
   assert.match(p({ network: ["api.example.com"] }, { version: "0.162.1", releaseDir }), /BOT_BOARD_NETWORK_ALLOW: a host allow list is not available on Codex/);
 });
 
-check("Discord memory inside the repo keeps a Codex board off in readonly too — its shell reads git", () => {
+check("Discord memory inside the repo stops engineering only — readonly runs on either runtime are denied the history instead", () => {
   const denied = ["/srv/repo/.bot-history"];
-  assert.deepStrictEqual(boardPolicyProblems(resolveBoardPolicy({}), denied, "/srv/repo"), [], "Claude readonly has no shell");
-  const codex = boardPolicyProblems(resolveBoardPolicy({}), denied, "/srv/repo", { shellInEveryMode: true });
-  assert.strictEqual(codex.length, 1);
-  assert.match(codex[0], /on Codex every board run has a shell, readonly included/);
-  assert.match(codex[0], /^BOT_RUNTIME=codex: /, "named by the setting the operator did set");
-  const eng = boardPolicyProblems(resolveBoardPolicy({ BOT_BOARD_EXECUTION: "engineering" }), denied, "/srv/repo", { shellInEveryMode: true });
-  assert.match(eng[0], /^BOT_BOARD_EXECUTION=engineering: /);
-  assert.ok(!/keep board runs readonly/.test(codex[0]), "readonly is no remedy on Codex");
+  assert.deepStrictEqual(boardPolicyProblems(resolveBoardPolicy({}), denied, "/srv/repo"), []);
+  const eng = boardPolicyProblems(resolveBoardPolicy({ BOT_BOARD_EXECUTION: "engineering" }), denied, "/srv/repo");
+  assert.strictEqual(eng.length, 1);
+  assert.match(eng[0], /^BOT_BOARD_EXECUTION=engineering: .*keep board runs readonly/);
+});
+
+check("a Codex board profile denies the repo's git folder and each worktree's copy of the memory", () => {
+  const { execFileSync } = require("child_process");
+  const { mkdirSync } = require("fs");
+  const { boardHistoryDenied, expand } = require("../lib/permission-mode");
+  const repo = mkdtempSync(join(tmpdir(), "hist-")), hist = join(repo, "bot-history");
+  mkdirSync(hist);
+  writeFileSync(join(hist, "s.md"), "x\n");
+  const git = (...a) => execFileSync("git", ["-C", repo, "-c", "user.email=t@x", "-c", "user.name=t", ...a], { stdio: "ignore" });
+  git("init", "-q"); git("add", "-A"); git("commit", "-qm", "f");
+  git("worktree", "add", "-q", join(repo, ".claude", "worktrees", "w"));
+  const denied = [hist, ...boardHistoryDenied([hist])];
+  const fs = cx.boardFilesystem({ cwd: repo, denied, policy: resolveBoardPolicy({}), releaseDir: "/opt/codex", expand });
+  assert.strictEqual(fs[":workspace_roots"][".git"], "deny");
+  assert.strictEqual(fs[":workspace_roots"][join(".claude", "worktrees", "w", "bot-history")], "deny");
+  assert.strictEqual(fs[":workspace_roots"]["bot-history"], "deny");
+  assert.strictEqual(fs[":workspace_roots"]["."], "read");
 });
 
 section("Codex — skills, MCP and events");
@@ -250,7 +264,7 @@ check("a session is resumed only by the runtime that made it", () => {
 
 check("summaries and board checks go to the bot's runtime", () => {
   assert.strictEqual((bot.match(/runtime: RUNTIME,/g) || []).length, 2, "both summarizer call sites");
-  assert.match(bot, /boardPolicyProblems\(BOARD_POLICY, boardDeniedPaths\(\), CLAUDE_CWD, \{ shellInEveryMode: CODEX \}\)/);
+  assert.match(bot, /boardPolicyProblems\(BOARD_POLICY, boardDeniedPaths\(\), CLAUDE_CWD\)/);
   assert.match(bot, /CODEX \? codexRuntime\.codexBoardProblems\(BOARD_POLICY, RUNTIME\) : \[\]/);
   assert.match(readFileSync(join(ROOT, "summarize.js"), "utf8"), /runtime: RUNTIME,/);
 });

@@ -66,9 +66,11 @@ To go back, remove `BOT_RUNTIME` (or set `claude`) and restart.
 | Step cap | `CLAUDE_MAX_TURNS` | None; `CLAUDE_TIMEOUT_MS` bounds a run |
 | Background commands | Refused by the pack's gate | Codex background terminals are off; commands run to completion |
 
-Because every Codex board run has a shell — `readonly` included — a Discord memory
-folder (summaries, state) inside `CLAUDE_CWD` keeps the Paperclip connector off in
-both modes, where on Claude it does so only in `engineering`.
+Every Codex board run has a shell, `readonly` included. On either runtime a board
+run is denied the Discord memory folders, and where one lies in a git repository,
+also that repository's git folder and the same folder in each of its worktrees. So a
+readonly Codex run with the memory inside `CLAUDE_CWD` cannot read it, live or
+committed. As on Claude, only `engineering` needs the memory out of `CLAUDE_CWD`.
 
 ## Settings Codex cannot honor
 

@@ -59,8 +59,9 @@ Restart the bot. Rules a setting must meet, or the connector stays off and logs 
   copy straight from the repo's history, and sees the folder as deleted, so a
   "commit everything" would remove it. Move the folder out of `CLAUDE_CWD` first;
   if it was ever committed, its history is still readable, so also remove it from
-  the repo's history or give board runs a repo that never held it. `readonly` has
-  no shell and is unaffected.
+  the repo's history or give board runs a repo that never held it. `readonly` is
+  unaffected: on either runtime it is denied the repo's git folder, and the same
+  folder in every worktree of the repo, which it never needs.
 
 ## Disable
 
@@ -103,8 +104,9 @@ permission profile rather than a tool list:
   allow single hosts, so a Codex board run has no network: pushing and `gh` need a
   Claude bot); the Claude tool settings (`BOT_BOARD_TOOLS`,
   `BOT_BOARD_ENGINEERING_TOOLS`, `BOT_BOARD_PERMISSION_ALLOW`); a Discord memory
-  folder inside `CLAUDE_CWD` **in either mode**, because the `readonly` shell can
-  read the repo's history too; a Codex version other than 0.162.x.
+  folder inside `CLAUDE_CWD` in `engineering`, as on Claude. A `readonly` shell
+  is denied the repo's git folder and every worktree's copy, so it cannot reach the
+  history. A Codex version other than 0.162.x is also refused.
 - **Prerequisites:** the Codex CLI signed in, and `bwrap` on Linux.
 
 Verify exactly as above. The startup line reads
@@ -122,7 +124,8 @@ blocked task reopens it, and the bot picks it up again.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Log: `Paperclip connector off — <reason>` | A `BOT_BOARD_*` value breaks a rule above, or `CLAUDE_CWD` is the harness or state folder | Fix the named value, restart |
-| Log: `… is the bot's Discord memory and lies inside CLAUDE_CWD …` | `engineering` (or any mode on Codex) with summaries or other memory kept in the repo | Move `BOT_HISTORY_DIR` out of `CLAUDE_CWD` and clear it from the repo's history, or keep the bot `readonly` on Claude |
+| Log: `… is the bot's Discord memory and lies inside CLAUDE_CWD …` | `engineering` with summaries or other memory kept in the repo | Move `BOT_HISTORY_DIR` out of `CLAUDE_CWD` and clear it from the repo's history, or keep the bot `readonly` |
+| `git` in a `readonly` board run says `not a git repository` | Expected: every board run is denied the git folder of a repo that holds its Discord memory | None in `readonly`; for `engineering`, move the memory out of the repo |
 | Task blocked, reply says no Edit/Write/Bash | Bot is in `readonly` | Set `BOT_BOARD_EXECUTION=engineering`, restart, check the startup log |
 | Shell commands fail with `bwrap` errors | A read path contains `CLAUDE_CWD` or a write path, or the sandbox is missing | Name sibling folders instead; install `bwrap`/`socat` |
 | Every network call from the shell fails | `socat` unreadable inside the sandbox | Add its folder (and its wrapper's) to `BOT_BOARD_READ_PATHS`; see `doctor:fleet` |
