@@ -443,6 +443,9 @@ export function parseFleet(file) {
       // only ever a variable NAME.
       paperclipKeyVar: paperclipKeyRef ? paperclipKeyRef[1] : null,
       paperclipKeyLiteral: !paperclipKeyRef && /^\s*PAPERCLIP_API_KEY:/m.test(block),
+      // How its board runs execute (lib/permission-mode.js resolveBoardPolicy).
+      boardEnv: Object.fromEntries(["BOT_BOARD_EXECUTION", "BOT_BOARD_TOOLS", "BOT_BOARD_ENGINEERING_TOOLS", "BOT_BOARD_READ_PATHS",
+        "BOT_BOARD_WRITE_PATHS", "BOT_BOARD_NETWORK_ALLOW"].map((k) => [k, pick(k)]).filter(([, v]) => v != null)),
     });
   }
   return bots;
@@ -525,6 +528,11 @@ export async function checkPaperclip(bot, harnessDir, env = process.env, { fetch
     return bad(name, `connector stays off: CLAUDE_CWD ${bot.claudeCwd} is the harness or state folder, or inside one`,
       "A board run cannot keep that folder closed. Point CLAUDE_CWD at the folder board tasks should read.");
   }
+  const policy = boardPolicyOf(bot, denied);
+  if (policy.problems.length) {
+    return bad(name, `connector stays off: ${policy.problems.join("; ")}`,
+      "Fix the BOT_BOARD_* setting named. See docs/paperclip-board-execution.md.");
+  }
   if (!keyVar) return warn(name, "PAPERCLIP_API_KEY is a literal, not a process.env reference", "Move it to the environment.");
   if (!env[keyVar]) {
     return warn(name, `${keyVar} is not set in this shell`,
@@ -544,5 +552,37 @@ export async function checkPaperclip(bot, harnessDir, env = process.env, { fetch
   }
   if (!res.ok) return bad(name, `${url} answered HTTP ${res.status}`, "Check PAPERCLIP_URL and that the board is up.");
   const me = await res.json().catch(() => ({}));
-  return ok(name, `${url}, signed in as ${me.name ?? "an unnamed agent"}`);
+  const signedIn = `${url}, signed in as ${me.name ?? "an unnamed agent"}; board runs: ${policy.summary}`;
+  return policy.unreadable.length
+    ? warn(name, `${signedIn}; the sandbox cannot read ${policy.unreadable.join(", ")}`,
+      "A board shell's network goes through these helpers. Add each folder (and any folder a wrapper script loads from) to BOT_BOARD_READ_PATHS, or every request from the shell fails.")
+    : ok(name, signedIn);
+}
+
+/**
+ * A bot's board policy as bot.js will resolve it, what stops it, and — in
+ * engineering mode — the sandbox helpers its shell needs but cannot read.
+ * The sandbox hides everything outside the system folders, so a socat or
+ * bwrap installed under a home folder is invisible to the shell's own sandbox.
+ */
+export function boardPolicyOf(bot, denied, { which = whichBin } = {}) {
+  const { resolveBoardPolicy, boardPolicyProblems, SYSTEM_READ } = require_("../../lib/permission-mode.js");
+  const policy = resolveBoardPolicy(bot.boardEnv ?? {});
+  const problems = boardPolicyProblems(policy, denied, bot.claudeCwd || "");
+  const eng = policy.execution === "engineering";
+  const summary = eng
+    ? `engineering (${policy.tools}; reads ${policy.readPaths.join(", ") || "the working directory only"}; writes the working directory${policy.writePaths.length ? `, ${policy.writePaths.join(", ")}` : ""}; hosts ${policy.network.join(", ") || "the bot's own"})`
+    : `readonly (${policy.tools})`;
+  const readable = [...SYSTEM_READ, ...policy.readPaths, ...policy.writePaths];
+  const unreadable = !eng ? [] : ["socat", "bwrap"].map(which).filter(Boolean)
+    .filter((p) => !readable.some((r) => p === r || p.startsWith(r.replace(/\/+$/, "") + "/")));
+  return { policy, problems, summary, unreadable };
+}
+
+function whichBin(name) {
+  for (const dir of (process.env.PATH || "").split(":").filter(Boolean)) {
+    const p = `${dir.replace(/\/+$/, "")}/${name}`;
+    if (existsSync(p)) return p;
+  }
+  return null;
 }

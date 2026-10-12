@@ -2,14 +2,14 @@ require("dotenv").config();
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
 const { WebSocketServer } = require("ws");
-const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync, readlinkSync, renameSync } = require("fs");
+const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync, readlinkSync, renameSync, mkdtempSync, rmSync } = require("fs");
 const { join, resolve } = require("path");
 const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -143,10 +143,13 @@ const PERMISSION_DENY = (process.env.BOT_PERMISSION_DENY || "").trim();
 // to write, edit or execute anything.
 const SUMMARIZER_TOOLS = process.env.BOT_SUMMARIZER_TOOLS || "Read";
 // A Paperclip board run's tools and pre-approvals, whatever the bot's mode. The
-// board is read by people outside the bot's channels, so the default is the
-// read-only built-ins, confined to the working directory, and nothing else.
-const BOARD_TOOLS = process.env.BOT_BOARD_TOOLS || "Read,Glob,Grep";
-const BOARD_PERMISSION_ALLOW = (process.env.BOT_BOARD_PERMISSION_ALLOW || "").trim();
+// board is read by people outside the bot's channels, so the default
+// (BOT_BOARD_EXECUTION=readonly) is the read-only built-ins, confined to the
+// working directory, and nothing else. `engineering` adds what the operator
+// names — tools, folders, hosts — and keeps every board isolation; see
+// resolveBoardPolicy in lib/permission-mode.js.
+const BOARD_POLICY = resolveBoardPolicy();
+const BOARD_ENGINEERING = BOARD_POLICY.execution === "engineering";
 
 /**
  * The permission flags for one invocation.
@@ -161,8 +164,8 @@ function permissionArgs(kind = "session") {
   // A board run answers people outside the bot's Discord channels: least
   // privilege in every mode, and no reach into Discord memory.
   if (kind === "board") {
-    return boardArgs({ tools: BOARD_TOOLS, allow: BOARD_PERMISSION_ALLOW, cwd: CLAUDE_CWD,
-      deny: [PERMISSION_DENY, ...privateMemoryDeny(boardDeniedPaths())].filter(Boolean) });
+    return boardArgs({ tools: BOARD_POLICY.tools, allow: [BOARD_POLICY.allow, ...boardEngineeringRules(CLAUDE_CWD, BOARD_POLICY)], cwd: CLAUDE_CWD,
+      deny: [PERMISSION_DENY, ...privateMemoryDeny(boardDeniedPaths(), BOARD_ENGINEERING ? ["Read", "Edit"] : ["Read"])].filter(Boolean) });
   }
   if (PERMISSION_MODE === "bypass") {
     // Deny rules still hold under bypass (measured): nothing prompts, but a denied
@@ -192,7 +195,7 @@ function permissionArgs(kind = "session") {
 // session through --settings, e.g. a sandbox around the shell. Settings passed this
 // way are not loosened by the repository's own .claude/settings*.json.
 const SESSION_SETTINGS = (process.env.BOT_SETTINGS || "").trim();
-function settingsArgs({ board = false } = {}) {
+function settingsArgs({ board = false, tmpDir = null } = {}) {
   if (!board) return SESSION_SETTINGS ? ["--settings", SESSION_SETTINGS] : [];
   // A board run sandboxes any shell it is allowed to the working directory, on
   // top of the bot's own settings. Read per run: a settings file that cannot be read fails the run
@@ -200,7 +203,7 @@ function settingsArgs({ board = false } = {}) {
   // CLAUDE_CWD, where Claude itself would resolve it for a Discord session.
   const base = !SESSION_SETTINGS ? null
     : JSON.parse(SESSION_SETTINGS.startsWith("{") ? SESSION_SETTINGS : readFileSync(resolve(CLAUDE_CWD, SESSION_SETTINGS), "utf8"));
-  return ["--settings", JSON.stringify(boardSettings(base, boardDeniedPaths(), CLAUDE_CWD))];
+  return ["--settings", JSON.stringify(boardSettings(base, boardDeniedPaths(), CLAUDE_CWD, { ...BOARD_POLICY, tmpDir }))];
 }
 
 // MCP_CONFIG adds servers; it does not remove the host's. MCP_CONFIG_STRICT=true
@@ -1934,6 +1937,11 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
         : `${head}${basePrompt}${channelContext}${fileTransferContext}`;
     }
 
+    // An engineering board run gets a temp folder of its own: the sandbox's
+    // network proxy listens there, and the shared /tmp stays hidden from it.
+    // Removed when the run ends.
+    const boardTmp = opts.noBufferContext && BOARD_ENGINEERING
+      ? mkdtempSync(join(require("os").tmpdir(), `${BOT_NAME}-board-`)) : null;
     const args = [
       "--output-format", "stream-json",
       // A run whose reply lands outside Discord gets least privilege.
@@ -1943,7 +1951,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "--max-turns", String(CLAUDE_MAX_TURNS),
       ...(process.env.CLAUDE_MODEL ? ["--model", process.env.CLAUDE_MODEL] : []),
       ...mcpArgs(),
-      ...settingsArgs({ board: Boolean(opts.noBufferContext) }),
+      ...settingsArgs({ board: Boolean(opts.noBufferContext), tmpDir: boardTmp }),
       "--append-system-prompt", systemPrompt,
     ];
 
@@ -1989,6 +1997,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       // the same CLAUDE_CWD and loads at startup, before any tool runs. Off here
       // and in boardSettings; the CLI reads this variable first.
       cleanEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
+      if (boardTmp) cleanEnv.TMPDIR = boardTmp;
     }
     // A board or restricted run reads no settings file (permissionArgs); its
     // CLAUDE.md comes in through --add-dir, which loads one only with this set.
@@ -2063,6 +2072,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 
     child.on("close", async (code) => {
       activeProcesses.delete(channelId);
+      if (boardTmp) rmSync(boardTmp, { recursive: true, force: true });
       // Remove the status message first, so it never sits above the answer.
       try { await progress?.finish(); } catch { /* never block the reply */ }
       const elapsed = Date.now() - startTime;
@@ -2203,6 +2213,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     });
 
     child.on("error", (err) => {
+      if (boardTmp) rmSync(boardTmp, { recursive: true, force: true });
       reqLog.error({ err }, "Failed to spawn Claude");
       reject(new Error(`Failed to spawn claude: ${err.message}`));
     });
@@ -2951,10 +2962,21 @@ for (const problem of PAPERCLIP_PROBLEMS) log.warn(`Paperclip board off — ${pr
 // CLAUDE_CWD that is the harness or state folder (or inside one) would open the
 // harness secrets file and the Discord stores to a board shell. Such a bot
 // answers no board.
+// A board policy that cannot be held turns board pickup off, never loosens it.
+const BOARD_POLICY_PROBLEMS = boardPolicyProblems(BOARD_POLICY, boardDeniedPaths(), CLAUDE_CWD);
 const PAPERCLIP_CWD_DENIED = boardCwdDenied(boardDeniedPaths(), CLAUDE_CWD);
 if (PAPERCLIP_BOARDS.length && PAPERCLIP_CWD_DENIED) {
   log.error({ cwd: CLAUDE_CWD }, "Paperclip connector off — CLAUDE_CWD is the harness or state folder, or inside one, which a board run cannot keep closed; point it at the folder board tasks should read");
+} else if (PAPERCLIP_BOARDS.length && BOARD_POLICY_PROBLEMS.length) {
+  for (const problem of BOARD_POLICY_PROBLEMS) log.error(`Paperclip connector off — ${problem}`);
 } else {
+  if (PAPERCLIP_BOARDS.length) {
+    const { execution, source, tools, allow, readPaths, writePaths, network } = BOARD_POLICY;
+    log.info({ execution, source, tools, allow: allow || null, readPaths, writePaths, network },
+      execution === "engineering"
+        ? "Paperclip board runs: engineering — these tools, sandboxed; Discord memory and bot credentials stay out"
+        : "Paperclip board runs: readonly — set BOT_BOARD_EXECUTION=engineering to let board tasks edit and run commands");
+  }
   for (const board of PAPERCLIP_BOARDS) {
     const pLog = log.child({ component: "paperclip", ...(board.id ? { board: board.id } : {}) });
     const { promptChannel } = board;

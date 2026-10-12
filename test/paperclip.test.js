@@ -6,7 +6,7 @@ const assert = require("assert");
 const { readFileSync, readdirSync, writeFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { paperclipBoards, pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED } = require("../lib/paperclip");
+const { paperclipBoards, pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED, OUTCOME_MARK, outcomeOf, refusal } = require("../lib/paperclip");
 
 const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
 let pass = 0, fail = 0;
@@ -836,6 +836,59 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.match(bot, /const tag = board\.id \? `paperclip-\$\{board\.id\}` : "paperclip";/);
     assert.match(bot, /stateFile: join\(STATE_DIR, `\$\{tag\}\.json`\)/);
     assert.match(bot, /runClaude\(prompt, `\$\{tag\}-\$\{issue\.identifier\}`/);
+  });
+
+  await check("an answer that says it is blocked leaves the task blocked, never done, without the outcome line", async () => {
+    // SLA-1147: a run that could not do its task replied "Blocked" and the
+    // poller closed the task as done, so the board showed finished work.
+    for (const tail of [`${OUTCOME_MARK} blocked`, `**${OUTCOME_MARK} BLOCKED**`, `> ${OUTCOME_MARK} blocked — needs a key`]) {
+      const b = board({ runs: running });
+      await poller(b, async () => `I could not run the tests: Bash is not available here. The owner can enable it.\n\n${tail}`).tick();
+      assert.deepStrictEqual(b.writes.map((w) => w.body),
+        [{ status: "blocked", comment: "I could not run the tests: Bash is not available here. The owner can enable it." }], tail);
+      assert.ok(b.writes.every((w) => w.body.status !== "done"), "a blocked answer closed the task as done");
+    }
+    const b = board({ runs: running });
+    await poller(b, async () => `All done.\n${OUTCOME_MARK} done`).tick();
+    assert.deepStrictEqual(b.writes.map((w) => w.body), [{ status: "done", comment: "All done." }]);
+    assert.deepStrictEqual(outcomeOf(`${OUTCOME_MARK} blocked`), { comment: "", status: "blocked" });
+    assert.match(buildTaskPrompt({ identifier: "T-1", title: "Q" }, [], ME, "u"), new RegExp(`${OUTCOME_MARK} blocked`));
+  });
+
+  await check("a blocked close that a newer ask lands on is reopened for it", async () => {
+    const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "first ask" }];
+    const issue = { id: "iss-1", identifier: "T-1", title: "A question", status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
+    const writes = [], activity = [];
+    let landing = true;
+    const fetch = async (url, init) => {
+      const path = url.replace(/^.*\/api/, "");
+      if (init.method === "PATCH") {
+        const body = JSON.parse(init.body);
+        writes.push(body);
+        if (body.status) { activity.unshift({ runId: "run-1", action: "issue.updated", details: { changes: { status: { from: issue.status, to: body.status } } } }); issue.status = body.status; }
+        if (landing) { landing = false; comments.push({ id: "h2", authorAgentId: null, createdAt: "2026-01-02T00:03:00Z", body: "here is the key" }); }
+        return { ok: true, text: async () => "{}" };
+      }
+      const routes = { "/agents/me": ME, "/agents/me/inbox-lite": [{ id: "iss-1" }], "/issues/iss-1": issue,
+        "/issues/iss-1/comments": comments, "/issues/iss-1/runs": running, "/issues/iss-1/activity": activity };
+      return path in routes ? { ok: true, text: async () => JSON.stringify(routes[path]) } : { ok: false, status: 404, text: async () => "" };
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    await createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: async () => `No key.\n${OUTCOME_MARK} blocked` }).tick();
+    assert.deepStrictEqual(writes, [{ status: "blocked", comment: "No key." }, { status: "todo" }]);
+    assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).closing, {});
+  });
+
+  await check("a refused request carries Paperclip's code, in the message and on the error", () => {
+    const body = JSON.stringify({ error: "This write needs the run it belongs to.", details: { code: "cross_issue_influence_run_context_required", boundary: "b" } });
+    const err = refusal("PATCH", "/issues/x", 403, body);
+    assert.strictEqual(err.status, 403);
+    assert.strictEqual(err.code, "cross_issue_influence_run_context_required");
+    assert.match(err.message, /^PATCH \/issues\/x -> HTTP 403 cross_issue_influence_run_context_required /);
+    const plain = refusal("GET", "/agents/me", 401, "Unauthorized");
+    assert.strictEqual(plain.code, undefined);
+    assert.strictEqual(plain.message, "GET /agents/me -> HTTP 401 Unauthorized");
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

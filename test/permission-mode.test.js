@@ -5,7 +5,7 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ } = require("../lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules } = require("../lib/permission-mode");
 const { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
@@ -273,7 +273,7 @@ check("a board run drops every memory variable and denies the path each one name
   const at = (re) => src.search(re);
   assert.ok(at(/cleanEnv\.BOT_CHANNEL_ID = /) < at(/withheldFromBoard\(name\)\) delete/) && at(/withheldFromBoard\(name\)\) delete/) < at(/spawn\(CLAUDE_BIN, safeArgs/),
     "the credentials are removed before they are set, or after the spawn");
-  assert.match(src, /deny: \[PERMISSION_DENY, \.\.\.privateMemoryDeny\(boardDeniedPaths\(\)\)\]/, "the board run no longer denies the memory paths");
+  assert.match(src, /deny: \[PERMISSION_DENY, \.\.\.privateMemoryDeny\(boardDeniedPaths\(\), BOARD_ENGINEERING \? \["Read", "Edit"\] : \["Read"\]\)\]/, "the board run no longer denies the memory paths");
   // Second pass on e4411f4: files already sent to Discord sit in the outbox,
   // which can be moved anywhere, including inside CLAUDE_CWD.
   const denied = /function boardDeniedPaths\(\) \{[\s\S]*?\n\}/.exec(src)[0];
@@ -294,13 +294,14 @@ check("a board run is least privilege in every mode — never bypass", () => {
   const fn = /function permissionArgs[\s\S]*?\n}/.exec(src)[0];
   const board = fn.indexOf('kind === "board"'), bypass = fn.indexOf('PERMISSION_MODE === "bypass"');
   assert.ok(board > -1 && board < bypass, "the board branch must come before the bypass branch");
-  assert.match(src, /const BOARD_TOOLS = process\.env\.BOT_BOARD_TOOLS \|\| "Read,Glob,Grep";/);
+  assert.match(src, /const BOARD_POLICY = resolveBoardPolicy\(\);/);
+  assert.strictEqual(resolveBoardPolicy({}).tools, "Read,Glob,Grep", "the default board run is no longer read-only");
   const args = boardArgs({ tools: "Read,Glob,Grep", allow: "", deny: ["Read(//state/buffer.txt)"] });
   assert.deepStrictEqual(args, ["--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk", "--setting-sources", "", "--disallowedTools", "Read(//state/buffer.txt)"]);
   // Second pass on f2a7466: an approval in any settings file — the bot's, the
   // repo's, the user's — was honored by dontAsk. None is read; CLAUDE.md still is.
   assert.deepStrictEqual(boardArgs({ tools: "Read", cwd: "/repo" }).slice(4), ["--setting-sources", "", "--add-dir", "/repo"]);
-  assert.match(src, /boardArgs\(\{ tools: BOARD_TOOLS, allow: BOARD_PERMISSION_ALLOW, cwd: CLAUDE_CWD,/);
+  assert.match(src, /boardArgs\(\{ tools: BOARD_POLICY\.tools, allow: \[BOARD_POLICY\.allow, \.\.\.boardEngineeringRules\(CLAUDE_CWD, BOARD_POLICY\)\], cwd: CLAUDE_CWD,/);
   assert.match(src, /cleanEnv\.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";/, "a board run loses the repo's CLAUDE.md");
   assert.ok(!args.some((a) => /dangerously/.test(a)), "a board run must never skip permissions");
   assert.deepStrictEqual(boardArgs({ tools: "Read", allow: "mcp__db" }).slice(6), ["--allowedTools", "mcp__db"]);
@@ -348,11 +349,71 @@ check("a board run's shell is sandboxed to the working directory, on top of the 
   assert.ok(!("allowWrite" in loose.sandbox.filesystem), "a board shell may write where the bot allows");
   assert.deepStrictEqual(loose.sandbox.filesystem.denyWrite, ["/repo/.git"]);
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.match(src, /\.\.\.settingsArgs\(\{ board: Boolean\(opts\.noBufferContext\) \}\)/, "the board run no longer gets the sandbox");
-  assert.match(src, /boardSettings\(base, boardDeniedPaths\(\), CLAUDE_CWD\)/);
+  assert.match(src, /\.\.\.settingsArgs\(\{ board: Boolean\(opts\.noBufferContext\), tmpDir: boardTmp \}\)/, "the board run no longer gets the sandbox");
+  assert.match(src, /boardSettings\(base, boardDeniedPaths\(\), CLAUDE_CWD, \{ \.\.\.BOARD_POLICY, tmpDir \}\)/);
   // Second pass on 3c32d35: a relative BOT_SETTINGS read from the harness folder
   // failed every board run while Discord sessions, run in CLAUDE_CWD, found it.
   assert.match(src, /readFileSync\(resolve\(CLAUDE_CWD, SESSION_SETTINGS\), "utf8"\)/, "a relative settings file is read from the wrong folder");
+});
+
+console.log("\nBoard runs — engineering mode");
+
+check("readonly is the default, and unset or readonly changes nothing about a board run", () => {
+  const ro = resolveBoardPolicy({});
+  assert.deepStrictEqual([ro.execution, ro.tools, ro.readPaths, ro.writePaths, ro.network], ["readonly", "Read,Glob,Grep", [], [], []]);
+  // Engineering-only settings are ignored unless engineering is asked for.
+  const ignored = resolveBoardPolicy({ BOT_BOARD_READ_PATHS: "/srv/code", BOT_BOARD_WRITE_PATHS: "/srv/out", BOT_BOARD_NETWORK_ALLOW: "example.com" });
+  assert.deepStrictEqual(boardSettings(null, ["/state"], "/repo", ignored), boardSettings(null, ["/state"], "/repo"));
+  assert.deepStrictEqual(boardEngineeringRules("/repo", ignored), []);
+  const s = boardSettings(null, ["/state"], "/repo").sandbox;
+  assert.strictEqual(s.autoAllowBashIfSandboxed, false);
+  assert.ok(!("allowWrite" in s.filesystem) && !("denyWrite" in s.filesystem));
+});
+
+check("engineering: the named tools, edits in the working directory and write paths, the private memory still closed", () => {
+  const env = { BOT_BOARD_EXECUTION: "engineering", BOT_BOARD_READ_PATHS: "/srv/code/other", BOT_BOARD_WRITE_PATHS: "/srv/scratch", BOT_BOARD_NETWORK_ALLOW: "api.example.com" };
+  const p = resolveBoardPolicy(env);
+  assert.strictEqual(p.tools, "Read,Glob,Grep,Edit,Write,Bash");
+  assert.strictEqual(resolveBoardPolicy({ ...env, BOT_BOARD_ENGINEERING_TOOLS: "Read,Bash" }).tools, "Read,Bash");
+  assert.deepStrictEqual(boardEngineeringRules("/srv/code/repo", p), ["Edit(//srv/code/repo/**)", "Edit(//srv/scratch/**)", "Read(//srv/code/other/**)"]);
+  const s = boardSettings({ sandbox: { network: { allowedDomains: ["github.com"] } } }, ["/state"], "/srv/code/repo", { ...p, tmpDir: "/tmp/b-1" }).sandbox;
+  assert.strictEqual(s.autoAllowBashIfSandboxed, true);
+  assert.deepStrictEqual(s.filesystem.allowWrite, ["/srv/code/repo", "/srv/scratch", "/tmp/b-1"]);
+  assert.ok(s.filesystem.denyRead.includes("/") && s.filesystem.denyRead.includes("/state"), "the root or the private memory is readable");
+  assert.ok(s.filesystem.denyWrite.includes("/state"), "a write path above the state folder could overwrite it");
+  for (const r of ["/srv/code/other", "/srv/scratch", "/tmp/b-1"]) assert.ok(s.filesystem.allowRead.includes(r), `${r} is not readable`);
+  assert.deepStrictEqual(s.network.allowedDomains, ["github.com", "api.example.com"]);
+  assert.strictEqual(s.network.allowAllUnixSockets, false);
+  assert.strictEqual(s.allowUnsandboxedCommands, false);
+  assert.strictEqual(s.failIfUnavailable, true);
+  // The private memory is denied to Edit as well as Read when the run may edit.
+  assert.ok(privateMemoryDeny(["/state"], ["Read", "Edit"]).includes("Edit(//state/**)"));
+});
+
+check("engineering: a policy that would open what a board run must not reach is refused, not loosened", () => {
+  const denied = ["/srv/harness", "/srv/harness/state"];
+  const probs = (env) => boardPolicyProblems(resolveBoardPolicy({ BOT_BOARD_EXECUTION: "engineering", ...env }), denied, "/srv/code/repo");
+  assert.deepStrictEqual(probs({ BOT_BOARD_READ_PATHS: "/srv/code/other", BOT_BOARD_WRITE_PATHS: "/srv/scratch" }), []);
+  assert.match(boardPolicyProblems(resolveBoardPolicy({ BOT_BOARD_EXECUTION: "yolo" }), denied, "/r")[0], /not one of readonly, engineering/);
+  assert.match(probs({ BOT_BOARD_READ_PATHS: "relative/dir" })[0], /not an absolute path/);
+  assert.match(probs({ BOT_BOARD_READ_PATHS: "/srv/harness/state/history" })[0], /private Discord memory/);
+  assert.match(probs({ BOT_BOARD_WRITE_PATHS: "/srv/harness" })[0], /private Discord memory/);
+  assert.match(probs({ BOT_BOARD_READ_PATHS: "/" })[0], /whole filesystem/);
+  assert.match(probs({ BOT_BOARD_WRITE_PATHS: require("os").homedir() })[0], /whole home folder/);
+  // A read path over the working directory or a write path mounts it read-only and the sandbox cannot start.
+  assert.match(probs({ BOT_BOARD_READ_PATHS: "/srv/code" })[0], /contains \/srv\/code\/repo/);
+  assert.match(probs({ BOT_BOARD_READ_PATHS: "/srv", BOT_BOARD_WRITE_PATHS: "/srv/scratch" }).join(" "), /\/srv\/scratch/);
+  assert.match(probs({ BOT_BOARD_NETWORK_ALLOW: "https://x.example.com/path" })[0], /not a host name/);
+  // bot.js turns board pickup off on any problem, and says so.
+  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.match(src, /else if \(PAPERCLIP_BOARDS\.length && BOARD_POLICY_PROBLEMS\.length\) \{\n  for \(const problem of BOARD_POLICY_PROBLEMS\) log\.error\(`Paperclip connector off — \$\{problem\}`\);/);
+});
+
+check("bot.js: an engineering run gets a private temp folder, removed when the run ends", () => {
+  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.match(src, /mkdtempSync\(join\(require\("os"\)\.tmpdir\(\), `\$\{BOT_NAME\}-board-`\)\)|mkdtempSync\(join\(os\.tmpdir\(\), `\$\{BOT_NAME\}-board-`\)\)/);
+  assert.match(src, /if \(boardTmp\) cleanEnv\.TMPDIR = boardTmp;/);
+  assert.ok((src.match(/rmSync\(boardTmp, \{ recursive: true, force: true \}\)/g) || []).length >= 1, "the private temp folder is never removed");
 });
 
 console.log(`\n${passes} passed, ${failures} failed\n`);
