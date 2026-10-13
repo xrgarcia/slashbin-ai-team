@@ -64,7 +64,7 @@ To go back, remove `BOT_RUNTIME` (or set `claude`) and restart.
 | Bypass session | Every tool, MCP servers from `MCP_CONFIG` or the repo's `.mcp.json` | Unsandboxed, the operator's own Codex config, plus the bot's local (stdio) MCP servers from the same files; HTTP/SSE servers there are skipped and logged — define those in the Codex config instead |
 | Board run, `readonly` | Read tools only, no shell | A shell inside a read-only profile, no network |
 | Board run, `engineering` | Sandboxed shell, host allow list | Sandboxed shell, **no network**; `BOT_BOARD_NETWORK_ALLOW` is refused |
-| Step cap | `CLAUDE_MAX_TURNS` | None; `CLAUDE_TIMEOUT_MS` bounds a run |
+| Step cap | `CLAUDE_MAX_TURNS` (`0` = none) | None; `CLAUDE_TIMEOUT_MS` bounds a run |
 | Background commands | Refused by the pack's gate | Codex background terminals are off; commands run to completion |
 
 Every Codex board run has a shell, `readonly` included. On either runtime a board

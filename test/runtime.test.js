@@ -256,13 +256,18 @@ check("Claude's command line is the one it always was", () => {
       ...permissionArgs(runKind),
       ...skillPackArgs(),
       "--verbose",
-      "--max-turns", String(CLAUDE_MAX_TURNS),
+      ...(CLAUDE_MAX_TURNS ? ["--max-turns", String(CLAUDE_MAX_TURNS)] : []),
       ...(RUNTIME.model ? ["--model", RUNTIME.model] : []),
       ...mcpArgs(),
       ...settingsArgs({ board: narrowBoard, tmpDir: boardTmp }),
       "--append-system-prompt", systemPrompt,
     ];`), "the Claude argv changed");
   assert.match(bot, /\} else if \(resumeSessionId\) \{\n      args\.push\("--resume", resumeSessionId, "-p", "--", finalPrompt\);/);
+});
+
+check("CLAUDE_MAX_TURNS=0 lifts the step cap; unset keeps 100", () => {
+  assert.match(bot, /return Number\.isInteger\(n\) && n >= 0 \? n : 100;/);
+  assert.ok(bot.includes(`...(CLAUDE_MAX_TURNS ? ["--max-turns", String(CLAUDE_MAX_TURNS)] : [])`));
 });
 
 check("a bot that cannot honor its settings refuses to start", () => {

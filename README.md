@@ -267,7 +267,7 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `SUMMARIZE_MODEL` | the bot's model | A cheaper model is fine here; it must belong to the bot's runtime |
 | `CLAUDE_BIN` | `claude` | Path to the Claude Code CLI |
 | `CODEX_BIN` | `codex` | Path to the Codex CLI, signed in with `codex login` |
-| `CLAUDE_MAX_TURNS` | `100` | Steps per request before a cap-out |
+| `CLAUDE_MAX_TURNS` | `100` | Steps per request before a cap-out. `0` removes the cap; `CLAUDE_TIMEOUT_MS` then bounds a run |
 | `CLAUDE_TIMEOUT_MS` | `3600000` | Max wall time per request |
 | `SESSION_TIMEOUT_MS` | `1800000` | Idle time before a channel starts fresh |
 | `MAX_CONCURRENT_CLAUDE` | `2` | In-flight requests before new ones are refused |

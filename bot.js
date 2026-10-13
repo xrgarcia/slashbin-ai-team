@@ -64,7 +64,11 @@ if (CODEX) {
 }
 const MAX_DISCORD_LENGTH = parseInt(process.env.MAX_DISCORD_LENGTH, 10) || 1900;
 const CLAUDE_TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS, 10) || 3600000;
-const CLAUDE_MAX_TURNS = parseInt(process.env.CLAUDE_MAX_TURNS, 10) || 100;
+// 0 lifts the step cap: CLAUDE_TIMEOUT_MS alone then bounds a run.
+const CLAUDE_MAX_TURNS = (() => {
+  const n = parseInt(process.env.CLAUDE_MAX_TURNS, 10);
+  return Number.isInteger(n) && n >= 0 ? n : 100;
+})();
 const ALLOWED_USER_IDS = process.env.ALLOWED_USERS
   ? process.env.ALLOWED_USERS.split(",").filter(Boolean)
   : [];
@@ -1299,7 +1303,7 @@ client.on("shardError", (err) => {
 
 client.once("ready", () => {
   markReady();
-  log.info({ tag: client.user.tag, cwd: CLAUDE_CWD }, "Bot online");
+  log.info({ tag: client.user.tag, cwd: CLAUDE_CWD, maxTurns: CODEX ? null : CLAUDE_MAX_TURNS || "unlimited", timeoutMs: CLAUDE_TIMEOUT_MS }, "Bot online");
   const shadowed = shadowedCommands();
   if (shadowed.length) {
     log.warn(
@@ -2025,7 +2029,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       ...permissionArgs(runKind),
       ...skillPackArgs(),
       "--verbose",
-      "--max-turns", String(CLAUDE_MAX_TURNS),
+      ...(CLAUDE_MAX_TURNS ? ["--max-turns", String(CLAUDE_MAX_TURNS)] : []),
       ...(RUNTIME.model ? ["--model", RUNTIME.model] : []),
       ...mcpArgs(),
       ...settingsArgs({ board: narrowBoard, tmpDir: boardTmp }),
