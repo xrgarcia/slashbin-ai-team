@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under its own name (`EM_DISCORD_TOKEN`, `PO_DISCORD_TOKEN`, `DISCORD_BOT_KEY`…);
   every board run, parity included, now withholds any variable named as one,
   and any variable carrying one's value.
+- **A parity board run's commands get no Paperclip key under another name.**
+  The same shared environment holds every bot's board keys, the board sync's
+  admin key among them; a parity run now withholds each, and any variable
+  carrying one's value. The connector's own key still reaches a Codex MCP
+  server that names it.
 - **A run Paperclip gave up on takes no new ask.** When a newer ask came in
   after the attempt a gone run still owes, that attempt is posted as a comment
   only, and the newer ask waits for a live run of its own.

@@ -543,6 +543,21 @@ check("no board run keeps a Discord or bridge credential, under any name or any 
   assert.match(src, /if \(opts\.noBufferContext\) for \(const name of discordCarriers\(cleanEnv\)\) delete cleanEnv\[name\];/, "a board run keeps a credential carried under another name");
 });
 
+check("a parity run's commands get no Paperclip key, under any name or any variable carrying its value", () => {
+  const { paperclipCarriers } = require("../lib/permission-mode");
+  // The shared environment: this bot's own board key under a second name, and other bots' keys.
+  const env = {
+    PAPERCLIP_API_KEY: "fixture-board-own", EM_PAPERCLIP_API_KEY: "fixture-board-own", PO_PAPERCLIP_API_KEY: "fixture-board-po",
+    OPS_EXTRA_PAPERCLIP_API_KEY: "fixture-board-ops", BOARD_AUTH: "Bearer fixture-board-po",
+    PAPERCLIP_URL: "https://board.example", PAPERCLIP_PROMPT_CHANNEL: "123", GITHUB_TOKEN: "fixture-github",
+  };
+  const kept = Object.keys(env).filter((k) => !paperclipCarriers(env).includes(k));
+  assert.deepStrictEqual(kept, ["PAPERCLIP_URL", "PAPERCLIP_PROMPT_CHANNEL", "GITHUB_TOKEN"]);
+  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.match(src, /if \(opts\.noBufferContext && !narrowBoard\) \{[^}]*for \(const name of paperclipCarriers\(cleanEnv\)\) delete cleanEnv\[name\];/,
+    "a parity run's commands keep a Paperclip key held under another name");
+});
+
 check("a parity run withholds only the Discord credentials, and still sees no other channel", () => {
   // The two named exceptions. Everything else a Discord session has — Doppler,
   // MCP config, the BOT_* paths — a parity run has too.
