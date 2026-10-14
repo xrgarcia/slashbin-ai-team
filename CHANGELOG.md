@@ -68,7 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the last of its waits finishes during that wake, nothing is written and the
   ask resumes on the next poll. A move a person makes on a blocked card counts
   from the blocked answer itself, so a note the bot posts after it no longer
-  hides the move and the ask still resumes.
+  hides the move and the ask still resumes. A wait is looked up once per post: a
+  task that reopened between two looks used to leave the card blocked on
+  nothing. The board the bot decides from also keeps the entries it saw at its
+  newest time, so a person's change recorded in that same millisecond counts
+  as newer and stands.
 - **A board run never keeps a Discord or bridge credential under another
   name.** Bots started from one shared environment hold every bot's token
   under its own name (`EM_DISCORD_TOKEN`, `PO_DISCORD_TOKEN`, `DISCORD_BOT_KEY`…);

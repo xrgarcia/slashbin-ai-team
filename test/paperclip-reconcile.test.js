@@ -28,7 +28,7 @@ function board(tasks) {
   }
   const byName = (n) => [...issues.values()].find((i) => i.identifier === n || i.id === n);
   // Every record is stamped as Paperclip stamps it, in the order it was written.
-  let last = 0;
+  let last = 0, ids = 0;
   const now = () => new Date(last = Math.max(Date.now(), last + 1)).toISOString();
   // One write is one record: its status change with whatever else it replaced (`also`).
   const setStatus = (id, to, actor, extra = {}, also = {}) => {
@@ -104,7 +104,8 @@ function board(tasks) {
       if (r && r.of === decodeURIComponent(m[1]) && --r.nth === 0) { delete state.afterRead; r.f(i); }
       return v;
     }
-    if (m[2] === "/activity") return ok(activity.get(i.id));
+    // Each entry has its own id, as Paperclip's do.
+    if (m[2] === "/activity") { for (const a of activity.get(i.id)) a.id ??= `a${++ids}`; return ok(activity.get(i.id)); }
     if (m[2] === "/comments") return ok(comments.get(i.id));
     if (m[2] === "/runs") return ok(runs.get(i.id));
     return { ok: false, status: 404, text: async () => "" };
@@ -128,7 +129,9 @@ function board(tasks) {
     activity.get(id).unshift({ action: "issue.updated", createdAt: now(), ...actor, details: { changes: { blockedByIssueIds: { from: i.blockedByIssueIds ?? [], to: waits } } } });
     i.blockedByIssueIds = waits;
   };
-  return { fetch, writes, tries, wakes, state, issues, runs, comments, setStatus, reassert, rehold, relink, now,
+  // The newest entry recorded in the same millisecond as the one before it.
+  const tie = (id) => { const [a, b] = activity.get(id); a.createdAt = b.createdAt; };
+  return { fetch, writes, tries, wakes, state, issues, runs, comments, setStatus, reassert, rehold, relink, tie, now,
     // Paperclip lost the run: it has ended, and the task is blocked.
     recover: (id, runId) => {
       activity.get(id).unshift({ action: "issue.execution_recovery_settled", createdAt: now(), actorType: "system", actorId: "execution-recovery", runId, details: { outcome: "blocked" } });
@@ -784,6 +787,29 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       { name: "a person moves a blocked card with no waits on as an unchanged wake acknowledges it: the next wake resumes it, once",
         replies: [`Cannot yet.\n${OUTCOME_MARK} blocked`, "Done now."], steps: [["wake", "r1"], ["onRead", (b) => b.setStatus("t-1", "todo", PERSON)], ["wake", "r2"], ["wake", "r3"]],
         ran: 2, status: "done" },
+      { name: "a wait reopens between an acknowledgement's looks at it: the card keeps the wait, and the ask resumes once it is done",
+        replies: [blockedOn("T-2"), "Finished."],
+        steps: [["wake", "r1"], ["onRead", (b) => {
+          b.setStatus("t-2", "done", PERSON);
+          b.state.afterRead = { of: "T-2", nth: 1, f: () => b.setStatus("t-2", "todo", PERSON) };
+        }], ["wake", "r2"], ["retry"], ["done", "t-2"], ["wake", "r3"]], ran: 2, status: "done" },
+      { name: "a wait reopens between an answer's looks at it: the card keeps the wait, and the ask resumes once it is done",
+        replies: [(b) => {
+          b.state.afterRead = { of: "T-2", nth: 1, f: () => {
+            b.setStatus("t-2", "done", PERSON);
+            b.state.afterRead = { of: "T-2", nth: 1, f: () => b.setStatus("t-2", "todo", PERSON) };
+          } };
+          return blockedOn("T-2");
+        }, "Finished."],
+        steps: [["wake", "r1"], ["done", "t-2"], ["wake", "r2"]], ran: 2, status: "done" },
+      { name: "a person moves the card on mid-answer in the same millisecond as the board's last entry: their status stands",
+        replies: [`Cannot yet.\n${OUTCOME_MARK} blocked`, (b) => { b.setStatus("t-1", "in_review", PERSON); b.tie("t-1"); return "Done now."; }],
+        steps: [["wake", "r1"], ["move", "todo"], ["wake", "r2"]], ran: 2, status: "in_review",
+        check: (b) => assert.ok(b.writes.some((x) => x.body.comment === "Done now." && !x.body.status)) },
+      { name: "a person changes what the card waits on mid-answer in the same millisecond as the board's last entry: their waits stand",
+        replies: [`Cannot yet.\n${OUTCOME_MARK} blocked`, (b) => { b.relink("t-1", PERSON, ["t-3"]); b.tie("t-1"); return blockedOn("T-2"); }],
+        steps: [["wake", "r1"], ["move", "todo"], ["wake", "r2"]], ran: 2, status: "in_progress", links: ["t-3"],
+        check: (b) => assert.ok(b.writes.some((x) => x.body.comment === "Need T-2." && !x.body.status)) },
     ];
     for (const row of rows) {
       const b = board([task("t-1", { runs: [], ...row.start }), ...["t-2", "t-3", "t-4"].map((t) => task(t, { assigneeAgentId: null, status: "todo" }))]);
