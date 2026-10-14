@@ -1,7 +1,7 @@
 require("dotenv").config();
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
-const { WebSocketServer } = require("ws");
+const { WebSocket, WebSocketServer } = require("ws");
 const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync, readlinkSync, renameSync, mkdtempSync, rmSync } = require("fs");
 const { basename, join, resolve } = require("path");
 const { pipeline } = require("stream/promises");
@@ -14,6 +14,7 @@ const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
 const { createPaperclipPoller, paperclipBoards, replyCollector } = require("./lib/paperclip");
+const { createLiveEvents, eventsSetting, startBoard } = require("./lib/paperclip-events");
 const { botSurfaces, PAPERCLIP_PREREQUISITE } = require("./lib/surfaces");
 const { resolveRuntime } = require("./lib/runtime");
 const { LAYOUTS, repoLayout } = require("./lib/runtime/layout");
@@ -588,6 +589,8 @@ if (SURFACES.errors.length) {
 for (const note of SURFACES.notes) log.warn(note);
 const DISCORD_ON = SURFACES.discord;
 const PAPERCLIP_BOARDS = SURFACES.paperclip ? CONFIGURED_BOARDS : [];
+const PAPERCLIP_EVENTS = eventsSetting(process.env.PAPERCLIP_EVENTS);
+if (PAPERCLIP_BOARDS.length && PAPERCLIP_EVENTS.problem) log.warn(PAPERCLIP_EVENTS.problem);
 if (!DISCORD_ON) log.info("Discord off — Paperclip-only: BOT_SURFACES=paperclip, so this bot answers on its Paperclip board(s) alone");
 
 // A bot pointed at a directory that does not exist used to start happily and then
@@ -728,7 +731,7 @@ const PID_FILE = join(__dirname, `.${BOT_NAME}.pid`);
 // connected apart from merely running.
 const READY_FILE = join(__dirname, `.${BOT_NAME}.ready`);
 const SURFACES_FILE = join(__dirname, `.${BOT_NAME}.surfaces.json`);
-const surfaces = { discord: DISCORD_ON ? "not ready" : "off", boards: {} };
+const surfaces = { discord: DISCORD_ON ? "not ready" : "off", boards: {}, events: {} };
 function markReady() {
   try { writeFileSync(READY_FILE, String(Date.now())); } catch { /* non-fatal */ }
 }
@@ -746,6 +749,11 @@ function setSurface(kind, state, board) {
   writeSurfaces();
   const all = [...(surfaces.discord === "off" ? [] : [surfaces.discord]), ...Object.values(surfaces.boards)];
   if (all.length && all.every((s) => s === "ready") && !existsSync(READY_FILE)) markReady();
+}
+/** A board's live-event state — live, reconnecting or off. Reported, never a readiness gate: polling carries a board without it. */
+function setEventState(board, state) {
+  surfaces.events[board] = state;
+  writeSurfaces();
 }
 clearReady();
 writeSurfaces();
@@ -3246,8 +3254,22 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
           .then(() => reply.text());
       },
     });
-    setInterval(poller.tick, envInt("PAPERCLIP_POLL_MS", 15000, { min: 5000 }));
-    pLog.info({ url: board.url, promptChannel: promptChannel ?? null }, "Paperclip connector on");
+    // Live events wake the seat the moment one of its runs opens; polling stays
+    // on as recovery, slower while the socket is live (lib/paperclip-events.js).
+    const eventsOn = PAPERCLIP_EVENTS.on && board.events !== false && Boolean(poller.whoami);
+    let pump = null;
+    const events = eventsOn ? createLiveEvents({
+      url: board.url, apiKey: board.apiKey, whoami: poller.whoami, log: pLog, WebSocket,
+      onWake: (reason) => { poller.tick(reason); },
+      onState: (s) => { setEventState(tag, s); pump?.reschedule(); },
+    }) : null;
+    if (!eventsOn) setEventState(tag, "off");
+    pump = startBoard({
+      tick: poller.tick, events,
+      pollMs: envInt("PAPERCLIP_POLL_MS", 15000, { min: 5000 }),
+      reconcileMs: envInt("PAPERCLIP_RECONCILE_MS", 60000, { min: 5000 }),
+    });
+    pLog.info({ url: board.url, promptChannel: promptChannel ?? null, events: eventsOn ? "on" : "off" }, "Paperclip connector on");
   }
 }
 
