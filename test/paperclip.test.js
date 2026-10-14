@@ -740,6 +740,46 @@ const poller = (b, answer) => createPaperclipPoller({
       [askKey("iss-1", { id: "iss-1", identifier: "T-1", title: "Q", createdAt: "2026-01-01T00:00:00Z" }, null)]);
   });
 
+  await check("a card handed to the seat in review is worked while a run of the seat's is open on it", async () => {
+    // A merged card handed to the seat in review: the inbox lists only todo,
+    // in_progress and blocked, so its run sat open unworked.
+    const me = { ...ME, companyId: "co-1" };
+    const routes = { "GET /agents/me": me, "GET /agents/me/inbox-lite": [],
+      [`GET /companies/co-1/issues?assigneeAgentId=${ME.id}&status=in_review`]: [
+        { id: "iss-1", status: "in_review", assigneeAgentId: ME.id },
+        { id: "iss-2", status: "in_review", assigneeAgentId: ME.id },
+        { id: "iss-3", status: "in_review", assigneeAgentId: "other" }] };
+    routes["GET /issues/iss-1/runs"] = [{ id: "run-1", agentId: ME.id, status: "running" }];
+    routes["GET /issues/iss-2/runs"] = [{ id: "run-2", agentId: ME.id, status: "succeeded" }];
+    routes["GET /issues/iss-1"] = { id: "iss-1", identifier: "T-1", title: "Q", status: "in_review", assigneeAgentId: ME.id, createdAt: "2026-01-01T00:00:00Z" };
+    routes["GET /issues/iss-1/comments"] = [];
+    routes["GET /issues/iss-1/activity"] = [];
+    routes["GET /heartbeat-runs/run-1"] = { contextSnapshot: {} };
+    const read = [];
+    const fetch = async (url, init) => {
+      const key = `${init.method} ${url.replace(/^.*\/api/, "")}`;
+      read.push(key);
+      if (init.method !== "GET") return { ok: true, text: async () => "{}" };
+      return key in routes ? { ok: true, text: async () => JSON.stringify(routes[key]) } : { ok: false, status: 404, text: async () => "" };
+    };
+    const asked = [];
+    const p = createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile: join(mkdtempSync(join(tmpdir(), "pc-")), "s.json"),
+      answer: async (_, issue) => { asked.push(issue.identifier); return "a"; }, log: silent, fetch });
+    await p.tick();
+    assert.deepStrictEqual(asked, ["T-1"], "only the in-review card with an open run of the seat's is worked");
+    assert.ok(!read.includes("GET /issues/iss-3/runs"), "a card another seat holds is not looked at");
+  });
+
+  await check("a failed in-review read never stops the inbox", async () => {
+    const b = board({ runs: running });
+    const fetch = async (url, init) => (url.includes("/agents/me") && !url.includes("inbox")
+      ? { ok: true, text: async () => JSON.stringify({ ...ME, companyId: "co-1" }) } : b.fetch(url, init));
+    const asked = [];
+    await createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile: join(mkdtempSync(join(tmpdir(), "pc-")), "s.json"),
+      answer: async (_, issue) => { asked.push(issue.identifier); return "a"; }, log: silent, fetch }).tick();
+    assert.deepStrictEqual(asked, ["T-1"]);
+  });
+
   await check("no unposted answer is dropped, however many pile up across a restart", async () => {
     // Second-pass review of 2.7.0: only the last 50 unposted answers were saved,
     // so the 51st failure made a restarted bot run the oldest task again.
