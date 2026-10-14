@@ -21,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A board run never keeps a Discord or bridge credential under another
+  name.** Bots started from one shared environment hold every bot's token
+  under its own name (`EM_DISCORD_TOKEN`, `PO_DISCORD_TOKEN`, `DISCORD_BOT_KEY`…);
+  every board run, parity included, now withholds any variable named as one,
+  and any variable carrying one's value.
+- **A run Paperclip gave up on takes no new ask.** When a newer ask came in
+  after the attempt a gone run still owes, that attempt is posted as a comment
+  only, and the newer ask waits for a live run of its own.
+- **A mirrored task answered blocked is not run again on every wake.** Its card
+  never moves for the answer, so only a status move recorded after the answer
+  brings the ask back.
 - **A wait that finishes while the bot answers does not turn the ask into a new
   one.** The answer still closes the card, and the wake for the finished wait
   finds the ask answered rather than running it again.

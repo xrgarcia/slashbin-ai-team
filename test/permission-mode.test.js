@@ -523,6 +523,26 @@ check("a parity run's MCP env never puts back a withheld credential, by name or 
   for (const name of DISCORD_CREDENTIAL_ENV) assert.ok(!(name in parityMcpEnv({ [name]: "x" }, {})), `${name} restored by name`);
 });
 
+check("no board run keeps a Discord or bridge credential, under any name or any variable carrying its value", () => {
+  const { discordCarriers, parityMcpEnv } = require("../lib/permission-mode");
+  // The fleet's shared environment: each bot holds every bot's token under its
+  // own name, beside the DISCORD_TOKEN it runs as.
+  const env = {
+    DISCORD_TOKEN: "fixture-discord-em", EM_DISCORD_TOKEN: "fixture-discord-em", PO_DISCORD_TOKEN: "fixture-discord-po",
+    OPS_DISCORD_TOKEN: "fixture-discord-ops", DISCORD_BOT_KEY: "fixture-discord-bot", BRIDGE_TOKEN: "fixture-bridge",
+    SESSION_HEADER: "Bot fixture-discord-po", RELAY_AUTH: "fixture-discord-em",
+    GITHUB_TOKEN: "fixture-github", DOPPLER_CONFIG: "prd", DISCORD_CHANNEL_ID: "123", FLAG: "1",
+  };
+  const kept = Object.keys(env).filter((k) => !discordCarriers(env).includes(k));
+  assert.deepStrictEqual(kept, ["GITHUB_TOKEN", "DOPPLER_CONFIG", "DISCORD_CHANNEL_ID", "FLAG"]);
+  for (const name of ["EM_DISCORD_TOKEN", "PO_DISCORD_TOKEN", "OPS_DISCORD_TOKEN", "DISCORD_BOT_KEY"]) {
+    assert.ok(withheldFromParityBoard(name) && withheldFromBoard(name), `${name} reaches a board run`);
+  }
+  assert.deepStrictEqual(parityMcpEnv({ PO_TOKEN: "fixture-discord-po", API_KEY: "k-1" }, env), { API_KEY: "k-1" });
+  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.match(src, /if \(opts\.noBufferContext\) for \(const name of discordCarriers\(cleanEnv\)\) delete cleanEnv\[name\];/, "a board run keeps a credential carried under another name");
+});
+
 check("a parity run withholds only the Discord credentials, and still sees no other channel", () => {
   // The two named exceptions. Everything else a Discord session has — Doppler,
   // MCP config, the BOT_* paths — a parity run has too.

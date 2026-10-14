@@ -27,9 +27,12 @@ function board(tasks) {
     activity.set(t.id, []); comments.set(t.id, t.comments ?? []); runs.set(t.id, t.runs ?? []);
   }
   const byName = (n) => [...issues.values()].find((i) => i.identifier === n || i.id === n);
+  // Every record is stamped as Paperclip stamps it, in the order it was written.
+  let last = 0;
+  const now = () => new Date(last = Math.max(Date.now(), last + 1)).toISOString();
   const setStatus = (id, to, actor, extra = {}) => {
     const i = issues.get(id);
-    activity.get(id).unshift({ action: "issue.updated", ...actor, ...extra, details: { changes: { status: { from: i.status, to } } } });
+    activity.get(id).unshift({ action: "issue.updated", createdAt: now(), ...actor, ...extra, details: { changes: { status: { from: i.status, to } } } });
     i.status = to;
   };
   const blockedBy = (i) => (i.blockedByIssueIds ?? []).map((b) => ({ id: b, identifier: issues.get(b).identifier, status: issues.get(b).status }));
@@ -70,7 +73,7 @@ function board(tasks) {
       if (body.blockedByIssueIds) i.blockedByIssueIds = body.blockedByIssueIds;
       if (body.unblockDescriptor) i.unblockDescriptor = body.unblockDescriptor;
       if (body.status && body.status !== i.status) setStatus(i.id, body.status, { actorType: "agent", actorId: ME.id }, { runId: init.headers["x-paperclip-run-id"] });
-      if (body.comment) comments.get(i.id).push({ id: `c${writes.length}`, authorAgentId: ME.id, createdAt: new Date().toISOString(), body: body.comment, createdByRunId: init.headers["x-paperclip-run-id"] });
+      if (body.comment) comments.get(i.id).push({ id: `c${writes.length}`, authorAgentId: ME.id, createdAt: now(), body: body.comment, createdByRunId: init.headers["x-paperclip-run-id"] });
       return ok({});
     }
     if (!m[2]) return ok({ ...i, blockedBy: blockedBy(i) });
@@ -85,7 +88,7 @@ function board(tasks) {
     activity.get(id).unshift({ action: "issue.updated", ...actor, details: { status: "blocked",
       changes: { statusVersion: { from: 1, to: 2 }, unblockDescriptor: { from: null, to: { owner: { userId: actor.actorId } } } } } });
   };
-  return { fetch, writes, tries, wakes, state, issues, runs, comments, setStatus, reassert,
+  return { fetch, writes, tries, wakes, state, issues, runs, comments, setStatus, reassert, now,
     // Paperclip lost the run: it has ended, and the task is blocked.
     recover: (id, runId) => {
       activity.get(id).unshift({ action: "issue.execution_recovery_settled", actorType: "system", actorId: "execution-recovery", runId, details: { outcome: "blocked" } });
@@ -626,6 +629,53 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       { externalWriter: mirror, watchMs: 5 }).tick();
     assert.ok(b.writes.length >= 1);
     assert.ok(b.writes.every((x) => !x.body.status && !x.body.blockedByIssueIds && !x.body.unblockDescriptor), JSON.stringify(b.writes));
+  });
+
+  await check("a run gone with a newer ask on the task: the owed answer is posted as a comment, and the newer ask waits for a live run", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    // The bot dies mid-run; Paperclip settles the run as failed; a person asks again while it is down.
+    poller(b, () => new Promise(() => {}), { stateFile, watchMs: 1e6 }).tick();
+    await new Promise((r) => setTimeout(r, 20));
+    b.recover("t-1", "r1");
+    b.comments.get("t-1").push({ id: "h2", authorAgentId: null, createdAt: b.now(), body: "A newer ask." });
+    let ran = 0;
+    await poller(b, async () => { ran++; return "Answered early."; }, { stateFile }).tick();
+    assert.strictEqual(ran, 0, "ran the newer ask under the failed run");
+    const owed = b.writes.filter((x) => x.body.comment === FALLBACK_REPLY);
+    assert.strictEqual(owed.length, 1, "the owed attempt was not posted");
+    assert.ok(owed.every((x) => x.runId === "r1" && !x.body.status), JSON.stringify(owed));
+    assert.strictEqual(b.issues.get("t-1").status, "blocked", "the card moved for an older ask");
+    // The newer ask's own run: it is worked there, fresh — not as an interrupted retry.
+    b.runs.set("t-1", run("r2"));
+    b.issues.get("t-1").status = "in_progress";
+    const prompts = [];
+    await poller(b, async (p) => { prompts.push(p); return "Answered."; }, { stateFile }).tick();
+    assert.strictEqual(prompts.length, 1);
+    assert.ok(!prompts[0].includes(INTERRUPTED_NOTE));
+    assert.ok(b.writes.some((x) => x.runId === "r2" && x.body.comment === "Answered."));
+  });
+
+  await check("a mirrored task answered blocked is not run again on an unchanged wake, until a status move recorded after the answer", async () => {
+    const mirror = /^source: \S+#\d+$/;
+    const b = board([task("t-1", { description: "source: acme/app#12\nstage review", runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let n = 0;
+    const answer = async () => { n++; return `Need the spec.\n${OUTCOME_MARK} blocked`; };
+    await poller(b, answer, { stateFile, externalWriter: mirror }).tick();
+    assert.strictEqual(n, 1);
+    for (const r of ["r2", "r3"]) {
+      b.runs.set("t-1", run(r));
+      await poller(b, answer, { stateFile, externalWriter: mirror }).tick();
+    }
+    assert.strictEqual(n, 1, "an unchanged mirrored ask was run again");
+    assert.strictEqual(b.writes.filter((x) => x.body.comment?.startsWith("Need the spec.")).length, 1, "its answer was posted again");
+    // Its writer moves the card back after the answer: that is a reopening.
+    b.setStatus("t-1", "todo", PERSON);
+    b.setStatus("t-1", "in_progress", PERSON);
+    b.runs.set("t-1", run("r4"));
+    await poller(b, answer, { stateFile, externalWriter: mirror }).tick();
+    assert.strictEqual(n, 2, "a recorded reopening did not bring the ask back");
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, parityMcpEnv, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, discordCarriers, parityMcpEnv, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -2131,6 +2131,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     cleanEnv.BOT_JOB_HISTORY_FILE = JOB_HISTORY_FILE;
     cleanEnv.BOT_SCHEDULES_FILE = SCHEDULES_FILE;
     cleanEnv.BOT_CHANNEL_ID = String(channelId);
+    // Every board run loses the Discord and bridge credentials under any name,
+    // and any variable carrying one's value (discordCarriers).
+    if (opts.noBufferContext) for (const name of discordCarriers(cleanEnv)) delete cleanEnv[name];
     if (opts.noBufferContext && !narrowBoard) {
       for (const name of Object.keys(cleanEnv)) if (withheldFromParityBoard(name)) delete cleanEnv[name];
     } else if (opts.noBufferContext) {
