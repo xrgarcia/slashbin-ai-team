@@ -37,8 +37,10 @@ function board() {
     runs.push({ id: `r${runs.length + 1}`, agentId, status: "running" });
     if (card.status === "blocked") card.status = "in_progress";
   };
+  // As the live board: a hand-off bumps statusVersion though the status stays.
+  let version = 0;
   const assign = (actor, to, runId) => {
-    record(actor, { assigneeAgentId: { from: card.assigneeAgentId, to: to.agentId ?? null }, assigneeUserId: { from: card.assigneeUserId, to: to.userId ?? null } }, runId);
+    record(actor, { statusVersion: { from: version, to: ++version }, assigneeAgentId: { from: card.assigneeAgentId, to: to.agentId ?? null }, assigneeUserId: { from: card.assigneeUserId, to: to.userId ?? null } }, runId);
     card.assigneeAgentId = to.agentId ?? null; card.assigneeUserId = to.userId ?? null;
   };
   const comment = (author, body, runId) => comments.push({ id: `c${comments.length + 1}`, ...author, createdAt: now(), body, createdByRunId: runId });
