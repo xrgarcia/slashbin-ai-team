@@ -13,6 +13,7 @@ CLAUDE.md
 .bot-history/
 *.pid
 *.ready
+.*.surfaces.json
 ecosystem.config.js
 .conversation-buffer.txt
 .*-conversation-buffer.txt

@@ -313,7 +313,7 @@ export function checkEcosystem(file, sourceDir) {
   return out;
 }
 
-export { skip };
+export { skip, bad };
 
 export function render(results) {
   const icon = { [PASS]: "PASS", [FAIL]: "FAIL", [WARN]: "WARN", [SKIP]: "SKIP" };
@@ -336,6 +336,7 @@ export function render(results) {
 // failure that has really happened on a running fleet.
 
 const require_ = createRequire(import.meta.url);
+const { botSurfaces } = require_("../../lib/surfaces.js");
 
 /**
  * A schedule firing faster than the session idle timeout.
@@ -401,6 +402,36 @@ export function checkRunningCodeFresh(harnessDir, botName) {
 }
 
 /**
+ * Each surface of a running bot, as the bot itself last recorded it: Discord
+ * (off / ready / not ready) and every Paperclip board it polls (ready once a
+ * poll reaches the board). bot.js writes `.<BOT_NAME>.surfaces.json` beside the
+ * readiness marker and removes both on the way out, so a bot that is up but deaf
+ * on one surface says which.
+ */
+export function checkSurfaces(harnessDir, botName, { alive = pidAlive } = {}) {
+  const name = "Surfaces";
+  const file = join(harnessDir, `.${botName || "bot"}.surfaces.json`);
+  const readyFile = join(harnessDir, `.${botName || "bot"}.ready`);
+  let s = null;
+  try { s = JSON.parse(readFileSync(file, "utf8")); } catch { /* absent or unreadable */ }
+  if (!s || (s.pid && !alive(s.pid))) {
+    return existsSync(readyFile)
+      ? ok(name, "ready (started by a build that does not report surfaces separately)")
+      : warn(name, "not running — no surface state", "Start the bot, or check its log if it is meant to be up.");
+  }
+  const parts = [`Discord: ${s.discord}`, ...Object.entries(s.boards ?? {}).map(([tag, st]) => `board ${tag}: ${st}`)];
+  const states = [...(s.discord === "off" ? [] : [s.discord]), ...Object.values(s.boards ?? {})];
+  const allReady = states.length > 0 && states.every((x) => x === "ready");
+  return allReady
+    ? ok(name, parts.join(" · "))
+    : warn(name, parts.join(" · "), "A surface that is not ready answers nothing. Check the bot's log: Discord login, or the board's poll.");
+}
+
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (err) { return err.code === "EPERM"; }
+}
+
+/**
  * A credential that silently changes who pays.
  *
  * The harness hands its own environment to every Claude process it spawns. If
@@ -461,6 +492,11 @@ export function parseFleet(file) {
     bots.push({
       name: name[1],
       tokenVar: tokenRef ? tokenRef[1] : null,
+      // No DISCORD_TOKEN line at all: Discord is off for this bot (Paperclip-only).
+      discordTokenAbsent: !/^\s*DISCORD_TOKEN:/m.test(block),
+      paperclipExtraBoards: /^\s*PAPERCLIP_EXTRA_BOARDS:/m.test(block),
+      // Which surfaces it declares (lib/surfaces.js); null is Discord, plus any board.
+      surfaces: pick("BOT_SURFACES"),
       claudeCwd: pick("CLAUDE_CWD"),
       wsPort: pick("WS_PORT"),
       permissionMode: pick("BOT_PERMISSION_MODE"),
@@ -503,7 +539,21 @@ export async function checkFleet(file, harnessDir, env = process.env) {
   for (const b of bots) {
     const label = `  ${b.name}`;
 
-    if (!b.tokenVar) {
+    const onBoard = Boolean(b.paperclipUrl || b.paperclipKeyVar || b.paperclipKeyLiteral || b.paperclipExtraBoards);
+    // The bot's own start gate, on what the file declares: a token line stands
+    // for the token, since its value lives in the launch environment.
+    const surfaces = botSurfaces({ BOT_SURFACES: b.surfaces ?? "", DISCORD_TOKEN: b.discordTokenAbsent ? "" : "set" }, onBoard ? 1 : 0);
+    if (surfaces.errors.length) {
+      out.push(bad(`${label}: BOT_SURFACES`, `the bot refuses to start: ${surfaces.errors.join("; ")}`,
+        surfaces.paperclipRequired
+          ? "Put this app on its board (PAPERCLIP_URL and PAPERCLIP_API_KEY) in ecosystem.config.js, or take paperclip out of BOT_SURFACES."
+          : "Give this app its DISCORD_TOKEN, or, for a bot on its Paperclip board alone, set BOT_SURFACES: 'paperclip'."));
+    }
+    if (!surfaces.discord) {
+      if (!surfaces.errors.length) out.push(ok(`${label}: token`, "Discord off — Paperclip-only (BOT_SURFACES=paperclip)"));
+    } else if (b.discordTokenAbsent) {
+      // Reported above as the start gate's refusal.
+    } else if (!b.tokenVar) {
       out.push(warn(`${label}: token`, "DISCORD_TOKEN is not a process.env reference",
         "Point it at an environment variable so the token is never stored in the file."));
     } else if (!env[b.tokenVar]) {
@@ -533,6 +583,7 @@ export async function checkFleet(file, harnessDir, env = process.env) {
       name: `${label}: schedules`,
     });
     out.push({ ...checkRunningCodeFresh(harnessDir, b.name), name: `${label}: running code` });
+    out.push({ ...checkSurfaces(harnessDir, b.name), name: `${label}: surfaces` });
     const board = await checkPaperclip(b, harnessDir, env);
     if (board) out.push({ ...board, name: `${label}: Paperclip` });
   }

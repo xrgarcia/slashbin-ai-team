@@ -14,6 +14,7 @@ const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
 const { createPaperclipPoller, paperclipBoards, replyCollector } = require("./lib/paperclip");
+const { botSurfaces, PAPERCLIP_PREREQUISITE } = require("./lib/surfaces");
 const { resolveRuntime } = require("./lib/runtime");
 const { LAYOUTS, repoLayout } = require("./lib/runtime/layout");
 const codexRuntime = require("./lib/runtime/codex");
@@ -569,10 +570,25 @@ const MAX_OUTBOUND_BYTES = parseInt(process.env.MAX_OUTBOUND_BYTES, 10) || 8 * 1
 // restartable, because a network blip genuinely does deserve another go.
 const EXIT_CONFIG = 78;
 
-if (!DISCORD_TOKEN) {
-  log.fatal("DISCORD_TOKEN environment variable is required — see docs/INSTALL.md");
+// Two peer surfaces: Discord and Paperclip boards, declared by BOT_SURFACES
+// (lib/surfaces.js). Unset, the bot is on Discord, with any board as an
+// addition. Paperclip-only is declared (BOT_SURFACES=paperclip), never inferred
+// from a missing DISCORD_TOKEN: a Discord bot that lost its token must refuse
+// to start, not come up deaf on Discord and report ready. With Discord off the
+// client is never built or logged in. Which boards are usable is settled in
+// full at the Paperclip block below (a board whose policy cannot be held is
+// off); here it is only whether any is configured at all.
+const { boards: CONFIGURED_BOARDS, problems: PAPERCLIP_PROBLEMS } = paperclipBoards(process.env);
+const SURFACES = botSurfaces(process.env, CONFIGURED_BOARDS.length);
+if (SURFACES.errors.length) {
+  if (SURFACES.paperclipRequired) for (const problem of PAPERCLIP_PROBLEMS) log.error(`Paperclip board off — ${problem}`);
+  for (const error of SURFACES.errors) log.fatal(error);
   process.exit(EXIT_CONFIG);
 }
+for (const note of SURFACES.notes) log.warn(note);
+const DISCORD_ON = SURFACES.discord;
+const PAPERCLIP_BOARDS = SURFACES.paperclip ? CONFIGURED_BOARDS : [];
+if (!DISCORD_ON) log.info("Discord off — Paperclip-only: BOT_SURFACES=paperclip, so this bot answers on its Paperclip board(s) alone");
 
 // A bot pointed at a directory that does not exist used to start happily and then
 // fail on the first message with a spawn error naming neither the variable nor the
@@ -702,19 +718,37 @@ const PID_FILE = join(__dirname, `.${BOT_NAME}.pid`);
 })();
 
 // --- Readiness marker ---
+// Ready means every surface this bot runs is up: Discord once it says ready (if
+// on), and each Paperclip board once its first poll succeeds (if on). Per-surface
+// state is kept beside the marker, so doctor:fleet can say which one is not.
 // "A process exists" is not "the bot works": a failed Discord login leaves the
 // process alive (the WS server and scheduler keep the event loop busy), so PID
 // checks reported a permanently deaf bot as healthy. This file is written only
 // once Discord says ready, and removed on the way out, so `status` can tell
 // connected apart from merely running.
 const READY_FILE = join(__dirname, `.${BOT_NAME}.ready`);
+const SURFACES_FILE = join(__dirname, `.${BOT_NAME}.surfaces.json`);
+const surfaces = { discord: DISCORD_ON ? "not ready" : "off", boards: {} };
 function markReady() {
   try { writeFileSync(READY_FILE, String(Date.now())); } catch { /* non-fatal */ }
 }
 function clearReady() {
   try { unlinkSync(READY_FILE); } catch { /* already gone */ }
+  try { unlinkSync(SURFACES_FILE); } catch { /* already gone */ }
+}
+function writeSurfaces() {
+  try { writeFileSync(SURFACES_FILE, JSON.stringify({ pid: process.pid, ...surfaces })); } catch { /* non-fatal */ }
+}
+/** Record one surface's state; the marker is written once every surface is ready. */
+function setSurface(kind, state, board) {
+  if (kind === "board") surfaces.boards[board] = state;
+  else surfaces.discord = state;
+  writeSurfaces();
+  const all = [...(surfaces.discord === "off" ? [] : [surfaces.discord]), ...Object.values(surfaces.boards)];
+  if (all.length && all.every((s) => s === "ready") && !existsSync(READY_FILE)) markReady();
 }
 clearReady();
+writeSurfaces();
 
 // Ensure directories exist
 mkdirSync(HISTORY_DIR, { recursive: true });
@@ -764,6 +798,10 @@ const SIGNAL_DATA_MAX = envInt("BRIDGE_SIGNAL_DATA_MAX", 2000, { min: 0 });
 // must always name the channel it was dropped for.
 async function resolveBridgeChannel(channelId, ctx) {
   if (!channelId) return null;
+  if (!client) {
+    log.error({ ...ctx, channelId }, "Discord is off — bridge message for a Discord channel dropped");
+    return null;
+  }
   const cached = client.channels.cache.get(channelId);
   if (cached) return cached;
   try {
@@ -902,7 +940,7 @@ wss.on("connection", (ws) => {
       // Cosmetic, and deliberately not routed through resolveBridgeChannel: an
       // unreachable channel is already reported by the response that follows,
       // and typing fires often enough to bury that line in duplicates.
-      const channel = client.channels.cache.get(msg.channelId);
+      const channel = client?.channels.cache.get(msg.channelId);
       if (channel) {
         try { await channel.sendTyping(); } catch { /* ignore */ }
       }
@@ -1130,7 +1168,7 @@ function recordBotResponse(channelName, responseText) {
     text = `${text.substring(0, BUFFER_TRUNCATE_RESPONSE)}... [truncated, ${fullLength} chars total]`;
   }
 
-  const botName = client.user ? (client.user.username || client.user.tag) : "Bot";
+  const botName = client ? (client.user ? (client.user.username || client.user.tag) : "Bot") : BOT_NAME;
   const line = formatBufferLine(channelName, botName, text, null);
   appendToBuffer(line);
 }
@@ -1314,7 +1352,8 @@ setInterval(() => {
 }, envInt("BOT_BOT_EXCHANGE_PRUNE_MS", 600000, { min: 1000 }));
 
 // --- Discord client ---
-const client = new Client({
+// Null when Discord is off (no DISCORD_TOKEN): nothing below may assume it.
+const client = DISCORD_ON ? new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
@@ -1324,19 +1363,19 @@ const client = new Client({
     GatewayIntentBits.DirectMessageReactions,
   ],
   partials: [Partials.Channel, Partials.Message, Partials.Reaction],
-});
+}) : null;
 
 // --- WebSocket crash resilience ---
-client.on("error", (err) => {
+client?.on("error", (err) => {
   log.error({ err: err.message }, "Discord client error");
 });
 
-client.on("shardError", (err) => {
+client?.on("shardError", (err) => {
   log.error({ err: err.message }, "Discord WebSocket error");
 });
 
-client.once("ready", () => {
-  markReady();
+client?.once("ready", () => {
+  setSurface("discord", "ready");
   log.info({ tag: client.user.tag, cwd: CLAUDE_CWD, maxTurns: CODEX ? null : CLAUDE_MAX_TURNS || "unlimited", timeoutMs: CLAUDE_TIMEOUT_MS }, "Bot online");
   const shadowed = shadowedCommands();
   if (shadowed.length) {
@@ -1356,7 +1395,7 @@ client.once("ready", () => {
   );
 });
 
-client.on("messageCreate", async (msg) => {
+client?.on("messageCreate", async (msg) => {
   // Skip own messages (bot responses are recorded via recordBotResponse)
   if (msg.author.id === client.user?.id) return;
 
@@ -1548,7 +1587,7 @@ if (REACTION_HANDLER_ENABLED && ALLOWED_USER_IDS.length === 0) {
 
 const reactionInFlight = new Set();
 
-if (REACTION_HANDLER_ENABLED && ALLOWED_USER_IDS.length > 0) {
+if (client && REACTION_HANDLER_ENABLED && ALLOWED_USER_IDS.length > 0) {
   client.on("messageReactionAdd", async (reaction, user) => {
     try {
       if (reaction.partial) await reaction.fetch();
@@ -2629,7 +2668,9 @@ async function runSummarizer() {
   summarizing = false;
 }
 
-if (SUMMARIZE_INTERVAL_MS > 0) {
+if (SUMMARIZE_INTERVAL_MS > 0 && !client) {
+  log.info("Background summarizer off — it reads Discord history, and Discord is off");
+} else if (SUMMARIZE_INTERVAL_MS > 0) {
   setTimeout(() => {
     runSummarizer();
     setInterval(runSummarizer, SUMMARIZE_INTERVAL_MS);
@@ -2878,6 +2919,19 @@ function shouldRunNow(cron, lastRunKey, tz = BOT_TIMEZONE) {
 // longer than the check interval would otherwise stack overlapping ticks.
 let schedulerRunning = false;
 
+// Every scheduled job posts to a Discord channel. With Discord off such a job
+// cannot run; it is refused when it is loaded (once, logged), never left to fail
+// at its minute. It stays in the file, so turning Discord on brings it back.
+const refusedJobs = new Set();
+function refusedForDiscordOff(job) {
+  if (client) return false;
+  if (!refusedJobs.has(job.id)) {
+    refusedJobs.add(job.id);
+    log.warn({ id: job.id, channel: job.channel }, "Scheduled job refused — it posts to a Discord channel and Discord is off; kept in the file for when Discord is on");
+  }
+  return true;
+}
+
 /**
  * Post a job's output. The suppression is here rather than in the caller because
  * the decision is deterministic and must apply to every kind of scheduled run.
@@ -2917,6 +2971,7 @@ function jobChannelSender(channel, jobLog, jobId) {
 // signal path needs it: the sender's ack waited out the whole Claude run, so a
 // notifier's 5s timeout reported "is it running?" on a signal that had landed.
 async function runWakeJob(job, sLog, explicitRelease = null, { detach = false } = {}) {
+  if (refusedForDiscordOff(job)) return false;
   const due = Date.parse(job.runAt);
   if (!Number.isFinite(due)) {
     sLog.error({ id: job.id, runAt: job.runAt }, "Wake job has an unreadable runAt — removing rather than retrying it every tick");
@@ -3015,6 +3070,7 @@ async function runScheduledJobs() {
     sLog.debug({ jobs: schedules.length, ids: schedules.map(j => j.id) }, "Scheduler check");
 
     for (const job of schedules) {
+      if (refusedForDiscordOff(job)) continue;
       if (isWakeJob(job)) {
         await runWakeJob(job, sLog);
         continue;
@@ -3092,6 +3148,7 @@ function validateSchedulesOnStartup() {
     return;
   }
   for (const job of schedules) {
+    if (refusedForDiscordOff(job)) continue;
     if (isWakeJob(job)) {
       const at = Date.parse(job.runAt);
       log.info(
@@ -3118,8 +3175,8 @@ setInterval(runScheduledJobs, SCHEDULE_CHECK_MS);
 // Tasks assigned to this bot on a Paperclip board, answered through the same
 // run path as Discord (see lib/paperclip.js). Off unless a board is configured:
 // PAPERCLIP_URL with PAPERCLIP_API_KEY, plus any PAPERCLIP_EXTRA_BOARDS.
-const { boards: PAPERCLIP_BOARDS, problems: PAPERCLIP_PROBLEMS } = paperclipBoards(process.env);
-for (const problem of PAPERCLIP_PROBLEMS) log.warn(`Paperclip board off — ${problem}`);
+// PAPERCLIP_BOARDS is read at the start gate.
+if (SURFACES.paperclip) for (const problem of PAPERCLIP_PROBLEMS) log.warn(`Paperclip board off — ${problem}`);
 // The sandbox binds the working directory writable over its read denials, so a
 // CLAUDE_CWD that is the harness or state folder (or inside one) would open the
 // harness secrets file and the Discord stores to a board shell. Such a bot
@@ -3135,7 +3192,15 @@ if (PAPERCLIP_BOARDS.length && PAPERCLIP_CWD_DENIED) {
   log.error({ cwd: CLAUDE_CWD }, "Paperclip connector off — CLAUDE_CWD is the harness or state folder, or inside one, which a board run cannot keep closed; point it at the folder board tasks should read");
 } else if (PAPERCLIP_BOARDS.length && BOARD_POLICY_PROBLEMS.length) {
   for (const problem of BOARD_POLICY_PROBLEMS) log.error(`Paperclip connector off — ${problem}`);
-} else {
+}
+// A bot that declares Paperclip needs its connector on: off, it is not the bot
+// it says it is, and no restart changes that.
+if (SURFACES.paperclipRequired && (PAPERCLIP_CWD_DENIED || BOARD_POLICY_PROBLEMS.length)) {
+  log.fatal(`BOT_SURFACES includes paperclip, so ${PAPERCLIP_PREREQUISITE}. The connector is configured but off (see the error above).`);
+  clearReady();
+  process.exit(EXIT_CONFIG);
+}
+if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.length) {
   if (PAPERCLIP_BOARDS.length) {
     const { execution, source, tools, allow, readPaths, writePaths, network } = BOARD_POLICY;
     // On Codex the tool names are not used: the run is the profile in lib/runtime/codex.js.
@@ -3163,6 +3228,7 @@ if (PAPERCLIP_BOARDS.length && PAPERCLIP_CWD_DENIED) {
     // The first board keeps the names it has always had, so its answered asks
     // and task sessions carry over; an extra board gets its own.
     const tag = board.id ? `paperclip-${board.id}` : "paperclip";
+    setSurface("board", "not ready", tag);
     const poller = createPaperclipPoller({
       url: board.url,
       apiKey: board.apiKey,
@@ -3170,6 +3236,8 @@ if (PAPERCLIP_BOARDS.length && PAPERCLIP_CWD_DENIED) {
       log: pLog,
       resumeInterrupted: process.env.PAPERCLIP_RESUME_INTERRUPTED === "1",
       externalWriter,
+      // The first poll that reaches the board makes it a ready surface.
+      onPoll: () => { if (surfaces.boards[tag] !== "ready") { setSurface("board", "ready", tag); pLog.info("Paperclip board ready — first poll succeeded"); } },
       // One session per task, so a reply on the task continues its conversation.
       answer: (prompt, issue) => {
         const reply = replyCollector();
@@ -3193,14 +3261,14 @@ process.on("unhandledRejection", (reason) => {
 process.on("SIGINT", () => {
   log.info("Shutting down...");
   clearReady();
-  client.destroy();
+  client?.destroy();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
   log.info("Shutting down...");
   clearReady();
-  client.destroy();
+  client?.destroy();
   process.exit(0);
 });
 
@@ -3209,7 +3277,8 @@ process.on("SIGTERM", () => {
 // forever because the WS server and scheduler keep the event loop busy. The
 // result was a bot that reported "started" and "running" while being
 // permanently deaf, which is the worst failure mode we can hand a new user.
-client.login(DISCORD_TOKEN).catch((err) => {
+// Discord off: no client, so no login — the boards above are the bot's surfaces.
+if (client) client.login(DISCORD_TOKEN).catch((err) => {
   clearReady();
   // A rejected token is permanent by definition — it is the same token next time.
   // Discord.js reports it as code TokenInvalid; the message check stays as a
