@@ -496,6 +496,20 @@ check("a board session made under other access is not resumed, on either runtime
   assert.match(src, /\.\.\.\(opts\.access \? \{ access: opts\.access \} : \{\}\),/, "a stored session does not record its access");
 });
 
+check("narrowing a parity run's tools, allow or deny rules opens a fresh board session", () => {
+  const { boardAccessKey } = require("../lib/permission-mode");
+  const parity = resolveBoardPolicy({ BOT_BOARD_EXECUTION: "parity" });
+  const base = { kind: boardRunKind(parity), policy: parity, permissionMode: "restricted", settings: null, tools: "Read,Bash", allow: "Bash(gh issue edit:*)", deny: "" };
+  for (const change of [{ tools: "Read" }, { allow: "" }, { deny: "Bash(gh *--repo*)" }]) {
+    assert.notStrictEqual(boardAccessKey({ ...base, ...change }), boardAccessKey(base), Object.keys(change)[0]);
+  }
+  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  const body = src.slice(src.indexOf("function boardAccess()"), src.indexOf("\n}\n", src.indexOf("function boardAccess()")));
+  for (const input of ["ALLOWED_TOOLS", "PERMISSION_ALLOW", "PERMISSION_DENY"]) {
+    assert.match(body, new RegExp(`\\b${input}\\b`), `a board session survives a change to ${input}`);
+  }
+});
+
 check("credential files under the folders the bot's settings open to reading are denied to a board run", () => {
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
   assert.match(src, /const roots = \[CLAUDE_CWD, \.\.\.BOARD_POLICY\.readPaths, \.\.\.BOARD_POLICY\.writePaths, \.\.\.\(botSettings\(\)\?\.sandbox\?\.filesystem\?\.allowRead \?\? \[\]\)\];/);
@@ -518,8 +532,15 @@ check("a parity run withholds only the Discord credentials, and still sees no ot
   }
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
   assert.match(src, /if \(opts\.noBufferContext && !narrowBoard\) \{\s*for \(const name of Object\.keys\(cleanEnv\)\) if \(withheldFromParityBoard\(name\)\) delete cleanEnv\[name\];/);
-  // The Paperclip connector keys are removed from every run, Discord's included.
-  assert.match(src, /for \(const \{ keyEnv \} of PAPERCLIP_BOARDS\) delete cleanEnv\[keyEnv\];/);
+  // The Paperclip connector keys are removed from every run, Discord's included,
+  // before a Codex MCP server's env goes back in for the servers that name them;
+  // the model's commands are kept from them (shellExclude).
+  assert.match(src, /\["PAPERCLIP_API_KEY", \.\.\.PAPERCLIP_BOARDS\.map\(\(b\) => b\.keyEnv\)\]/);
+  const removed = src.indexOf("for (const name of connectorKeys()) delete cleanEnv[name];");
+  const restored = src.indexOf("if (!narrowBoard && CODEX_MCP) Object.assign(cleanEnv,");
+  assert.ok(removed > 0 && restored > removed, "a Codex MCP server loses the connector key its config names");
+  assert.ok(!/delete cleanEnv\.PAPERCLIP_API_KEY|delete cleanEnv\[keyEnv\]/.test(src), "a connector key is removed after the MCP env is put back");
+  assert.match(src, /shellExclude: connectorKeys\(\),/, "a bypass Codex session's commands can read the connector keys");
   // Other channels' conversation stays out of the prompt in every board policy.
   assert.match(src, /opts\.noBufferContext \? "" : buildContextPrompt/);
 });

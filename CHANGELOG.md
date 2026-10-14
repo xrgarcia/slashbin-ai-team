@@ -32,8 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still the ask already answered, across a restart too.
 - **A board session made under other access is not resumed.** Each stored board
   session records the access it was made with (run kind, board policy,
-  permission mode, the bot's settings); after any change the next ask starts
-  fresh, on both runtimes.
+  permission mode, the bot's settings, and its tools, allow and deny rules);
+  after any change the next ask starts fresh, on both runtimes.
+- **A Codex session's MCP servers keep the Paperclip keys their config names.**
+  The connector keys (`PAPERCLIP_API_KEY` and each extra board's) were removed
+  after the servers' environment was set, so a server that named one ran
+  without it. They now reach that server, in Discord and parity board runs,
+  and are still excluded from every command the model runs.
 - **Credential files under the folders the bot's settings open to reading are
   denied to a board run**, as those under the working directory already were.
 - **A blocked answer is never left waiting on tasks already done.** When the last

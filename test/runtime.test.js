@@ -158,6 +158,16 @@ check("a narrow run's commands see only the core environment, never the bot's ke
   assert.ok(!has(cx.codexArgs({ kind: "session", mode: "bypass", prompt: "p" }), "shell_environment_policy"));
 });
 
+check("a bypass session's commands never see a connector key its MCP servers are handed", () => {
+  const mcp = { board: { command: "board-mcp", env_vars: ["BOARD_KEY", "EXTRA_BOARD_KEY"] } };
+  const args = cx.codexArgs({ kind: "session", mode: "bypass", mcp, shellExclude: ["BOARD_KEY", "EXTRA_BOARD_KEY"], prompt: "p" });
+  assert.strictEqual(value(args, "shell_environment_policy.exclude"), '["BOARD_KEY","EXTRA_BOARD_KEY"]');
+  assert.strictEqual(value(args, "mcp_servers.board"), '{"command"="board-mcp","env_vars"=["BOARD_KEY","EXTRA_BOARD_KEY"]}');
+  // A narrow run's commands already see only the core variables.
+  const narrow = cx.codexArgs({ kind: "board", releaseDir, filesystem: boardFs("readonly"), shellExclude: ["BOARD_KEY"], prompt: "p" });
+  assert.ok(!has(narrow, "shell_environment_policy.exclude"));
+});
+
 check("instructions that would pass the kernel's limit are cut at the tail, still one valid string", () => {
   const args = cx.codexArgs({ kind: "board", releaseDir, filesystem: boardFs("readonly"), instructions: "\"x\"\n".repeat(60000), prompt: "p" });
   const arg = configs(args).find((c) => c.startsWith("developer_instructions="));

@@ -771,7 +771,8 @@ const poller = (b, answer) => createPaperclipPoller({
   await check("bot.js: board runs never see the buffer, and the key never reaches Claude", () => {
     assert.match(bot, /noBufferContext: true/);
     assert.match(bot, /opts\.noBufferContext \? "" : buildContextPrompt/);
-    assert.match(bot, /delete cleanEnv\.PAPERCLIP_API_KEY/);
+    assert.match(bot, /\["PAPERCLIP_API_KEY", \.\.\.PAPERCLIP_BOARDS\.map\(\(b\) => b\.keyEnv\)\]/);
+    assert.match(bot, /for \(const name of connectorKeys\(\)\) delete cleanEnv\[name\];/);
   });
 
   await check("a file the run made is named as not delivered, never left to read as attached", () => {
@@ -836,7 +837,7 @@ const poller = (b, answer) => createPaperclipPoller({
   });
 
   await check("bot.js: every board's key is kept from Claude, and an extra board has its own state and sessions", () => {
-    assert.match(bot, /for \(const \{ keyEnv \} of PAPERCLIP_BOARDS\) delete cleanEnv\[keyEnv\]/);
+    assert.match(bot, /\.\.\.PAPERCLIP_BOARDS\.map\(\(b\) => b\.keyEnv\)/);
     assert.match(bot, /const tag = board\.id \? `paperclip-\$\{board\.id\}` : "paperclip";/);
     assert.match(bot, /stateFile: join\(STATE_DIR, `\$\{tag\}\.json`\)/);
     assert.match(bot, /runClaude\(prompt, `\$\{tag\}-\$\{issue\.identifier\}`/);

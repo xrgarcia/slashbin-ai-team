@@ -233,10 +233,20 @@ function settingsArgs({ board = false, tmpDir = null } = {}) {
   // top of the bot's own settings.
   return ["--settings", JSON.stringify(boardSettings(botSettings(), boardReadDeniedPaths(), CLAUDE_CWD, { ...BOARD_POLICY, tmpDir }))];
 }
+// The Paperclip connector keys: every board's, not only the first — an extra
+// board names its own.
+function connectorKeys() {
+  return [...new Set(["PAPERCLIP_API_KEY", ...PAPERCLIP_BOARDS.map((b) => b.keyEnv)])];
+}
 // What a board run's session is made with (boardAccessKey): one made under
-// other access is never resumed.
+// other access is never resumed. Every permission input counts — a parity run
+// takes the bot's tools, allow and deny rules, and narrowing any of them must
+// not leave a session that was opened under the wider ones.
 function boardAccess() {
-  return boardAccessKey({ kind: BOARD_KIND, policy: BOARD_POLICY, permissionMode: PERMISSION_MODE, settings: botSettings() });
+  return boardAccessKey({
+    kind: BOARD_KIND, policy: BOARD_POLICY, permissionMode: PERMISSION_MODE, settings: botSettings(),
+    tools: ALLOWED_TOOLS, allow: PERMISSION_ALLOW, deny: PERMISSION_DENY,
+  });
 }
 
 // MCP_CONFIG adds servers; it does not remove the host's. MCP_CONFIG_STRICT=true
@@ -2093,6 +2103,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
         packs,
         mcp: CODEX_MCP?.servers,
         strictMcp: Boolean(CODEX_MCP?.strict),
+        shellExclude: connectorKeys(),
       }));
       reqLog.info({ ...(resumeSessionId ? { sessionId: resumeSessionId } : {}), ...attachmentLog }, resumeSessionId ? "Resuming Codex session" : "Starting fresh Codex session");
     } else if (resumeSessionId) {
@@ -2133,19 +2144,20 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     // A board or restricted run reads no settings file (permissionArgs); its
     // CLAUDE.md comes in through --add-dir, which loads one only with this set.
     if (narrowBoard || PERMISSION_MODE === "restricted") cleanEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";
+    // The Paperclip connector keys leave every run, Discord's included…
+    for (const name of connectorKeys()) delete cleanEnv[name];
     if (CODEX) {
       // Skills name their scripts under $CLAUDE_PLUGIN_ROOT, which Claude sets
       // for a plugin; Codex has no plugin folder, so the harness sets it.
       if (skillPacks().includes(SKILL_PACK)) cleanEnv.CLAUDE_PLUGIN_ROOT = SKILL_PACK;
       // A bypass session's MCP servers read their keys from here (codexMcp).
       // A parity board run's: never one that puts back a withheld credential.
+      // …except where a server names one: Codex hands it to that server and
+      // keeps it out of every command (shellExclude).
       if (!narrowBoard && CODEX_MCP) Object.assign(cleanEnv, opts.noBufferContext ? parityMcpEnv(CODEX_MCP.env) : CODEX_MCP.env);
     }
 
     delete cleanEnv.CLAUDECODE;
-    delete cleanEnv.PAPERCLIP_API_KEY;
-    // Every board's key, not only the first: an extra board names its own.
-    for (const { keyEnv } of PAPERCLIP_BOARDS) delete cleanEnv[keyEnv];
     delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
     delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
     delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
