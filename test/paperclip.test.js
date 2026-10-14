@@ -586,6 +586,62 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.strictEqual(b.writes.length, 2, "the re-wake was acknowledged twice");
   });
 
+  await check("each re-wake of an answered card ends on a note, and the card keeps only the newest (SLA-1361)", async () => {
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    const b = board({ runs: running, comments, wakeCommentId: "w" });
+    let runs = running, n = 0;
+    const deleted = [];
+    const fetch = async (url, init) => {
+      const path = url.replace(/^.*\/api/, "");
+      if (path === "/issues/iss-1/runs") return { ok: true, text: async () => JSON.stringify(runs) };
+      if (/^\/heartbeat-runs\/run-[23]$/.test(path)) return { ok: true, text: async () => JSON.stringify({ contextSnapshot: {} }) };
+      if (init.method === "DELETE") {
+        const c = comments.find((x) => path === `/issues/iss-1/comments/${x.id}`);
+        deleted.push([init.headers["x-paperclip-run-id"], c.id]);
+        c.deletedAt = "2026-01-02T00:09:00Z";
+        return { ok: true, text: async () => "{}" };
+      }
+      if (init.method === "PATCH") comments.push({ id: `c${++n}`, authorAgentId: ME.id, createdByRunId: init.headers["x-paperclip-run-id"], createdAt: `2026-01-02T00:0${n}:00Z`, body: JSON.parse(init.body).comment });
+      return b.fetch(url, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: async () => "the answer" });
+    await make().tick();
+    runs = [{ id: "run-2", agentId: ME.id, status: "running" }];
+    await make().tick();
+    runs = [{ id: "run-3", agentId: ME.id, status: "running" }];
+    await make().tick();
+    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer"], ["run-2", ALREADY_ANSWERED], ["run-3", ALREADY_ANSWERED]],
+      "every run still ends on a comment of its own");
+    assert.deepStrictEqual(deleted, [["run-3", "c2"]], "the earlier note is taken down under the live run; the answer never is");
+    assert.deepStrictEqual(comments.filter((c) => !c.deletedAt).map((c) => c.body), ["ask", "the answer", ALREADY_ANSWERED]);
+  });
+
+  await check("a note is never taken down once someone has said something after it", async () => {
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    const b = board({ runs: running, comments, wakeCommentId: "w" });
+    let runs = running, n = 0;
+    const fetch = async (url, init) => {
+      const path = url.replace(/^.*\/api/, "");
+      if (path === "/issues/iss-1/runs") return { ok: true, text: async () => JSON.stringify(runs) };
+      if (/^\/heartbeat-runs\/run-[23]$/.test(path)) return { ok: true, text: async () => JSON.stringify({ contextSnapshot: {} }) };
+      if (init.method === "DELETE") assert.fail("took down a note someone had answered after");
+      if (init.method === "PATCH") comments.push({ id: `c${++n}`, authorAgentId: ME.id, createdByRunId: init.headers["x-paperclip-run-id"], createdAt: `2026-01-02T00:0${n}:00Z`, body: JSON.parse(init.body).comment });
+      return b.fetch(url, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: async () => "the answer" });
+    await make().tick();
+    runs = [{ id: "run-2", agentId: ME.id, status: "running" }];
+    await make().tick();
+    // Another agent's comment lands after the note: it is not an ask of this bot's to answer again.
+    comments.push({ id: "o", authorAgentId: "agent-other", createdAt: "2026-01-02T00:05:00Z", body: "noted" });
+    runs = [{ id: "run-3", agentId: ME.id, status: "running" }];
+    await make().tick();
+  });
+
   await check("a bot that dies mid-answer does not run the ask again after a restart", async () => {
     // Second-pass review of 2.7.0: the attempt was saved only after the run, so
     // a crash in between ran the ask twice — a second email, a second record.
