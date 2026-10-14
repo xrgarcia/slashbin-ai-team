@@ -7,7 +7,7 @@ const assert = require("assert");
 const { mkdtempSync, readFileSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, statusSetter, reconcilable, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY } = require("../lib/paperclip");
+const { createPaperclipPoller, statusSetter, reconcilable, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY, HELD_NOTE } = require("../lib/paperclip");
 
 let pass = 0, fail = 0;
 async function check(label, fn) {
@@ -61,7 +61,13 @@ function board(tasks) {
     if (m[2] === "/runs") return ok(runs.get(i.id));
     return { ok: false, status: 404, text: async () => "" };
   };
-  return { fetch, writes, issues, runs, setStatus,
+  // Blocking a task that is already blocked changes no status string: Paperclip
+  // records it as a new statusVersion and the wait's new owner, nothing more.
+  const reassert = (id, actor) => {
+    activity.get(id).unshift({ action: "issue.updated", ...actor, details: { status: "blocked",
+      changes: { statusVersion: { from: 1, to: 2 }, unblockDescriptor: { from: null, to: { owner: { userId: actor.actorId } } } } } });
+  };
+  return { fetch, writes, issues, runs, comments, setStatus, reassert,
     recover: (id, runId) => { activity.get(id).unshift({ action: "issue.execution_recovery_settled", actorType: "system", actorId: "execution-recovery", runId, details: { outcome: "blocked" } }); issues.get(id).status = "blocked"; } };
 }
 const task = (id, extra = {}) => ({ id, identifier: id.toUpperCase(), status: "in_progress", assigneeAgentId: ME.id, ...extra });
@@ -205,6 +211,36 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       await poller(b, async () => { b.setStatus("t-1", "blocked", PERSON); await new Promise((r) => setTimeout(r, 40)); return "x"; }, { watchMs: 5 }).tick();
       assert.ok(!b.writes.some((x) => x.body.comment === TRANSPORT_NOTE), "the transport note moved a person's block");
     }
+  });
+
+  await check("case 5, checked out: a person's stop that Paperclip's wake checked out with no record still stands", async () => {
+    // A person re-blocks a task the bot had blocked on its wait; then the wait comes done.
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let ran = 0;
+    let b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
+    await poller(b, async () => { ran++; return `Need T-2.\n${OUTCOME_MARK} blocked on T-2`; }, { stateFile }).tick();
+    assert.strictEqual(b.issues.get("t-1").status, "blocked");
+    b.reassert("t-1", PERSON);
+    b.setStatus("t-2", "done", PERSON);
+    b.runs.set("t-1", run("r2"));
+    b.issues.get("t-1").status = "in_progress";        // the wake's checkout, unrecorded
+    const before = b.writes.length;
+    await poller(b, async () => { ran++; return "resumed"; }, { stateFile }).tick();
+    const after = b.writes.slice(before);
+    assert.strictEqual(ran, 1, "the held task was worked");
+    assert.deepStrictEqual(after.map((x) => x.body), [{ comment: HELD_NOTE }]);
+    assert.strictEqual(after[0].runId, "r2");
+    // A person's block, checked out by a later wake that carries a new comment.
+    b = board([task("t-1", { runs: run("r1") })]);
+    b.setStatus("t-1", "blocked", PERSON);
+    b.issues.get("t-1").status = "in_progress";
+    b.comments.get("t-1").push({ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "holding this" });
+    await poller(b, async () => assert.fail("ran")).tick();
+    assert.deepStrictEqual(b.writes.map((x) => x.body), [{ comment: HELD_NOTE }]);
+    // A person blocks it mid-answer and a wake checks it out before the answer lands: comment only.
+    b = board([task("t-1", { runs: run("r1") })]);
+    await poller(b, async () => { b.setStatus("t-1", "blocked", PERSON); b.issues.get("t-1").status = "in_progress"; return "done it"; }).tick();
+    assert.ok(b.writes.length && b.writes.every((x) => !x.body.status), JSON.stringify(b.writes));
   });
 
   await check("case 6: a task another writer owns gets the comment, never a status", async () => {

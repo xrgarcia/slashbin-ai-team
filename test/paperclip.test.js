@@ -256,7 +256,7 @@ const poller = (b, answer) => createPaperclipPoller({
           return { ok: true, text: async () => "{}" };
         }
         const routes = { "/agents/me": ME, "/agents/me/inbox-lite": [{ id: "iss-1" }], "/issues/iss-1": issue,
-          "/issues/iss-1/comments": comments, "/issues/iss-1/runs": running };
+          "/issues/iss-1/comments": comments, "/issues/iss-1/runs": running, "/issues/iss-1/activity": [] };
         return path in routes ? { ok: true, text: async () => JSON.stringify(routes[path]) } : { ok: false, status: 404, text: async () => "" };
       };
       const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
