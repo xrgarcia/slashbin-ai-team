@@ -479,8 +479,16 @@ check("parity runs a Paperclip task as the bot's Discord session", () => {
   assert.match(src, /const narrowBoard = runKind === "board";/);
   assert.match(src, /kind: runKind,/, "the Codex run ignores the board policy");
   assert.match(src, /filesystem: narrowBoard \? codexRuntime\.boardFilesystem\(/);
-  assert.match(src, /if \(!narrowBoard && CODEX_MCP\) Object\.assign\(cleanEnv, CODEX_MCP\.env\);/, "a parity Codex run lost its MCP keys");
+  assert.match(src, /if \(!narrowBoard && CODEX_MCP\) Object\.assign\(cleanEnv, opts\.noBufferContext \? parityMcpEnv\(CODEX_MCP\.env\) : CODEX_MCP\.env\);/, "a parity Codex run lost its MCP keys, or gets them unscrubbed");
   assert.match(src, /CODEX && !BOARD_POLICY\.parity \? codexRuntime\.codexBoardProblems/);
+});
+
+check("a parity run's MCP env never puts back a withheld credential, by name or by value", () => {
+  const { parityMcpEnv } = require("../lib/permission-mode");
+  const env = { DISCORD_TOKEN: "tok-123", OTHER: "fine" };
+  const out = parityMcpEnv({ DISCORD_TOKEN: "tok-123", TOKEN: "tok-123", AUTH: "Bot tok-123", API_KEY: "k-1", EMPTY: "" }, env);
+  assert.deepStrictEqual(out, { API_KEY: "k-1", EMPTY: "" });
+  for (const name of DISCORD_CREDENTIAL_ENV) assert.ok(!(name in parityMcpEnv({ [name]: "x" }, {})), `${name} restored by name`);
 });
 
 check("a parity run withholds only the Discord credentials, and still sees no other channel", () => {

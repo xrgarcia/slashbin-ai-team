@@ -21,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A blocked answer is never left waiting on tasks already done.** When the last
+  task it named finishes just before the block is posted, or before a saved
+  answer's post is retried, nothing is written: the work goes on once, told what
+  the answer said so nothing done is done again, and the card closes from the
+  result. A person's stop still holds it.
+- **A person's stop holds a mirrored task too.** A task another writer owns is
+  no longer worked after a person blocks or cancels it; a block its own writer
+  sets for the bot to clear is still worked.
+- **A parity board run's MCP servers never put back the Discord credentials.**
+  A Codex server env entry naming a withheld variable, or carrying its value
+  under another name, is left out of that run.
 - **A Paperclip card stays true after handoffs, lost runs and restarts.** A
   task that waits on others is blocked by exactly the tasks it names, its wait
   is trimmed as each one finishes, and when the last is done the same card

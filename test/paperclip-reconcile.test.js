@@ -500,6 +500,56 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(b.issues.get("t-1").status, "done");
   });
 
+  await check("the last task waited on finishes just before the block is posted: not blocked on nothing — the work goes on", async () => {
+    const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
+    // T-2 is read once after the answer, then finishes before the post reads it.
+    let reads = 0;
+    const fetch = async (url, init) => {
+      if (/\/issues\/T-2$/.test(url) && (init?.method ?? "GET") === "GET" && ++reads === 2) b.issues.get("t-2").status = "done";
+      return b.fetch(url, init);
+    };
+    const prompts = [];
+    await poller({ ...b, fetch }, async (p) => { prompts.push(p); return prompts.length === 1 ? `Need T-2.\n${OUTCOME_MARK} blocked on T-2` : "Finished."; }, { fetch }).tick();
+    assert.strictEqual(prompts.length, 2, "the work did not go on");
+    assert.match(prompts[1], /already done[\s\S]*Need T-2\./, "the second attempt was not told what the first said");
+    assert.ok(!b.writes.some((x) => x.body.status === "blocked"), JSON.stringify(b.writes));
+    assert.strictEqual(b.issues.get("t-1").status, "done");
+  });
+
+  await check("a saved blocked answer whose waits finished before its post was retried goes on, once", async () => {
+    const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let refused = false;
+    const fetch = async (url, init) => {
+      if (init?.method === "PATCH" && !refused) { refused = true; return { ok: false, status: 503, text: async () => "unavailable" }; }
+      return b.fetch(url, init);
+    };
+    const prompts = [];
+    const answer = async (p) => { prompts.push(p); return prompts.length === 1 ? `Need T-2.\n${OUTCOME_MARK} blocked on T-2` : "Finished."; };
+    await poller(b, answer, { stateFile, fetch }).tick();
+    assert.strictEqual(prompts.length, 1);
+    b.setStatus("t-2", "done", PERSON);
+    await poller(b, answer, { stateFile, fetch }).tick();
+    assert.strictEqual(prompts.length, 2, "the saved answer was posted blocked on nothing");
+    assert.strictEqual(b.issues.get("t-1").status, "done");
+    assert.match(b.writes.at(-1).body.comment, /^Need T-2\.\n\nResuming: T-2[\s\S]*Finished\.$/);
+  });
+
+  await check("a mirrored task a person stopped is not worked; one its own writer blocked still is", async () => {
+    const mirror = /^source: \S+#\d+$/;
+    let b = board([task("t-1", { description: "source: acme/app#12\nstage review", runs: run("r1") })]);
+    b.setStatus("t-1", "blocked", PERSON);
+    b.issues.get("t-1").status = "in_progress";        // the wake's checkout, unrecorded
+    await poller(b, async () => assert.fail("worked a mirrored task over a person's stop"), { externalWriter: mirror }).tick();
+    assert.deepStrictEqual(b.writes.map((x) => x.body), [{ comment: HELD_NOTE }]);
+    b = board([task("t-1", { description: "source: acme/app#12\nstage review", runs: run("r1") })]);
+    b.setStatus("t-1", "blocked", { actorType: "agent", actorId: "agent-sync" });
+    b.issues.get("t-1").status = "in_progress";
+    let n = 0;
+    await poller(b, async () => { n++; return "Cleared."; }, { externalWriter: mirror }).tick();
+    assert.strictEqual(n, 1, "a block its own writer set for the bot to clear held the bot");
+  });
+
   await check("case 6: a task another writer owns gets the comment, never a status", async () => {
     const mirror = /^source: \S+#\d+$/;
     const b = board([task("t-1", { description: "source: acme/app#12\nstage review", runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
