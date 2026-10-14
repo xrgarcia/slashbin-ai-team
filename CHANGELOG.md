@@ -59,7 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had it closed done over them. The record is read before the task, and the
   check made after the close's waits are looked up, so a change between the
   reads or during the lookups is seen; a change to what the task waits on
-  that lands as it closes is put back after.
+  that lands as it closes is put back after. A wake on an ask already answered
+  closes it as that answer left it, decided from the board as the answer was:
+  a person who moved the card to review while the bot answered used to have
+  it closed done by the next wake. An ask answered blocked keeps its card
+  blocked through those wakes — Paperclip's checkout used to leave it in
+  progress, where the finished part of its wait was never cut from the card.
 - **A board run never keeps a Discord or bridge credential under another
   name.** Bots started from one shared environment hold every bot's token
   under its own name (`EM_DISCORD_TOKEN`, `PO_DISCORD_TOKEN`, `DISCORD_BOT_KEY`…);

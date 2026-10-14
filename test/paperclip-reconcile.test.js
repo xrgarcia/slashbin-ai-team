@@ -759,6 +759,19 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       { name: "going on at once interrupted twice: run once more, then the fallback", opts: { resumeInterrupted: true },
         replies: [blockedOn("T-2"), () => new Promise(() => {})], steps: [["done", "t-2"], ["hang", "r1"], ["die", "r2"], ["retry"]], ran: 2, status: "blocked",
         check: (b) => assert.ok(b.writes.at(-1).body.comment.endsWith(FALLBACK_REPLY)) },
+      { name: "a person moves the card on mid-answer, then unchanged wakes acknowledge it: their status stands, across restarts",
+        replies: [(b) => { b.setStatus("t-1", "in_review", PERSON); return "Did it."; }], steps: [["wake", "r1"], ["wake", "r2"], ["wake", "r3"]], ran: 1, status: "in_review",
+        check: (b) => assert.ok(!b.writes.some((x) => x.body.status === "done")) },
+      { name: "an unchanged wake leaves the bot's waiting card blocked, and a wait done after it is cut from the card",
+        replies: [`Need T-2 and T-3.\n${OUTCOME_MARK} blocked on T-2, T-3`], steps: [["wake", "r1"], ["wake", "r2"], ["done", "t-2"], ["retry"]],
+        ran: 1, status: "blocked", links: ["t-3"],
+        check: (b) => {
+          assert.strictEqual(b.issues.get("t-1").status, "blocked");
+          assert.match(b.issues.get("t-1").unblockDescriptor.action, /^Waits on T-3 \(T-2 done\)/);
+        } },
+      { name: "an unchanged wake leaves a blocked answer with no waits blocked",
+        replies: [`Cannot yet.\n${OUTCOME_MARK} blocked`], steps: [["wake", "r1"], ["wake", "r2"]], ran: 1, status: "blocked",
+        check: (b) => assert.strictEqual(b.issues.get("t-1").status, "blocked") },
     ];
     for (const row of rows) {
       const b = board([task("t-1", { runs: [], ...row.start }), ...["t-2", "t-3", "t-4"].map((t) => task(t, { assigneeAgentId: null, status: "todo" }))]);
@@ -772,7 +785,8 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       const wake = (r) => {
         b.runs.set("t-1", run(r));
         const t = b.issues.get("t-1");
-        if (t.status !== "in_progress") t.status = "in_progress";   // the wake's checkout, unrecorded
+        // The wake's checkout, unrecorded: Paperclip's own, of the statuses it takes.
+        if (["todo", "backlog", "blocked"].includes(t.status)) t.status = "in_progress";
       };
       const t1 = b.issues.get("t-1");
       for (const [what, arg] of row.steps) {
@@ -809,6 +823,8 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       await row.check?.(b, prompts);
       for (const r of ["x1", "x2"]) { wake(r); await tick(); }
       assert.strictEqual(prompts.length, row.ran, `${row.name}: an unchanged wake ran it again`);
+      const after = JSON.parse(await (await b.fetch("https://board.example.com/api/issues/t-1/activity", {})).text());
+      if (row.status) assert.strictEqual(decidedStatus(t1.status, after, ME.id), row.status, `${row.name}: an unchanged wake changed the card`);
     }
   });
 
