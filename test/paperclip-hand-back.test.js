@@ -8,7 +8,7 @@ const assert = require("assert");
 const { mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, buildTaskPrompt, outcomeOf, OUTCOME_MARK } = require("../lib/paperclip");
+const { createPaperclipPoller, buildTaskPrompt, outcomeOf, OUTCOME_MARK, UNBLOCK_ACTION } = require("../lib/paperclip");
 
 let pass = 0, fail = 0;
 async function check(label, fn) {
@@ -43,6 +43,10 @@ function board({ createdBy = { createdByAgentId: "agent-po" }, handedBy = null, 
       const body = JSON.parse(init.body);
       const handing = "assigneeAgentId" in body || "assigneeUserId" in body;
       if (handing && refuseHandOff) return { ok: false, status: 403, text: async () => JSON.stringify({ error: "not allowed" }) };
+      // As the live board: no block without blockers or a note naming who unblocks it.
+      if (body.status === "blocked" && card.status !== "blocked" && !body.unblockDescriptor && !body.blockedByIssueIds?.length) {
+        return { ok: false, status: 422, text: async () => JSON.stringify({ error: "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor" }) };
+      }
       writes.push({ runId, body });
       const actor = { actorType: "agent", actorId: "agent-em" };
       if (body.status && body.status !== card.status) { record(actor, { status: { from: card.status, to: body.status } }, runId); card.status = body.status; }
@@ -79,8 +83,8 @@ const RETURNED = `Only the Product Owner can change its own routine.\n1. Fix the
     assert.strictEqual(b.writes.length, 1, JSON.stringify(b.writes));
     const [w] = b.writes;
     assert.strictEqual(w.runId, "r1");
-    assert.deepStrictEqual(w.body, { status: "blocked", blockedByIssueIds: [], assigneeAgentId: "agent-po", assigneeUserId: null,
-      comment: "Only the Product Owner can change its own routine.\n1. Fix the skill path." });
+    assert.deepStrictEqual(w.body, { status: "blocked", unblockDescriptor: { owner: { agentId: "agent-em" }, action: UNBLOCK_ACTION }, blockedByIssueIds: [],
+      assigneeAgentId: "agent-po", assigneeUserId: null, comment: "Only the Product Owner can change its own routine.\n1. Fix the skill path." });
   });
 
   await check("a task handed to the bot goes back to whoever handed it, not its creator", async () => {
