@@ -151,6 +151,13 @@ check("a summary run reads nothing, keeps nothing, loads no project instructions
   assert.ok(!has(args, "hooks.PreToolUse") && !has(args, "project_doc_fallback_filenames"));
 });
 
+check("a narrow run's commands see only the core environment, never the bot's keys; a bypass session keeps its own", () => {
+  for (const o of [{ kind: "summarizer", releaseDir }, { kind: "board", releaseDir, filesystem: boardFs("readonly") }, { kind: "session", mode: "restricted", releaseDir }]) {
+    assert.strictEqual(value(cx.codexArgs({ ...o, prompt: "p" }), "shell_environment_policy"), '{"inherit"="core"}', o.kind);
+  }
+  assert.ok(!has(cx.codexArgs({ kind: "session", mode: "bypass", prompt: "p" }), "shell_environment_policy"));
+});
+
 check("instructions that would pass the kernel's limit are cut at the tail, still one valid string", () => {
   const args = cx.codexArgs({ kind: "board", releaseDir, filesystem: boardFs("readonly"), instructions: "\"x\"\n".repeat(60000), prompt: "p" });
   const arg = configs(args).find((c) => c.startsWith("developer_instructions="));
