@@ -4,17 +4,18 @@
 
 *Product Owner, Engineering Manager, SRE — coordinating autonomously to ship software.*
 
-**Build AI employees for your business on Discord. Give each one a role, connect it to your tools, and let them work together — across one product or across an entire portfolio.**
+**Build AI employees for your business. Give each one a role, memory, your tools and a schedule; run it on Claude Code or Codex; talk to it on Discord, and optionally assign it work on a Paperclip board.**
 
 [![CI](https://github.com/xrgarcia/slashbin-ai-team/actions/workflows/ci.yml/badge.svg)](https://github.com/xrgarcia/slashbin-ai-team/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-- **Cost:** $0 marginal under your Claude Max plan. Each bot runs through the Claude Code CLI — no API charges, no SaaS subscription, no per-bot fees.
+- **Your choice of agent:** each bot runs on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or the [OpenAI Codex CLI](https://github.com/openai/codex), chosen per bot with `BOT_RUNTIME`. A bot uses only the CLI you pick — for replies, summaries, scheduled jobs and board tasks — billed however that CLI is signed in. [Runtimes →](docs/runtimes.md)
+- **Discord, plus an optional board:** people reach a bot in Discord; with [Paperclip](#paperclip) set, it also answers tasks assigned to it on a board, read-only or with engineering tools, never with access to its Discord memory.
 - **Focused context:** Each bot's `CLAUDE.md` is its job description. A PO bot loads product context, an SRE bot loads ops context. Separated context produces sharper output than one generalist juggling every role in one window.
 - **Async parallelism:** While you DM the PO, the EM bot can be reviewing a PR and the SRE bot can be watching a deploy. Multiple bots = multiple things happening at once, not role-play.
 - **Safe to leave running:** an agent that can merge a PR needs guarantees about what happens when it crashes. [See below.](#why-safe-to-leave-running)
 
-Built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI. Each bot gets full access to your codebase, MCP servers, and tools — not a chatbot wrapper, but a real AI teammate that can read code, query databases, create issues, and ship work.
+Each bot drives a real agent CLI against your codebase, MCP servers and tools — not a chatbot wrapper, but an AI teammate that can read code, query databases, create issues and ship work, as far as you allow it.
 
 ```bash
 git clone https://github.com/xrgarcia/slashbin-ai-team.git
@@ -246,24 +247,27 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 | `BOT_PERMISSION_MODE` | `restricted` | `restricted` or `bypass`. This bot only |
 | `BOT_PERMISSION_MODE_DEFAULT` | — | Host-wide default for bots that set no `BOT_PERMISSION_MODE` |
 | `BOT_ALLOWED_TOOLS` | `Read,Glob,Grep,WebFetch,WebSearch,TodoWrite` | Built-ins exposed in `restricted` |
-| `BOT_BOARD_TOOLS` | `Read,Glob,Grep` | Paperclip board runs only, in every mode: the built-in tools a board run gets |
-| `BOT_BOARD_PERMISSION_ALLOW` | *(none)* | Paperclip board runs only: permission rules pre-approved for a board run, e.g. `mcp__my-db`. A `Bash` rule here runs sandboxed to `CLAUDE_CWD` |
 | `BOT_PERMISSION_ALLOW` | *(none)* | `restricted` only: comma-separated permission rules pre-approved in `dontAsk` mode, e.g. `mcp__my-db,Bash(gh issue list:*)` |
 | `BOT_PERMISSION_DENY` | *(none)* | Comma-separated permission rules always denied; deny beats allow, e.g. `Bash(gh *--repo*)` to keep an allowed `gh` command on one repo. Honoured in `bypass` too: nothing prompts, but a denied tool or path stays denied |
 | `BOT_SETTINGS` | *(none)* | Claude Code settings (a path or inline JSON) passed to every session with `--settings`, which the repository's own settings cannot loosen. E.g. a shell sandbox for a `bypass` bot: `{"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"filesystem":{"denyRead":["~/"],"allowRead":["/srv/bot-repo"]}}}`. Invalid inline JSON stops the bot at startup |
 | `BOT_MAIL_ALLOWED_RECIPIENTS` | *(none)* | With the claude.ai Gmail `send_message` tool allowed: the only addresses it may send to, in to, cc or bcc. Set, the pack's mail gate also refuses drafts, replies and unknown arguments, and fails closed. Unset, sends are not checked |
 | `BOT_MAIL_SUBJECT_PREFIX` | *(none)* | With `BOT_MAIL_ALLOWED_RECIPIENTS` set: every sent subject must start with this, e.g. `Bot:` |
 | `BOT_CALENDAR_NO_ATTENDEES` | *(none)* | `true`: the pack's calendar gate checks the claude.ai Google Calendar `create_event`, `update_event` and `delete_event`. It refuses any attendee, any calendar but `primary`, unknown arguments, and an update or delete without `notificationLevel: "NONE"`, and fails closed. It cannot see an existing event's guests or title. Unset, calendar writes are not checked |
+| `BOT_CALENDAR_OWN_EVENTS` | *(none)* | With `BOT_CALENDAR_NO_ATTENDEES` set, `true`: the bot may update or delete only events it created. The pack records each created event's id in `calendar-events` under `BOT_STATE_DIR`; an update or delete on any other id is refused, and so is every one when that file cannot be read |
+| `BOT_CALENDAR_TITLE_PREFIX` | *(none)* | With `BOT_CALENDAR_NO_ATTENDEES` set: every created event's title, and any title an update sets, must start with this, e.g. `Bot:` |
 | `BOT_LAND_PATHS` | *(none)* | Comma-separated globs, relative to the bot's repo (`CLAUDE_CWD`), of the files the pack's `land` skill may commit and push to the checkout's upstream branch; `!glob` excludes, e.g. `notes/**,skills/**,!skills/guarded/**`. It lands only the files it is named, refuses a checkout with unpushed commits, and pushes the exact commit it checked (built outside the checkout, so another session's commit is never published and local commit hooks do not run); a rejected push leaves nothing behind. Pair it with `Edit(...)` rules on the same paths and an allow rule for the command. Unset, landing is off |
 | `BOT_SUMMARIZER_TOOLS` | `Read` | Tools a summary run may use, in every mode. Summaries never get MCP servers or the skip flags, and take `BOT_PERMISSION_DENY` and `BOT_SETTINGS` |
 
-### Claude
+### Agent runtime
 | Variable | Default | Description |
 |---|---|---|
-| `CLAUDE_MODEL` | CLI default | e.g. `claude-opus-5` |
-| `SUMMARIZE_MODEL` | `CLAUDE_MODEL` | A cheaper model is fine here |
-| `CLAUDE_BIN` | `claude` | Path to the CLI |
-| `CLAUDE_MAX_TURNS` | `100` | Steps per request before a cap-out |
+| `BOT_RUNTIME` | `claude` | The agent CLI this bot runs on: `claude` (Claude Code) or `codex` (OpenAI Codex CLI). Every run the bot makes — Discord, scheduled jobs, summaries, board tasks — uses it, and `npm run doctor` checks only it. No fallback to the other, and a session is never moved between them: after a switch each channel starts fresh. Anything else stops the bot at startup. See [docs/runtimes.md](docs/runtimes.md) |
+| `BOT_MODEL` | CLI default | The model, for whichever runtime is selected, e.g. `claude-opus-5` on Claude |
+| `CLAUDE_MODEL` | CLI default | Claude only: the model when `BOT_MODEL` is unset, as before. Set on a Codex bot, it stops the bot at startup |
+| `SUMMARIZE_MODEL` | the bot's model | A cheaper model is fine here; it must belong to the bot's runtime |
+| `CLAUDE_BIN` | `claude` | Path to the Claude Code CLI |
+| `CODEX_BIN` | `codex` | Path to the Codex CLI, signed in with `codex login` |
+| `CLAUDE_MAX_TURNS` | `100` | Steps per request before a cap-out. `0` removes the cap; `CLAUDE_TIMEOUT_MS` then bounds a run |
 | `CLAUDE_TIMEOUT_MS` | `3600000` | Max wall time per request |
 | `SESSION_TIMEOUT_MS` | `1800000` | Idle time before a channel starts fresh |
 | `MAX_CONCURRENT_CLAUDE` | `2` | In-flight requests before new ones are refused |
@@ -274,7 +278,8 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 
 Two optional files under the bot's `CLAUDE_CWD` are added to the front of every
 request's system prompt. Both are read per message, so an edit lands on the next
-message with no restart, and a missing file simply contributes nothing.
+message with no restart, and a missing file simply contributes nothing. A Codex
+bot reads the same two files from `.codex/` instead ([runtimes.md](docs/runtimes.md#the-bots-repository-per-runtime)).
 
 | File | Scope | For |
 |---|---|---|
@@ -362,16 +367,40 @@ Two busy weeks of summaries will reach it. The default is also a cost decision �
 | `BRIDGE_SIGNAL_DATA_MAX` | `2000` | Characters of signal text kept before truncation |
 
 ### Paperclip
-Answer tasks assigned to this bot on a [Paperclip](https://paperclip.ing) board. A task Paperclip hands to an agent is checked out to the run it opened, and writes to a checked-out task must come from that run, so the agent's command on the board must hold its run open until a comment lands under it; the bot polls its inbox, answers through the same run path as Discord, and posts the reply under the run. A board is read by people outside the bot's Discord channels, so a board run gets least privilege in every permission mode, `bypass` included: only `BOT_BOARD_TOOLS` (read-only built-ins by default), in `dontAsk` mode, which confines the read tools to `CLAUDE_CWD`, plus whatever `BOT_BOARD_PERMISSION_ALLOW` pre-approves. A Paperclip run cannot reach Discord memory — the buffer, summaries, uploads, sessions, scheduled jobs, the state folder and the outbox of files already sent are kept out of its prompt and environment, denied to the read tools, and unreadable to any shell it is allowed, which always runs in Claude Code's sandbox confined to `CLAUDE_CWD` (the host needs it: `bwrap` and `socat` on Linux; without it the task gets the fallback reply; besides `CLAUDE_CWD` it reads only the system folders — `/usr`, `/bin`, `/lib`, `/etc` and the like — so a tool kept anywhere else, such as the home folder, needs an `allowRead` in `BOT_SETTINGS`; nothing else in `BOT_SETTINGS` can loosen a board run's sandbox). No settings file — user, project or local — is read for a board run, and of `BOT_SETTINGS` it takes only the model and those sandbox rules, so no approval made for Discord sessions carries over; the `CLAUDE_CWD` CLAUDE.md still loads. Claude Code's project auto-memory, which the Discord sessions in the same `CLAUDE_CWD` write and the CLI loads at startup, is off for a board run. Its environment carries none of the bot's own configuration — every `BOT_*` variable except the few the skill pack's hooks read (the mail and calendar gates among them), `MCP_CONFIG*`, anything naming Paperclip, `DISCORD_TOKEN` and `BRIDGE_TOKEN` — since a credential inside, say, an inline `BOT_SETTINGS` could otherwise be printed into a reply; other host variables, such as one an MCP server needs, still reach it, so give a board run a shell only if those can be read by every board reader. The whole harness folder is withheld too (its `.env`, logs and default state), so set `CLAUDE_CWD` to the folder board tasks should read: a bot whose `CLAUDE_CWD` is the harness or state folder, or inside one, keeps the connector off and logs why, since Claude Code's sandbox always opens its working directory. Each task keeps its own session.
+Answer tasks assigned to this bot on a [Paperclip](https://paperclip.ing) board. A task Paperclip hands to an agent is checked out to the run it opened, and writes to a checked-out task must come from that run, so the agent's command on the board must hold its run open until a comment lands under it; the bot polls its inbox, answers through the same run path as Discord, and posts the reply under the run. A board is read by people outside the bot's Discord channels, so a board run gets least privilege in every permission mode, `bypass` included: by default (`BOT_BOARD_EXECUTION=readonly`, see [Engineering board runs](#engineering-board-runs)) only `BOT_BOARD_TOOLS` (read-only built-ins), in `dontAsk` mode, which confines the read tools to `CLAUDE_CWD`, plus whatever `BOT_BOARD_PERMISSION_ALLOW` pre-approves. A Paperclip run cannot reach Discord memory — the buffer, summaries, uploads, sessions, scheduled jobs, the state folder and the outbox of files already sent are kept out of its prompt and environment, denied to the read tools, and unreadable to any shell it is allowed, which always runs in Claude Code's sandbox confined to `CLAUDE_CWD` (the host needs it: `bwrap` and `socat` on Linux; without it the task gets the fallback reply; besides `CLAUDE_CWD` it reads only the system folders — `/usr`, `/bin`, `/lib`, `/etc` and the like — so a tool kept anywhere else, such as the home folder, needs an `allowRead` in `BOT_SETTINGS`; nothing else in `BOT_SETTINGS` can loosen a board run's sandbox). No settings file — user, project or local — is read for a board run, and of `BOT_SETTINGS` it takes only the model and those sandbox rules, so no approval made for Discord sessions carries over; the `CLAUDE_CWD` CLAUDE.md still loads. Claude Code's project auto-memory, which the Discord sessions in the same `CLAUDE_CWD` write and the CLI loads at startup, is off for a board run. Its environment carries none of the bot's own configuration — every `BOT_*` variable except the few the skill pack's hooks read (the mail and calendar gates among them), `MCP_CONFIG*`, anything naming Paperclip, `DISCORD_TOKEN` and `BRIDGE_TOKEN` — since a credential inside, say, an inline `BOT_SETTINGS` could otherwise be printed into a reply; other host variables, such as one an MCP server needs, still reach it, so give a board run a shell only if those can be read by every board reader. The whole harness folder is withheld too (its `.env`, logs and default state), so set `CLAUDE_CWD` to the folder board tasks should read: a bot whose `CLAUDE_CWD` is the harness or state folder, or inside one, keeps the connector off and logs why, since Claude Code's sandbox always opens its working directory. Each task keeps its own session.
 
 This connector is the inbound half only. For a bot to create, assign or comment on tasks itself, add Paperclip's own MCP server (`@paperclipai/mcp-server`) to that bot's MCP config and allow its tools. Give every agent its own key, used by both halves, and never share it between bots — the board's record of who did what is only as true as that. The bot hides `PAPERCLIP_API_KEY` from Claude, so hand the MCP server its key under another name: set it in the bot's `env` (pm2 passes only what the ecosystem lists) and reference it from the MCP config as `${THAT_NAME}`.
+
+An agent can sit on more than one board — the same bot as a seat in two companies, say — with a key per board. List the others in `PAPERCLIP_EXTRA_BOARDS` and give each the prompt channel whose audience matches that board's readers.
 
 | Variable | Default | Description |
 |---|---|---|
 | `PAPERCLIP_URL` | — | Board origin, e.g. `https://board.example.com`. Off unless this and the key are set |
 | `PAPERCLIP_API_KEY` | — | The agent's API key. Removed from the environment Claude runs in |
-| `PAPERCLIP_PROMPT_CHANNEL` | — | Channel id whose `.claude/channel-prompts/` file applies to board replies — use the channel with the same audience as the board |
+| `PAPERCLIP_PROMPT_CHANNEL` | — | Channel id whose channel-prompt file (`.claude/channel-prompts/`, `.codex/` on Codex) applies to board replies — use the channel with the same audience as the board |
+| `PAPERCLIP_EXTRA_BOARDS` | — | More boards for the same bot, as a JSON array of `{ "id", "url", "keyEnv", "promptChannel" }`. `keyEnv` names the variable holding that board's key, which is removed from the environment Claude runs in like `PAPERCLIP_API_KEY`. Each board has its own state file and task sessions; a broken entry is logged and skipped |
 | `PAPERCLIP_POLL_MS` | `15000` | How often the inbox is checked |
+| `PAPERCLIP_RESUME_INTERRUPTED` | off | `1`: a task whose answer was cut off by a restart is run once more, under the run it started in, with a note to check what the first attempt already did before acting again — so its card is closed from the real result. Turn on only when the bot's work is safe to re-check (its jobs are idempotent). Off: the task gets the fallback reply and is left blocked |
+| `PAPERCLIP_EXTERNAL_WRITER` | — | Pattern for a task description's first line, e.g. `^source: \S+#\d+$`. A matching task's status belongs to another writer (a tracker mirror): the bot comments on it and never sets its status, blockers or wait |
+| `BOT_BOARD_EXECUTION` | `readonly` | How a board run executes: `readonly`, `engineering` for a bot the board assigns real work, or `parity` for a run built exactly as the bot's Discord session (less the Discord credentials and other channels' conversation). Anything else keeps the connector off |
+| `BOT_BOARD_TOOLS` | `Read,Glob,Grep` | `readonly` board runs: the built-in tools a board run gets |
+| `BOT_BOARD_ENGINEERING_TOOLS` | `Read,Glob,Grep,Edit,Write,Bash` | `engineering` board runs: the built-in tools a board run gets |
+| `BOT_BOARD_PERMISSION_ALLOW` | *(none)* | Board runs, either mode: permission rules pre-approved, e.g. `mcp__my-db` |
+| `BOT_BOARD_READ_PATHS` | *(none)* | `engineering` only: comma-separated absolute folders a board run may read besides `CLAUDE_CWD`, e.g. sibling repos. Must not contain `CLAUDE_CWD` or a write path — name the folders beside it |
+| `BOT_BOARD_WRITE_PATHS` | *(none)* | `engineering` only: comma-separated absolute folders a board run may write besides `CLAUDE_CWD` |
+| `BOT_BOARD_DENY_FILES` | *(none)* | Board runs, either mode: comma-separated file-name patterns a board run may not read anywhere in `CLAUDE_CWD` or the read and write paths, added to the built-in list (`.mcp.json`, `.env`, `.env.*` except `.env.example`/`.sample`/`.template`, `.npmrc`, `.netrc`, `.git-credentials`, `.pgpass`, `.dev.vars`, `*.pem`, `*.key`, SSH keys, `credentials.json`, `service-account*.json`). `*` and `?` match; a leading `!` exempts a name |
+| `BOT_BOARD_NETWORK_ALLOW` | *(none)* | `engineering` only: comma-separated host names a board run's shell may reach, added to any `allowedDomains` in `BOT_SETTINGS`, e.g. `github.com,api.github.com` |
+
+#### Engineering board runs
+`BOT_BOARD_EXECUTION=engineering` is for a bot whose board assigns it real work — edit its repo, run tests, `git`, `gh`. It is the same board run with more tools, never a different trust level: `dontAsk` still decides, no settings file is read, the shell runs in the sandbox or not at all, the Discord memory and the harness folder stay unreadable and unwritable, and the bot's own credentials stay out of the environment. It adds only what you name: the tools, the folders besides `CLAUDE_CWD` it may read and write, and the hosts its shell may reach. Each run gets a private temp folder, removed when it ends. A setting it cannot hold — a relative path, a path inside the bot's state or harness folder, `/` or the home folder, a read path that contains `CLAUDE_CWD`, a Discord memory folder (the summaries folder, say) inside `CLAUDE_CWD`, where a shell could read it back through `git` — keeps the connector off and logs why; Discord is unaffected. At startup the bot logs the board mode it runs with, and `npm run doctor:fleet` prints it for each bot.
+
+The shell's network goes through Claude Code's proxy and `socat`. If `socat` or `bwrap` lives outside the system folders (under a home folder, say), add its folder — and any folder a wrapper script loads from — to `BOT_BOARD_READ_PATHS`, or every request from the shell fails; `doctor:fleet` warns when it finds one.
+
+To turn it on, set `BOT_BOARD_EXECUTION=engineering` (and the paths and hosts the work needs) for that bot and restart it; to turn it off, remove the setting or set `readonly` and restart. Verify by assigning the bot a board task that edits a file in `CLAUDE_CWD`: in `engineering` the change lands and the task closes; in `readonly` the reply says it could not, and the task is left **blocked**. Full guide, prerequisites and symptom-to-fix: [docs/paperclip-board-execution.md](docs/paperclip-board-execution.md). A bot on Codex takes board tasks in the same two modes with no network; [what differs](docs/paperclip-board-execution.md#on-codex).
+
+`BOT_BOARD_EXECUTION=parity` lifts the least-privilege board run for a bot whose board readers are the same people as its Discord channels: on Claude or Codex, the run gets the Discord session's tools, MCP servers, settings, files, network and environment, in the bot's `BOT_PERMISSION_MODE`. Two things stay out — other channels' conversation and the Discord credentials (`DISCORD_TOKEN`, `BRIDGE_TOKEN`) — and the startup log names both.
+
+A run that could not do what was asked ends its reply with `PAPERCLIP-OUTCOME: blocked`; the bot removes that line and leaves the task **blocked** with the reply as its comment, instead of **done**. A person's comment on it reopens it. A run that is waiting on other tasks ends with `PAPERCLIP-OUTCOME: blocked on ACME-12, ACME-13`: the task is blocked by those tasks on the board, so it shows what it waits on; when the last of them is done Paperclip wakes the bot, which moves the task back in progress, says which task it waited on, and resumes the work; while only some are done, its blockers and wait are trimmed to the open ones. A block the bot set, or one Paperclip set when it lost the run the bot was answering under (its waiter dropped, say), is the bot's to update: if Paperclip blocks the task while the answer is still running, the bot moves it back in progress with a note, and the answer closes it. A blocked or cancelled set by a person or another agent is never moved. A refused board request is logged with Paperclip's reason code, e.g. `HTTP 403 cross_issue_influence_run_context_required`.
 
 ### Misc
 | Variable | Default | Description |
@@ -548,11 +577,11 @@ The harness is dumb transport here — **what the emoji means is yours to define
 ## Architecture
 
 ```
-Discord message
+Discord message, or a Paperclip task
   → bot.js (discord.js)
-  → spawn `claude` --output-format stream-json
-  → stream events back as Discord messages
-  → session id saved for continuity
+  → spawn the bot's runtime: `claude` (stream-json) or `codex exec` (--json)
+  → events normalized, progress shown, one reply posted
+  → session id saved for continuity, tagged with its runtime
 ```
 
 - **CLI spawn, not SDK** — inherits every built-in tool and MCP support for free
@@ -563,7 +592,7 @@ Discord message
 ## Prerequisites
 
 - Node.js 18+
-- Claude Code CLI, installed and authenticated
+- One agent CLI per bot, installed and signed in: Claude Code (the default), or the Codex CLI for a bot with `BOT_RUNTIME=codex`. See [docs/runtimes.md](docs/runtimes.md)
 
 ## Troubleshooting
 
@@ -579,6 +608,7 @@ Run **`npm run doctor`** first — it checks most of this and prints no secrets.
 | Hangs, then exit code 143 | Timeout — raise `CLAUDE_TIMEOUT_MS`, or an MCP server is unreachable |
 | `Error: spawn E2BIG`, usually on the first message after a restart | Too much remembered context for one command line — lower `CONTEXT_MAX_BYTES` or `SUMMARY_LOOKBACK_HOURS`. See [Memory](#memory) |
 | Second bot crashes at startup | `WS_PORT` collision — one port per bot |
+| Exits at startup naming a setting "Claude Code syntax" | A Claude-only setting on a `BOT_RUNTIME=codex` bot — see [docs/runtimes.md](docs/runtimes.md) |
 
 ## Contributing
 

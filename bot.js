@@ -2,18 +2,21 @@ require("dotenv").config();
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
 const { WebSocketServer } = require("ws");
-const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync, readlinkSync, renameSync } = require("fs");
-const { join, resolve } = require("path");
+const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync, readlinkSync, renameSync, mkdtempSync, rmSync } = require("fs");
+const { basename, join, resolve } = require("path");
 const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, discordCarriers, paperclipCarriers, parityMcpEnv, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
-const { createPaperclipPoller, replyCollector } = require("./lib/paperclip");
+const { createPaperclipPoller, paperclipBoards, replyCollector } = require("./lib/paperclip");
+const { resolveRuntime } = require("./lib/runtime");
+const { LAYOUTS, repoLayout } = require("./lib/runtime/layout");
+const codexRuntime = require("./lib/runtime/codex");
 
 // --- Logger ---
 const log = pino({
@@ -50,9 +53,27 @@ function envInt(name, def, { min = 0 } = {}) {
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
 const CLAUDE_CWD = process.env.CLAUDE_CWD || process.cwd();
+// The agent CLI every run of this bot goes to: Discord, wakes, schedules,
+// summaries and board tasks alike (lib/runtime). Claude unless BOT_RUNTIME says
+// otherwise; never both, and nothing falls back from one to the other.
+const RUNTIME = resolveRuntime();
+const CODEX = RUNTIME.name === "codex";
+if (CODEX) {
+  // Read once: the sandbox must be able to start the binary from its own folder.
+  RUNTIME.releaseDir = codexRuntime.codexReleaseDir(RUNTIME.bin);
+  RUNTIME.version = codexRuntime.codexVersion(RUNTIME.bin);
+}
+// Where CLAUDE_CWD keeps what this runtime reads — overrides, channel prompts,
+// skills (lib/runtime/layout). The selected runtime's layout only; an unknown
+// runtime has none and refuses to start below.
+const LAYOUT = LAYOUTS[RUNTIME.name] ? repoLayout(RUNTIME.name, CLAUDE_CWD) : null;
 const MAX_DISCORD_LENGTH = parseInt(process.env.MAX_DISCORD_LENGTH, 10) || 1900;
 const CLAUDE_TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS, 10) || 3600000;
-const CLAUDE_MAX_TURNS = parseInt(process.env.CLAUDE_MAX_TURNS, 10) || 100;
+// 0 lifts the step cap: CLAUDE_TIMEOUT_MS alone then bounds a run.
+const CLAUDE_MAX_TURNS = (() => {
+  const n = parseInt(process.env.CLAUDE_MAX_TURNS, 10);
+  return Number.isInteger(n) && n >= 0 ? n : 100;
+})();
 const ALLOWED_USER_IDS = process.env.ALLOWED_USERS
   ? process.env.ALLOWED_USERS.split(",").filter(Boolean)
   : [];
@@ -143,10 +164,16 @@ const PERMISSION_DENY = (process.env.BOT_PERMISSION_DENY || "").trim();
 // to write, edit or execute anything.
 const SUMMARIZER_TOOLS = process.env.BOT_SUMMARIZER_TOOLS || "Read";
 // A Paperclip board run's tools and pre-approvals, whatever the bot's mode. The
-// board is read by people outside the bot's channels, so the default is the
-// read-only built-ins, confined to the working directory, and nothing else.
-const BOARD_TOOLS = process.env.BOT_BOARD_TOOLS || "Read,Glob,Grep";
-const BOARD_PERMISSION_ALLOW = (process.env.BOT_BOARD_PERMISSION_ALLOW || "").trim();
+// board is read by people outside the bot's channels, so the default
+// (BOT_BOARD_EXECUTION=readonly) is the read-only built-ins, confined to the
+// working directory, and nothing else. `engineering` adds what the operator
+// names — tools, folders, hosts — and keeps every board isolation; see
+// resolveBoardPolicy in lib/permission-mode.js.
+const BOARD_POLICY = resolveBoardPolicy();
+const BOARD_ENGINEERING = BOARD_POLICY.execution === "engineering";
+// BOT_BOARD_EXECUTION=parity: a board task runs as this bot's Discord session
+// does — same tools, MCP servers, Doppler, files and network (boardRunKind).
+const BOARD_KIND = boardRunKind(BOARD_POLICY);
 
 /**
  * The permission flags for one invocation.
@@ -161,8 +188,8 @@ function permissionArgs(kind = "session") {
   // A board run answers people outside the bot's Discord channels: least
   // privilege in every mode, and no reach into Discord memory.
   if (kind === "board") {
-    return boardArgs({ tools: BOARD_TOOLS, allow: BOARD_PERMISSION_ALLOW, cwd: CLAUDE_CWD,
-      deny: [PERMISSION_DENY, ...privateMemoryDeny(boardDeniedPaths())].filter(Boolean) });
+    return boardArgs({ tools: BOARD_POLICY.tools, allow: [BOARD_POLICY.allow, ...boardEngineeringRules(CLAUDE_CWD, BOARD_POLICY)], cwd: CLAUDE_CWD,
+      deny: [PERMISSION_DENY, ...privateMemoryDeny(boardReadDeniedPaths(), BOARD_ENGINEERING ? ["Read", "Edit"] : ["Read"])].filter(Boolean) });
   }
   if (PERMISSION_MODE === "bypass") {
     // Deny rules still hold under bypass (measured): nothing prompts, but a denied
@@ -192,15 +219,34 @@ function permissionArgs(kind = "session") {
 // session through --settings, e.g. a sandbox around the shell. Settings passed this
 // way are not loosened by the repository's own .claude/settings*.json.
 const SESSION_SETTINGS = (process.env.BOT_SETTINGS || "").trim();
-function settingsArgs({ board = false } = {}) {
+// The bot's settings as an object; null when it has none. Read per use: a
+// settings file that cannot be read fails the run rather than starting it
+// without the sandbox. A relative path is read from CLAUDE_CWD, where Claude
+// itself would resolve it for a Discord session.
+function botSettings() {
+  return !SESSION_SETTINGS ? null
+    : JSON.parse(SESSION_SETTINGS.startsWith("{") ? SESSION_SETTINGS : readFileSync(resolve(CLAUDE_CWD, SESSION_SETTINGS), "utf8"));
+}
+function settingsArgs({ board = false, tmpDir = null } = {}) {
   if (!board) return SESSION_SETTINGS ? ["--settings", SESSION_SETTINGS] : [];
   // A board run sandboxes any shell it is allowed to the working directory, on
-  // top of the bot's own settings. Read per run: a settings file that cannot be read fails the run
-  // rather than starting it without the sandbox. A relative path is read from
-  // CLAUDE_CWD, where Claude itself would resolve it for a Discord session.
-  const base = !SESSION_SETTINGS ? null
-    : JSON.parse(SESSION_SETTINGS.startsWith("{") ? SESSION_SETTINGS : readFileSync(resolve(CLAUDE_CWD, SESSION_SETTINGS), "utf8"));
-  return ["--settings", JSON.stringify(boardSettings(base, boardDeniedPaths(), CLAUDE_CWD))];
+  // top of the bot's own settings.
+  return ["--settings", JSON.stringify(boardSettings(botSettings(), boardReadDeniedPaths(), CLAUDE_CWD, { ...BOARD_POLICY, tmpDir }))];
+}
+// The Paperclip connector keys: every board's, not only the first — an extra
+// board names its own.
+function connectorKeys() {
+  return [...new Set(["PAPERCLIP_API_KEY", ...PAPERCLIP_BOARDS.map((b) => b.keyEnv)])];
+}
+// What a board run's session is made with (boardAccessKey): one made under
+// other access is never resumed. Every permission input counts — a parity run
+// takes the bot's tools, allow and deny rules, and narrowing any of them must
+// not leave a session that was opened under the wider ones.
+function boardAccess() {
+  return boardAccessKey({
+    kind: BOARD_KIND, policy: BOARD_POLICY, permissionMode: PERMISSION_MODE, settings: botSettings(),
+    tools: ALLOWED_TOOLS, allow: PERMISSION_ALLOW, deny: PERMISSION_DENY,
+  });
 }
 
 // MCP_CONFIG adds servers; it does not remove the host's. MCP_CONFIG_STRICT=true
@@ -222,6 +268,35 @@ function mcpArgs() {
     ...(process.env.MCP_CONFIG_EXTRA ? ["--mcp-config", process.env.MCP_CONFIG_EXTRA] : []),
     ...(strict ? ["--strict-mcp-config"] : []),
   ];
+}
+
+/**
+ * The same servers for a Codex bypass session: MCP_CONFIG, MCP_CONFIG_EXTRA and
+ * the repo's .mcp.json, read once at startup. Codex runs local (stdio) servers
+ * only, so any other kind is skipped and named in the log; their env values go
+ * to the child process, never onto the command line. Without MCP_CONFIG_STRICT
+ * the operator's own Codex config adds its servers, as the host's do on Claude.
+ */
+function codexMcp() {
+  const servers = {}, env = {}, skipped = [];
+  const repoConfig = resolve(CLAUDE_CWD, ".mcp.json");
+  const sources = [process.env.MCP_CONFIG || (existsSync(repoConfig) ? repoConfig : ""), process.env.MCP_CONFIG_EXTRA || ""];
+  for (const source of sources.filter(Boolean)) {
+    let config;
+    try {
+      config = JSON.parse(source.trim().startsWith("{") ? source : readFileSync(resolve(CLAUDE_CWD, source), "utf8"));
+    } catch {
+      // No parser message: it quotes the text, and an inline config holds keys.
+      skipped.push({ name: source.trim().startsWith("{") ? "(inline MCP config)" : source, reason: "not readable as JSON" });
+      continue;
+    }
+    // One child environment for every source: a key another source set differently is refused, not overwritten.
+    const got = codexRuntime.mcpServers(config, process.env, env);
+    Object.assign(servers, got.servers);
+    Object.assign(env, got.env);
+    skipped.push(...got.skipped);
+  }
+  return { servers, env, skipped, strict: process.env.MCP_CONFIG_STRICT === "true" };
 }
 
 // How often the "typing…" indicator is refreshed while a request runs.
@@ -260,12 +335,12 @@ const RESERVED_COMMANDS = ["fresh", "status", ...STOP_WORDS];
 
 /**
  * Commands in the bot's own project that a reserved name would shadow.
- * Read from CLAUDE_CWD, which is where Claude Code looks for them.
+ * Read from CLAUDE_CWD, where the runtime looks for them: .claude/commands and
+ * .claude/skills on Claude, .agents/skills on Codex.
  */
 function shadowedCommands() {
   const hits = [];
-  for (const [dir, suffix] of [[join(CLAUDE_CWD, ".claude", "commands"), ".md"],
-                               [join(CLAUDE_CWD, ".claude", "skills"), ""]]) {
+  for (const [dir, suffix] of LAYOUT.commands) {
     let entries = [];
     try { entries = readdirSync(dir); } catch { continue; }
     for (const entry of entries) {
@@ -288,7 +363,8 @@ function shadowedCommands() {
  * --append-system-prompt, which this spawn already uses.
  */
 function systemPromptOverrides() {
-  const file = join(CLAUDE_CWD, ".claude", "system-prompt-overrides.md");
+  // .claude/system-prompt-overrides.md on Claude, .codex/ on Codex.
+  const file = LAYOUT.overrides;
   if (!existsSync(file)) return "";
   try {
     const text = readFileSync(file, "utf8").trim();
@@ -319,7 +395,8 @@ function systemPromptOverrides() {
  * Rides at the HEAD with the overrides, for the truncation reason given there.
  */
 function channelPrompt(channelId, channelName) {
-  const dir = join(CLAUDE_CWD, ".claude", "channel-prompts");
+  // .claude/channel-prompts on Claude, .codex/channel-prompts on Codex.
+  const dir = LAYOUT.channelPrompts;
   const candidates = [channelId && `${channelId}.md`, channelName && `${channelName}.md`].filter(Boolean);
   for (const candidate of candidates) {
     const file = join(dir, candidate);
@@ -407,11 +484,14 @@ const SKILL_PACK = process.env.BOT_SKILL_PACK !== undefined
 const EXTRA_SKILL_PACKS = (process.env.BOT_EXTRA_SKILL_PACKS || "")
   .split(",").map((d) => d.trim()).filter(Boolean);
 
+/** Every pack that actually exists on disk. */
+function skillPacks() {
+  return [SKILL_PACK, ...EXTRA_SKILL_PACKS].filter((d) => d && existsSync(d));
+}
+
 /** --plugin-dir args for every pack that actually exists on disk. */
 function skillPackArgs() {
-  return [SKILL_PACK, ...EXTRA_SKILL_PACKS]
-    .filter((d) => d && existsSync(d))
-    .flatMap((d) => ["--plugin-dir", d]);
+  return skillPacks().flatMap((d) => ["--plugin-dir", d]);
 }
 
 // --- Progress reporting ---
@@ -500,7 +580,7 @@ if (!DISCORD_TOKEN) {
 if (!existsSync(CLAUDE_CWD)) {
   log.fatal(
     { CLAUDE_CWD },
-    "CLAUDE_CWD does not exist. Set it to YOUR project directory — the repo holding the CLAUDE.md that gives this bot its role. It is not this repo."
+    `CLAUDE_CWD does not exist. Set it to YOUR project directory — the repo holding the ${CODEX ? "AGENTS.md" : "CLAUDE.md"} that gives this bot its role. It is not this repo.`
   );
   process.exit(EXIT_CONFIG);
 }
@@ -516,6 +596,25 @@ if (!VALID_MODES.includes(PERMISSION_MODE)) {
   );
   process.exit(EXIT_CONFIG);
 }
+// A runtime that cannot honor a setting the operator made refuses to start
+// rather than run without it.
+if (RUNTIME.problems.length) {
+  for (const problem of RUNTIME.problems) log.fatal(problem);
+  process.exit(EXIT_CONFIG);
+}
+log.info({ runtime: RUNTIME.name, source: RUNTIME.source, bin: RUNTIME.bin, model: RUNTIME.model, ...(CODEX ? { version: RUNTIME.version } : {}) },
+  `Runtime: ${RUNTIME.name} — every run of this bot uses it`);
+// The role file this runtime loads from CLAUDE_CWD. Absent, every run starts
+// with no role and nothing else says so.
+log.info({ instructions: LAYOUT.instructions, overrides: LAYOUT.overrides, channelPrompts: LAYOUT.channelPrompts, skills: LAYOUT.commands.map(([d]) => d) },
+  `Repository layout: ${RUNTIME.name}`);
+if (!LAYOUT.instructions.some((f) => existsSync(f))) log.error({ files: LAYOUT.instructions }, `CLAUDE_CWD has no ${basename(LAYOUT.instructions[0])} — this bot runs with no role`);
+if (CODEX && !RUNTIME.version) log.error({ bin: RUNTIME.bin }, "BOT_RUNTIME=codex but the Codex CLI did not run — install it, sign in (codex login), or set CODEX_BIN");
+// Built once: what a Codex bypass session connects to.
+const CODEX_MCP = CODEX && PERMISSION_MODE === "bypass" ? codexMcp() : null;
+// Not passed by the harness; the session still loads the Codex config, so a
+// server defined there (the repo's .codex/config.toml, ~/.codex) is available.
+for (const { name, reason } of CODEX_MCP?.skipped ?? []) log.warn({ server: name, reason }, "MCP server not passed to Codex — skipped; define it in the Codex config if the bot needs it");
 // A malformed inline BOT_SETTINGS would fail every session, one message at a time.
 if (SESSION_SETTINGS.startsWith("{")) {
   try {
@@ -1137,6 +1236,17 @@ function privateMemoryPaths() {
 function boardDeniedPaths() {
   return [...privateMemoryPaths(), STATE_DIR, OUTBOX_DIR, ...new Set([__dirname, process.cwd()])];
 }
+// What one board run cannot read: the folders above, the other copies of the
+// memory where it lies in a git repository (its history and each worktree's
+// checkout), plus every credential file (an MCP config, an env file — see
+// DEFAULT_BOARD_SECRET_FILES) in the folders it can reach, found as the run starts. Kept apart from boardDeniedPaths: a .env in
+// CLAUDE_CWD is denied by path, it does not turn engineering off. The folders
+// it can reach include those the bot's own settings open to reading
+// (sandbox.filesystem.allowRead), which a board run keeps.
+function boardReadDeniedPaths() {
+  const roots = [CLAUDE_CWD, ...BOARD_POLICY.readPaths, ...BOARD_POLICY.writePaths, ...(botSettings()?.sandbox?.filesystem?.allowRead ?? [])];
+  return [...boardDeniedPaths(), ...boardHistoryDenied(privateMemoryPaths()), ...boardSecretFiles(roots, BOARD_POLICY.secretFiles)];
+}
 LEGACY_STATE.push([join(__dirname, `.${BOT_NAME}-sessions.json`), SESSION_FILE]);
 // Moved out of the summaries directory: a schedule is the user's, and losing it
 // to a re-clone is the kind of failure nobody notices until a job stops firing.
@@ -1227,7 +1337,7 @@ client.on("shardError", (err) => {
 
 client.once("ready", () => {
   markReady();
-  log.info({ tag: client.user.tag, cwd: CLAUDE_CWD }, "Bot online");
+  log.info({ tag: client.user.tag, cwd: CLAUDE_CWD, maxTurns: CODEX ? null : CLAUDE_MAX_TURNS || "unlimited", timeoutMs: CLAUDE_TIMEOUT_MS }, "Bot online");
   const shadowed = shadowedCommands();
   if (shadowed.length) {
     log.warn(
@@ -1834,7 +1944,13 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {
   }
 
   const existingSession = channelSessions.get(channelId);
+  // A board run's session is stamped with the access it was made under.
+  if (opts.noBufferContext) opts = { ...opts, access: boardAccess() };
+  // A session from the other runtime is not carried over: after a switch the
+  // channel starts fresh. Nor is a board session made under other access.
   const canResume = existingSession &&
+    (existingSession.runtime || "claude") === RUNTIME.name &&
+    (!opts.noBufferContext || existingSession.access === opts.access) &&
     (Date.now() - existingSession.lastActivity) < SESSION_TIMEOUT_MS;
 
   if (canResume) {
@@ -1934,16 +2050,26 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
         : `${head}${basePrompt}${channelContext}${fileTransferContext}`;
     }
 
-    const args = [
+    // An engineering board run gets a temp folder of its own: the sandbox's
+    // network proxy listens there, and the shared /tmp stays hidden from it.
+    // Removed when the run ends.
+    const boardTmp = opts.noBufferContext && BOARD_ENGINEERING
+      ? mkdtempSync(join(require("os").tmpdir(), `${BOT_NAME}-board-`)) : null;
+    // The run's kind: a Paperclip task is a board run unless the board policy
+    // is parity, which builds it as the Discord session.
+    const runKind = opts.noBufferContext ? BOARD_KIND : "session";
+    const narrowBoard = runKind === "board";
+    const args = CODEX ? [] : [
       "--output-format", "stream-json",
-      // A run whose reply lands outside Discord gets least privilege.
-      ...permissionArgs(opts.noBufferContext ? "board" : "session"),
+      // A run whose reply lands outside Discord gets least privilege, unless
+      // its board policy is parity.
+      ...permissionArgs(runKind),
       ...skillPackArgs(),
       "--verbose",
-      "--max-turns", String(CLAUDE_MAX_TURNS),
-      ...(process.env.CLAUDE_MODEL ? ["--model", process.env.CLAUDE_MODEL] : []),
+      ...(CLAUDE_MAX_TURNS ? ["--max-turns", String(CLAUDE_MAX_TURNS)] : []),
+      ...(RUNTIME.model ? ["--model", RUNTIME.model] : []),
       ...mcpArgs(),
-      ...settingsArgs({ board: Boolean(opts.noBufferContext) }),
+      ...settingsArgs({ board: narrowBoard, tmpDir: boardTmp }),
       "--append-system-prompt", systemPrompt,
     ];
 
@@ -1958,7 +2084,29 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       : prompt;
 
     const attachmentLog = { attachments: fileRefs.length, failedAttachments: attachmentFailures.length };
-    if (resumeSessionId) {
+    if (CODEX) {
+      // The same run, as Codex expresses it (lib/runtime/codex.js): the board
+      // profile in place of the board settings, skills named in the instructions.
+      const packs = skillPacks();
+      args.push(...codexRuntime.codexArgs({
+        kind: runKind,
+        mode: PERMISSION_MODE,
+        resumeId: resumeSessionId,
+        model: RUNTIME.model,
+        instructions: systemPrompt + codexRuntime.skillsPrompt(packs),
+        prompt: finalPrompt,
+        releaseDir: RUNTIME.releaseDir,
+        readDirs: [ATTACHMENTS_DIR],
+        filesystem: narrowBoard ? codexRuntime.boardFilesystem({
+          cwd: CLAUDE_CWD, denied: boardReadDeniedPaths(), policy: BOARD_POLICY, releaseDir: RUNTIME.releaseDir, tmpDir: boardTmp, expand: expandPath,
+        }) : null,
+        packs,
+        mcp: CODEX_MCP?.servers,
+        strictMcp: Boolean(CODEX_MCP?.strict),
+        shellExclude: connectorKeys(),
+      }));
+      reqLog.info({ ...(resumeSessionId ? { sessionId: resumeSessionId } : {}), ...attachmentLog }, resumeSessionId ? "Resuming Codex session" : "Starting fresh Codex session");
+    } else if (resumeSessionId) {
       args.push("--resume", resumeSessionId, "-p", "--", finalPrompt);
       reqLog.info({ sessionId: resumeSessionId, ...attachmentLog }, "Resuming Claude session");
     } else {
@@ -1983,19 +2131,39 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     cleanEnv.BOT_JOB_HISTORY_FILE = JOB_HISTORY_FILE;
     cleanEnv.BOT_SCHEDULES_FILE = SCHEDULES_FILE;
     cleanEnv.BOT_CHANNEL_ID = String(channelId);
-    if (opts.noBufferContext) {
+    // Every board run loses the Discord and bridge credentials under any name,
+    // and any variable carrying one's value (discordCarriers).
+    if (opts.noBufferContext) for (const name of discordCarriers(cleanEnv)) delete cleanEnv[name];
+    if (opts.noBufferContext && !narrowBoard) {
+      for (const name of Object.keys(cleanEnv)) if (withheldFromParityBoard(name)) delete cleanEnv[name];
+      // Every Paperclip key under any name too — a narrow run's scrub already
+      // takes them (withheldFromBoard).
+      for (const name of paperclipCarriers(cleanEnv)) delete cleanEnv[name];
+    } else if (opts.noBufferContext) {
       for (const name of Object.keys(cleanEnv)) if (withheldFromBoard(name)) delete cleanEnv[name];
       // Claude Code's project auto-memory is shared with the Discord sessions in
       // the same CLAUDE_CWD and loads at startup, before any tool runs. Off here
       // and in boardSettings; the CLI reads this variable first.
       cleanEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
+      if (boardTmp) cleanEnv.TMPDIR = boardTmp;
     }
     // A board or restricted run reads no settings file (permissionArgs); its
     // CLAUDE.md comes in through --add-dir, which loads one only with this set.
-    if (opts.noBufferContext || PERMISSION_MODE === "restricted") cleanEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";
+    if (narrowBoard || PERMISSION_MODE === "restricted") cleanEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";
+    // The Paperclip connector keys leave every run, Discord's included…
+    for (const name of connectorKeys()) delete cleanEnv[name];
+    if (CODEX) {
+      // Skills name their scripts under $CLAUDE_PLUGIN_ROOT, which Claude sets
+      // for a plugin; Codex has no plugin folder, so the harness sets it.
+      if (skillPacks().includes(SKILL_PACK)) cleanEnv.CLAUDE_PLUGIN_ROOT = SKILL_PACK;
+      // A bypass session's MCP servers read their keys from here (codexMcp).
+      // A parity board run's: never one that puts back a withheld credential.
+      // …except where a server names one: Codex hands it to that server and
+      // keeps it out of every command (shellExclude).
+      if (!narrowBoard && CODEX_MCP) Object.assign(cleanEnv, opts.noBufferContext ? parityMcpEnv(CODEX_MCP.env) : CODEX_MCP.env);
+    }
 
     delete cleanEnv.CLAUDECODE;
-    delete cleanEnv.PAPERCLIP_API_KEY;
     delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
     delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
     delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
@@ -2012,7 +2180,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     }
 
     const startTime = Date.now();
-    const child = spawn(CLAUDE_BIN, safeArgs, {
+    const child = spawn(RUNTIME.bin, safeArgs, {
       cwd: CLAUDE_CWD,
       env: cleanEnv,
       stdio: ["ignore", "pipe", "pipe"],
@@ -2020,6 +2188,8 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     });
 
     activeProcesses.set(channelId, child);
+    // Codex events become the Claude events handleStreamEvent reads.
+    const translate = CODEX ? codexRuntime.createCodexTranslator() : (event) => [event];
 
     let jsonBuffer = "";
     let turnText = "";
@@ -2047,10 +2217,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
-          const event = JSON.parse(line);
-          handleStreamEvent(event, reqLog, sendMessage, state);
+          for (const event of translate(JSON.parse(line))) handleStreamEvent(event, reqLog, sendMessage, state);
         } catch {
-          reqLog.warn({ raw: line.substring(0, 200) }, "Non-JSON line from Claude");
+          reqLog.warn({ raw: line.substring(0, 200) }, `Non-JSON line from ${RUNTIME.name}`);
         }
       }
     });
@@ -2061,14 +2230,14 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 
     child.on("close", async (code) => {
       activeProcesses.delete(channelId);
+      if (boardTmp) rmSync(boardTmp, { recursive: true, force: true });
       // Remove the status message first, so it never sits above the answer.
       try { await progress?.finish(); } catch { /* never block the reply */ }
       const elapsed = Date.now() - startTime;
 
       if (jsonBuffer.trim()) {
         try {
-          const event = JSON.parse(jsonBuffer);
-          handleStreamEvent(event, reqLog, sendMessage, state);
+          for (const event of translate(JSON.parse(jsonBuffer))) handleStreamEvent(event, reqLog, sendMessage, state);
         } catch {
           // ignore
         }
@@ -2158,6 +2327,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
         channelSessions.set(channelId, {
           sessionId: state.sessionId,
           lastActivity: Date.now(),
+          // A session belongs to the runtime that made it; another cannot resume it.
+          ...(CODEX ? { runtime: RUNTIME.name } : {}),
+          ...(opts.access ? { access: opts.access } : {}),
         });
         saveSessions();
         reqLog.info({ sessionId: state.sessionId, code }, "Session stored for resume");
@@ -2201,6 +2373,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     });
 
     child.on("error", (err) => {
+      if (boardTmp) rmSync(boardTmp, { recursive: true, force: true });
       reqLog.error({ err }, "Failed to spawn Claude");
       reject(new Error(`Failed to spawn claude: ${err.message}`));
     });
@@ -2301,9 +2474,10 @@ function summarizeBufferLines(lines) {
     kind: "buffer-rotation",
     claudeBin: CLAUDE_BIN,
     cwd: CLAUDE_CWD,
-    model: process.env.SUMMARIZE_MODEL || process.env.CLAUDE_MODEL,
+    model: RUNTIME.summaryModel,
     timeoutMs: SUMMARIZE_TIMEOUT_MS,
     permissionArgs: permissionArgs("summarizer"),
+    runtime: RUNTIME,
   });
 }
 
@@ -2392,9 +2566,10 @@ function summarizeWithClaude(channelName, date, messages) {
     date,
     claudeBin: CLAUDE_BIN,
     cwd: CLAUDE_CWD,
-    model: process.env.SUMMARIZE_MODEL || process.env.CLAUDE_MODEL,
+    model: RUNTIME.summaryModel,
     timeoutMs: SUMMARIZE_TIMEOUT_MS,
     permissionArgs: permissionArgs("summarizer"),
+    runtime: RUNTIME,
   });
 }
 
@@ -2941,36 +3116,71 @@ setInterval(runScheduledJobs, SCHEDULE_CHECK_MS);
 
 // --- Paperclip ---
 // Tasks assigned to this bot on a Paperclip board, answered through the same
-// run path as Discord (see lib/paperclip.js). Off unless both are set.
-const PAPERCLIP_URL = process.env.PAPERCLIP_URL;
-const PAPERCLIP_API_KEY = process.env.PAPERCLIP_API_KEY;
+// run path as Discord (see lib/paperclip.js). Off unless a board is configured:
+// PAPERCLIP_URL with PAPERCLIP_API_KEY, plus any PAPERCLIP_EXTRA_BOARDS.
+const { boards: PAPERCLIP_BOARDS, problems: PAPERCLIP_PROBLEMS } = paperclipBoards(process.env);
+for (const problem of PAPERCLIP_PROBLEMS) log.warn(`Paperclip board off — ${problem}`);
 // The sandbox binds the working directory writable over its read denials, so a
 // CLAUDE_CWD that is the harness or state folder (or inside one) would open the
 // harness secrets file and the Discord stores to a board shell. Such a bot
 // answers no board.
+// A board policy that cannot be held turns board pickup off, never loosens it.
+const BOARD_POLICY_PROBLEMS = [
+  ...boardPolicyProblems(BOARD_POLICY, boardDeniedPaths(), CLAUDE_CWD),
+  // A parity run on Codex is the session's argv, not the board profile.
+  ...(CODEX && !BOARD_POLICY.parity ? codexRuntime.codexBoardProblems(BOARD_POLICY, RUNTIME) : []),
+];
 const PAPERCLIP_CWD_DENIED = boardCwdDenied(boardDeniedPaths(), CLAUDE_CWD);
-if (PAPERCLIP_URL && PAPERCLIP_API_KEY && PAPERCLIP_CWD_DENIED) {
+if (PAPERCLIP_BOARDS.length && PAPERCLIP_CWD_DENIED) {
   log.error({ cwd: CLAUDE_CWD }, "Paperclip connector off — CLAUDE_CWD is the harness or state folder, or inside one, which a board run cannot keep closed; point it at the folder board tasks should read");
-} else if (PAPERCLIP_URL && PAPERCLIP_API_KEY) {
-  const pLog = log.child({ component: "paperclip" });
-  const promptChannel = process.env.PAPERCLIP_PROMPT_CHANNEL || undefined;
-  const poller = createPaperclipPoller({
-    url: PAPERCLIP_URL,
-    apiKey: PAPERCLIP_API_KEY,
-    stateFile: join(STATE_DIR, "paperclip.json"),
-    log: pLog,
-    // One session per task, so a reply on the task continues its conversation.
-    answer: (prompt, issue) => {
-      const reply = replyCollector();
-      return runClaude(prompt, `paperclip-${issue.identifier}`, pLog.child({ paperclipTask: issue.identifier }),
-        reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true })
-        .then(() => reply.text());
-    },
-  });
-  setInterval(poller.tick, envInt("PAPERCLIP_POLL_MS", 15000, { min: 5000 }));
-  pLog.info({ url: PAPERCLIP_URL, promptChannel: promptChannel ?? null }, "Paperclip connector on");
-} else if (PAPERCLIP_URL || PAPERCLIP_API_KEY) {
-  log.warn("Paperclip connector off — PAPERCLIP_URL and PAPERCLIP_API_KEY must both be set");
+} else if (PAPERCLIP_BOARDS.length && BOARD_POLICY_PROBLEMS.length) {
+  for (const problem of BOARD_POLICY_PROBLEMS) log.error(`Paperclip connector off — ${problem}`);
+} else {
+  if (PAPERCLIP_BOARDS.length) {
+    const { execution, source, tools, allow, readPaths, writePaths, network } = BOARD_POLICY;
+    // On Codex the tool names are not used: the run is the profile in lib/runtime/codex.js.
+    if (BOARD_POLICY.parity) {
+      log.info({ runtime: RUNTIME.name, execution, source, permissionMode: PERMISSION_MODE },
+        "Paperclip board runs: parity — the same tools, MCP servers, files and network as this bot's Discord sessions; not carried: other channels' conversation in the prompt, the Discord bot and bridge tokens");
+    } else {
+      log.info({ runtime: RUNTIME.name, execution, source, ...(CODEX ? {} : { tools, allow: allow || null }), readPaths, writePaths, network },
+        execution === "engineering"
+          ? "Paperclip board runs: engineering — these tools, sandboxed; Discord memory and bot credentials stay out"
+          : "Paperclip board runs: readonly — set BOT_BOARD_EXECUTION=engineering to let board tasks edit and run commands");
+    }
+  }
+  // A task whose description starts with a line this matches has another
+  // writer (a mirror of an issue tracker, say): the bot comments on it but
+  // never sets its status.
+  let externalWriter = null;
+  if (process.env.PAPERCLIP_EXTERNAL_WRITER) {
+    try { externalWriter = new RegExp(process.env.PAPERCLIP_EXTERNAL_WRITER); }
+    catch (e) { log.error({ err: e.message }, "PAPERCLIP_EXTERNAL_WRITER is not a valid pattern; every task's status is the bot's to set"); }
+  }
+  for (const board of PAPERCLIP_BOARDS) {
+    const pLog = log.child({ component: "paperclip", ...(board.id ? { board: board.id } : {}) });
+    const { promptChannel } = board;
+    // The first board keeps the names it has always had, so its answered asks
+    // and task sessions carry over; an extra board gets its own.
+    const tag = board.id ? `paperclip-${board.id}` : "paperclip";
+    const poller = createPaperclipPoller({
+      url: board.url,
+      apiKey: board.apiKey,
+      stateFile: join(STATE_DIR, `${tag}.json`),
+      log: pLog,
+      resumeInterrupted: process.env.PAPERCLIP_RESUME_INTERRUPTED === "1",
+      externalWriter,
+      // One session per task, so a reply on the task continues its conversation.
+      answer: (prompt, issue) => {
+        const reply = replyCollector();
+        return runClaude(prompt, `${tag}-${issue.identifier}`, pLog.child({ paperclipTask: issue.identifier }),
+          reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true })
+          .then(() => reply.text());
+      },
+    });
+    setInterval(poller.tick, envInt("PAPERCLIP_POLL_MS", 15000, { min: 5000 }));
+    pLog.info({ url: board.url, promptChannel: promptChannel ?? null }, "Paperclip connector on");
+  }
 }
 
 // --- Process error handlers ---

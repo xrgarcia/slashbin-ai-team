@@ -48,6 +48,36 @@ export async function checkClaudeCli(bin = process.env.CLAUDE_BIN || "claude") {
 }
 
 /**
+ * The CLI of the runtime a bot is set to (BOT_RUNTIME), and only that one: a
+ * Codex bot needs no Claude install, and the reverse. On Codex the sign-in is
+ * checked too, since its CLI runs without one and fails on the first message.
+ *
+ * @param {NodeJS.ProcessEnv} env the bot's settings
+ */
+export async function checkRuntimeCli(env = process.env, { exec = run } = {}) {
+  const { resolveRuntime } = require_("../../lib/runtime/index.js");
+  const rt = resolveRuntime(env);
+  const name = `Agent CLI (${rt.name})`;
+  if (rt.problems.length) {
+    return bad(name, rt.problems.join("; "), "The bot refuses to start with these. Fix each setting named; see docs/runtimes.md.");
+  }
+  if (rt.name === "claude") return { ...(await checkClaudeCli(rt.bin)), name };
+  let version;
+  try {
+    const { stdout } = await exec(rt.bin, ["--version"], { timeout: 15000 });
+    version = stdout.trim().split("\n")[0];
+  } catch {
+    return bad(name, `'${rt.bin}' not found or not runnable`, "Install the Codex CLI and make sure it is on PATH, or set CODEX_BIN. See docs/runtimes.md.");
+  }
+  try {
+    await exec(rt.bin, ["login", "status"], { timeout: 15000 });
+  } catch {
+    return bad(name, `${version}, not signed in`, "Run `codex login` as the user the bot runs as.");
+  }
+  return ok(name, `${version}, signed in${rt.model ? `; model ${rt.model}` : ""}`);
+}
+
+/**
  * Prove the token works by asking Discord who it belongs to. On success we report
  * the bot's username — the token itself is never echoed, logged, or returned.
  */
@@ -149,11 +179,13 @@ export async function checkPortFree(port, label = "WS_PORT") {
  * command in the bot's own repo can never run — and the bot still lists it when
  * asked what it can do, because from inside Claude that command is real.
  */
-export function checkReservedCommands(claudeCwd, stopWords) {
+export function checkReservedCommands(claudeCwd, stopWords, runtime = "claude") {
   const reserved = ["fresh", "status", ...(stopWords || "stop,halt,abort,cancel").split(",").map((w) => w.trim()).filter(Boolean)];
   const hits = [];
-  for (const [dir, suffix] of [[join(claudeCwd, ".claude", "commands"), ".md"],
-                               [join(claudeCwd, ".claude", "skills"), ""]]) {
+  // The selected runtime's own skill folders (lib/runtime/layout.js).
+  const { LAYOUTS, repoLayout } = createRequire(import.meta.url)("../../lib/runtime/layout.js");
+  if (!LAYOUTS[runtime]) return bad("Reserved commands", `BOT_RUNTIME="${runtime}" has no repository layout`, "Set BOT_RUNTIME to claude or codex.");
+  for (const [dir, suffix] of repoLayout(runtime, claudeCwd).commands) {
     let entries = [];
     try { entries = readdirSync(dir); } catch { continue; }
     for (const e of entries) {
@@ -237,19 +269,17 @@ export function checkEcosystem(file, sourceDir) {
     for (const f of readdirSync(sourceDir)) {
       if (/\.(js|mjs|cjs)$/.test(f) && !f.startsWith("ecosystem")) files.push(join(sourceDir, f));
     }
+    const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(join(d, e.name)) : /\.(js|mjs|cjs|py|sh)$/.test(e.name) ? [join(d, e.name)] : []);
+    // lib/ in full: reading only its top level reported BOT_RUNTIME as dead once
+    // its resolution lived in lib/runtime/ — the setting that picks the CLI.
     const libDir = join(sourceDir, "lib");
-    if (existsSync(libDir)) {
-      for (const f of readdirSync(libDir)) {
-        if (/\.(js|mjs|cjs)$/.test(f)) files.push(join(libDir, f));
-      }
-    }
+    if (existsSync(libDir)) files.push(...walk(libDir));
     // The pack's hooks and commands run as the bot's children and read its
     // environment too. Leaving them out reported BOT_MAIL_*, BOT_CALENDAR_NO_ATTENDEES
     // and BOT_LAND_PATHS as dead: the switches that turn the mail, calendar and
     // land gates on, recommended for deletion.
     const pack = join(sourceDir, "skill-pack");
-    const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
-      e.isDirectory() ? walk(join(d, e.name)) : /\.(js|mjs|cjs|py|sh)$/.test(e.name) ? [join(d, e.name)] : []);
     if (existsSync(pack)) files.push(...walk(pack));
     for (const file of files) {
       const src = readFileSync(file, "utf8");
@@ -434,6 +464,9 @@ export function parseFleet(file) {
       claudeCwd: pick("CLAUDE_CWD"),
       wsPort: pick("WS_PORT"),
       permissionMode: pick("BOT_PERMISSION_MODE"),
+      // The runtime and every setting resolveRuntime reads, as literals.
+      runtimeEnv: Object.fromEntries(["BOT_RUNTIME", "BOT_MODEL", "CODEX_BIN", "CLAUDE_BIN", "CLAUDE_MODEL", "SUMMARIZE_MODEL",
+        ...require_("../../lib/runtime/index.js").CLAUDE_ONLY_SETTINGS].map((k) => [k, pick(k)]).filter(([, v]) => v != null)),
       stateDir: pick("BOT_STATE_DIR"),
       historyDir: pick("BOT_HISTORY_DIR"),
       allowedUsers: pick("ALLOWED_USERS"),
@@ -443,6 +476,9 @@ export function parseFleet(file) {
       // only ever a variable NAME.
       paperclipKeyVar: paperclipKeyRef ? paperclipKeyRef[1] : null,
       paperclipKeyLiteral: !paperclipKeyRef && /^\s*PAPERCLIP_API_KEY:/m.test(block),
+      // How its board runs execute (lib/permission-mode.js resolveBoardPolicy).
+      boardEnv: Object.fromEntries(["BOT_BOARD_EXECUTION", "BOT_BOARD_TOOLS", "BOT_BOARD_ENGINEERING_TOOLS", "BOT_BOARD_READ_PATHS",
+        "BOT_BOARD_WRITE_PATHS", "BOT_BOARD_NETWORK_ALLOW"].map((k) => [k, pick(k)]).filter(([, v]) => v != null)),
     });
   }
   return bots;
@@ -489,6 +525,7 @@ export async function checkFleet(file, harnessDir, env = process.env) {
         "This bot starts in `restricted` and cannot write files or run commands. Set BOT_PERMISSION_MODE_DEFAULT once for the host, or BOT_PERMISSION_MODE on this bot."));
     }
 
+    out.push({ ...(await checkRuntimeCli(b.runtimeEnv)), name: `${label}: runtime` });
     out.push({ ...checkAllowlist(b.allowedUsers), name: `${label}: ALLOWED_USERS` });
     out.push({ ...checkStateDir(b.stateDir, b.historyDir, harnessDir), name: `${label}: state dir` });
     out.push({
@@ -518,12 +555,17 @@ export async function checkPaperclip(bot, harnessDir, env = process.env, { fetch
       "Set both to put this bot on the board, or neither.");
   }
   // The same test the bot makes at startup (bot.js), against the folders known
-  // here: the bot's state folder and the harness.
+  // here: the bot's state and summaries folders and the harness.
   const { boardCwdDenied } = require_("../../lib/permission-mode.js");
-  const denied = [bot.stateDir, harnessDir].filter(Boolean);
+  const denied = [bot.stateDir, bot.historyDir, harnessDir].filter(Boolean);
   if (bot.claudeCwd && boardCwdDenied(denied, bot.claudeCwd)) {
     return bad(name, `connector stays off: CLAUDE_CWD ${bot.claudeCwd} is the harness or state folder, or inside one`,
       "A board run cannot keep that folder closed. Point CLAUDE_CWD at the folder board tasks should read.");
+  }
+  const policy = boardPolicyOf(bot, denied);
+  if (policy.problems.length) {
+    return bad(name, `connector stays off: ${policy.problems.join("; ")}`,
+      "Fix the BOT_BOARD_* setting named. See docs/paperclip-board-execution.md.");
   }
   if (!keyVar) return warn(name, "PAPERCLIP_API_KEY is a literal, not a process.env reference", "Move it to the environment.");
   if (!env[keyVar]) {
@@ -544,5 +586,52 @@ export async function checkPaperclip(bot, harnessDir, env = process.env, { fetch
   }
   if (!res.ok) return bad(name, `${url} answered HTTP ${res.status}`, "Check PAPERCLIP_URL and that the board is up.");
   const me = await res.json().catch(() => ({}));
-  return ok(name, `${url}, signed in as ${me.name ?? "an unnamed agent"}`);
+  const signedIn = `${url}, signed in as ${me.name ?? "an unnamed agent"}; board runs: ${policy.summary}`;
+  return policy.unreadable.length
+    ? warn(name, `${signedIn}; the sandbox cannot read ${policy.unreadable.join(", ")}`,
+      "A board shell's network goes through these helpers. Add each folder (and any folder a wrapper script loads from) to BOT_BOARD_READ_PATHS, or every request from the shell fails.")
+    : ok(name, signedIn);
+}
+
+/**
+ * A bot's board policy as bot.js will resolve it, what stops it, and — in
+ * engineering mode — the sandbox helpers its shell needs but cannot read.
+ * The sandbox hides everything outside the system folders, so a socat or
+ * bwrap installed under a home folder is invisible to the shell's own sandbox.
+ */
+export function boardPolicyOf(bot, denied, { which = whichBin, codex: codexInfo = null } = {}) {
+  const { resolveBoardPolicy, boardPolicyProblems, SYSTEM_READ } = require_("../../lib/permission-mode.js");
+  const policy = resolveBoardPolicy(bot.boardEnv ?? {});
+  const codex = bot.runtimeEnv?.BOT_RUNTIME === "codex";
+  const problems = boardPolicyProblems(policy, denied, bot.claudeCwd || "", { shellInEveryMode: codex });
+  const eng = policy.execution === "engineering";
+  // parity: the board run is the bot's Discord session, so there is no board
+  // profile or sandbox to check (bot.js skips codexBoardProblems too).
+  if (policy.parity) {
+    return { policy, problems, summary: "parity (as the Discord session, less the Discord credentials and other channels' conversation)", unreadable: [] };
+  }
+  if (codex) {
+    // The same tests bot.js makes at startup on a Codex bot (lib/runtime/codex.js).
+    const cx = require_("../../lib/runtime/codex.js");
+    const bin = bot.runtimeEnv.CODEX_BIN || "codex";
+    const info = codexInfo ?? { version: cx.codexVersion(bin), releaseDir: cx.codexReleaseDir(bin) };
+    problems.push(...cx.codexBoardProblems(policy, info));
+    const summary = `${policy.execution} on Codex ${info.version ?? "(not installed)"} (${eng ? `reads and writes the working directory${policy.writePaths.length ? `, ${policy.writePaths.join(", ")}` : ""}` : "reads the working directory"}; no network)`;
+    return { policy, problems, summary, unreadable: [] };
+  }
+  const summary = eng
+    ? `engineering (${policy.tools}; reads ${policy.readPaths.join(", ") || "the working directory only"}; writes the working directory${policy.writePaths.length ? `, ${policy.writePaths.join(", ")}` : ""}; hosts ${policy.network.join(", ") || "the bot's own"})`
+    : `readonly (${policy.tools})`;
+  const readable = [...SYSTEM_READ, ...policy.readPaths, ...policy.writePaths];
+  const unreadable = !eng ? [] : ["socat", "bwrap"].map(which).filter(Boolean)
+    .filter((p) => !readable.some((r) => p === r || p.startsWith(r.replace(/\/+$/, "") + "/")));
+  return { policy, problems, summary, unreadable };
+}
+
+function whichBin(name) {
+  for (const dir of (process.env.PATH || "").split(":").filter(Boolean)) {
+    const p = `${dir.replace(/\/+$/, "")}/${name}`;
+    if (existsSync(p)) return p;
+  }
+  return null;
 }

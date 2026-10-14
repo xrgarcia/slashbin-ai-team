@@ -6,7 +6,7 @@ const assert = require("assert");
 const { readFileSync, readdirSync, writeFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED } = require("../lib/paperclip");
+const { paperclipBoards, pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED, UNBLOCK_ACTION, OUTCOME_MARK, outcomeOf, refusal } = require("../lib/paperclip");
 
 const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
 let pass = 0, fail = 0;
@@ -16,6 +16,8 @@ async function check(label, fn) {
 }
 const silent = { info() {}, warn() {}, error() {}, child() { return silent; } };
 const ME = { id: "agent-1", name: "Bot" };
+// Paperclip refuses a block that names no one to unblock it; an agent may name only itself.
+const UNBLOCK = { owner: { agentId: ME.id }, action: UNBLOCK_ACTION };
 
 function board({ runs, comments = [], wakeCommentId }) {
   const writes = [], activity = [];
@@ -42,7 +44,7 @@ function board({ runs, comments = [], wakeCommentId }) {
       if (raceW && followUp) { issue.status = raceW; raceW = null; }
       if (body.status) {
         // Paperclip records each update's from/to under the row lock, newest first.
-        activity.unshift({ runId: init.headers["x-paperclip-run-id"], action: "issue.updated",
+        activity.unshift({ runId: init.headers["x-paperclip-run-id"], action: "issue.updated", actorType: "agent", actorId: ME.id,
           details: { changes: { status: { from: issue.status ?? "todo", to: body.status } } } });
         issue.status = body.status;
       }
@@ -142,7 +144,7 @@ const poller = (b, answer) => createPaperclipPoller({
     const small = Array.from({ length: 6 }, (_, i) => ({ id: `s${i}`, authorAgentId: i === 4 ? null : ME.id, createdAt: `${i}`, body: `é—${i} ${"ü".repeat(30 * i)}` }));
     const issue = { identifier: "T-1", title: "Tïtle ✓", description: "dé".repeat(40) };
     const full = buildTaskPrompt(issue, small, ME, "u", { maxBytes: 1e9 });
-    for (let max = Buffer.byteLength(full) + 5; max > 1400; max -= 7) {
+    for (let max = Buffer.byteLength(full) + 5; max > 1600; max -= 7) {
       const q = buildTaskPrompt(issue, small, ME, "u", { maxBytes: max });
       assert.ok(Buffer.byteLength(q) <= max, `${Buffer.byteLength(q)} bytes over a budget of ${max}`);
       if (max >= Buffer.byteLength(full)) assert.strictEqual(q, full, "a prompt within budget was shed");
@@ -254,7 +256,7 @@ const poller = (b, answer) => createPaperclipPoller({
           return { ok: true, text: async () => "{}" };
         }
         const routes = { "/agents/me": ME, "/agents/me/inbox-lite": [{ id: "iss-1" }], "/issues/iss-1": issue,
-          "/issues/iss-1/comments": comments, "/issues/iss-1/runs": running };
+          "/issues/iss-1/comments": comments, "/issues/iss-1/runs": running, "/issues/iss-1/activity": [] };
         return path in routes ? { ok: true, text: async () => JSON.stringify(routes[path]) } : { ok: false, status: 404, text: async () => "" };
       };
       const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
@@ -353,6 +355,8 @@ const poller = (b, answer) => createPaperclipPoller({
     const b = board({ runs: running });
     await poller(b, async () => { throw new Error("boom"); }).tick();
     assert.strictEqual(b.writes[0].body.comment, FALLBACK_REPLY);
+    // Live 2026-10-12: a Codex run that never started closed its task `done`.
+    assert.strictEqual(b.writes[0].body.status, "blocked", "a failed run is not a done task");
   });
 
   await check("a run is answered once across ticks", async () => {
@@ -686,7 +690,7 @@ const poller = (b, answer) => createPaperclipPoller({
       const path = url.replace(/^.*\/api/, "");
       if (init.method === "PATCH") { writes.push(JSON.parse(init.body).comment); return { ok: true, text: async () => "{}" }; }
       const routes = { "/agents/me": ME, "/agents/me/inbox-lite": [{ id: "iss-1" }], "/issues/iss-1": issue,
-        "/issues/iss-1/comments": comments, "/issues/iss-1/runs": [{ id: `run-${run}`, agentId: ME.id, status: "running" }] };
+        "/issues/iss-1/comments": comments, "/issues/iss-1/activity": [], "/issues/iss-1/runs": [{ id: `run-${run}`, agentId: ME.id, status: "running" }] };
       return path in routes ? { ok: true, text: async () => JSON.stringify(routes[path]) } : { ok: false, status: 404, text: async () => "" };
     };
     const writes = [];
@@ -712,6 +716,7 @@ const poller = (b, answer) => createPaperclipPoller({
       routes[`GET /issues/iss-${n}/runs`] = [{ id: `run-${n}`, agentId: ME.id, status: "running" }];
       routes[`GET /issues/iss-${n}`] = { id: `iss-${n}`, identifier: `T-${n}`, title: "Q", createdAt: "2026-01-01T00:00:00Z" };
       routes[`GET /issues/iss-${n}/comments`] = [];
+      routes[`GET /issues/iss-${n}/activity`] = [];
       routes[`GET /heartbeat-runs/run-${n}`] = { contextSnapshot: {} };
     }
     const fetch = async (url, init) => {
@@ -742,6 +747,7 @@ const poller = (b, answer) => createPaperclipPoller({
       routes[`GET /issues/iss-${n}/runs`] = [{ id: `run-${n}`, agentId: ME.id, status: "running" }];
       routes[`GET /issues/iss-${n}`] = { id: `iss-${n}`, identifier: `T-${n}`, title: "Q", createdAt: "2026-01-01T00:00:00Z" };
       routes[`GET /issues/iss-${n}/comments`] = [];
+      routes[`GET /issues/iss-${n}/activity`] = [];
       routes[`GET /heartbeat-runs/run-${n}`] = { contextSnapshot: {} };
     }
     let down = true; const writes = [];
@@ -767,7 +773,8 @@ const poller = (b, answer) => createPaperclipPoller({
   await check("bot.js: board runs never see the buffer, and the key never reaches Claude", () => {
     assert.match(bot, /noBufferContext: true/);
     assert.match(bot, /opts\.noBufferContext \? "" : buildContextPrompt/);
-    assert.match(bot, /delete cleanEnv\.PAPERCLIP_API_KEY/);
+    assert.match(bot, /\["PAPERCLIP_API_KEY", \.\.\.PAPERCLIP_BOARDS\.map\(\(b\) => b\.keyEnv\)\]/);
+    assert.match(bot, /for \(const name of connectorKeys\(\)\) delete cleanEnv\[name\];/);
   });
 
   await check("a file the run made is named as not delivered, never left to read as attached", () => {
@@ -781,6 +788,114 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.strictEqual(plain.text(), "just text");
     assert.match(buildTaskPrompt({ identifier: "T-1", title: "Q" }, [], ME, "u"), /cannot attach a file/);
     assert.match(bot, /reply\.collect, \{\}, "paperclip"/, "the board run collects through replyCollector");
+  });
+
+  await check("boards: the first board is PAPERCLIP_URL; extra boards name their key's variable", () => {
+    const env = {
+      PAPERCLIP_URL: "https://one.example.com", PAPERCLIP_API_KEY: "k1", PAPERCLIP_PROMPT_CHANNEL: "123456789012345678",
+      PAPERCLIP_EXTRA_BOARDS: JSON.stringify([{ id: "two", url: "https://two.example.com", keyEnv: "TWO_KEY", promptChannel: "chan-2" }]),
+      TWO_KEY: "k2",
+    };
+    const { boards, problems } = paperclipBoards(env);
+    assert.deepStrictEqual(problems, []);
+    assert.deepStrictEqual(boards, [
+      { id: null, url: "https://one.example.com", apiKey: "k1", keyEnv: "PAPERCLIP_API_KEY", promptChannel: "123456789012345678" },
+      { id: "two", url: "https://two.example.com", apiKey: "k2", keyEnv: "TWO_KEY", promptChannel: "chan-2" },
+    ]);
+  });
+
+  await check("boards: an extra board works without a first one, and nothing configured is no board", () => {
+    const only = paperclipBoards({ PAPERCLIP_EXTRA_BOARDS: '[{"id":"two","url":"https://two.example.com","keyEnv":"TWO_KEY"}]', TWO_KEY: "k" });
+    assert.deepStrictEqual(only.boards.map((b) => b.id), ["two"]);
+    assert.strictEqual(only.boards[0].promptChannel, undefined);
+    assert.deepStrictEqual(paperclipBoards({}), { boards: [], problems: [] });
+  });
+
+  await check("boards: a broken entry is reported and skipped; the rest still come on", () => {
+    const env = {
+      PAPERCLIP_URL: "https://one.example.com", PAPERCLIP_API_KEY: "k1", OK_KEY: "k",
+      PAPERCLIP_EXTRA_BOARDS: JSON.stringify([
+        { id: "Bad Id", url: "https://a.example.com", keyEnv: "OK_KEY" },
+        { id: "nokey", url: "https://b.example.com", keyEnv: "MISSING_KEY" },
+        { id: "notavar", url: "https://c.example.com", keyEnv: "k" },
+        { id: "nourl", keyEnv: "OK_KEY" },
+        { id: "same", url: "https://ONE.example.com/", keyEnv: "OK_KEY" },
+        { id: "good", url: "https://d.example.com", keyEnv: "OK_KEY" },
+        { id: "good", url: "https://e.example.com", keyEnv: "OK_KEY" },
+      ]),
+    };
+    const { boards, problems } = paperclipBoards(env);
+    assert.deepStrictEqual(boards.map((b) => b.id), [null, "good"]);
+    assert.strictEqual(problems.length, 6, problems.join("\n"));
+    assert.ok(problems.some((p) => /MISSING_KEY is not set/.test(p)));
+    assert.ok(problems.some((p) => /already answered/.test(p)), "the same board twice would race for its runs");
+    assert.ok(problems.every((p) => !/\bk1\b|"k"/.test(p)), "a problem never carries a key");
+  });
+
+  await check("boards: half a first board, or extra boards that are not a JSON array, is reported", () => {
+    assert.match(paperclipBoards({ PAPERCLIP_URL: "https://one.example.com" }).problems[0], /must both be set/);
+    assert.match(paperclipBoards({ PAPERCLIP_EXTRA_BOARDS: "{oops" }).problems[0], /not JSON/);
+    assert.match(paperclipBoards({ PAPERCLIP_EXTRA_BOARDS: '{"id":"x"}' }).problems[0], /JSON array/);
+  });
+
+  await check("bot.js: every board's key is kept from Claude, and an extra board has its own state and sessions", () => {
+    assert.match(bot, /\.\.\.PAPERCLIP_BOARDS\.map\(\(b\) => b\.keyEnv\)/);
+    assert.match(bot, /const tag = board\.id \? `paperclip-\$\{board\.id\}` : "paperclip";/);
+    assert.match(bot, /stateFile: join\(STATE_DIR, `\$\{tag\}\.json`\)/);
+    assert.match(bot, /runClaude\(prompt, `\$\{tag\}-\$\{issue\.identifier\}`/);
+  });
+
+  await check("an answer that says it is blocked leaves the task blocked, never done, without the outcome line", async () => {
+    // SLA-1147: a run that could not do its task replied "Blocked" and the
+    // poller closed the task as done, so the board showed finished work.
+    for (const tail of [`${OUTCOME_MARK} blocked`, `**${OUTCOME_MARK} BLOCKED**`, `> ${OUTCOME_MARK} blocked — needs a key`]) {
+      const b = board({ runs: running });
+      await poller(b, async () => `I could not run the tests: Bash is not available here. The owner can enable it.\n\n${tail}`).tick();
+      assert.deepStrictEqual(b.writes.map((w) => w.body),
+        [{ status: "blocked", unblockDescriptor: UNBLOCK, blockedByIssueIds: [], comment: "I could not run the tests: Bash is not available here. The owner can enable it." }], tail);
+      assert.ok(b.writes.every((w) => w.body.status !== "done"), "a blocked answer closed the task as done");
+    }
+    const b = board({ runs: running });
+    await poller(b, async () => `All done.\n${OUTCOME_MARK} done`).tick();
+    assert.deepStrictEqual(b.writes.map((w) => w.body), [{ status: "done", comment: "All done." }]);
+    assert.deepStrictEqual(outcomeOf(`${OUTCOME_MARK} blocked`), { comment: "", status: "blocked", waitsOn: [] });
+    assert.match(buildTaskPrompt({ identifier: "T-1", title: "Q" }, [], ME, "u"), new RegExp(`${OUTCOME_MARK} blocked`));
+  });
+
+  await check("a blocked close that a newer ask lands on is reopened for it", async () => {
+    const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "first ask" }];
+    const issue = { id: "iss-1", identifier: "T-1", title: "A question", status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
+    const writes = [], activity = [];
+    let landing = true;
+    const fetch = async (url, init) => {
+      const path = url.replace(/^.*\/api/, "");
+      if (init.method === "PATCH") {
+        const body = JSON.parse(init.body);
+        writes.push(body);
+        if (body.status) { activity.unshift({ runId: "run-1", action: "issue.updated", details: { changes: { status: { from: issue.status, to: body.status } } } }); issue.status = body.status; }
+        if (landing) { landing = false; comments.push({ id: "h2", authorAgentId: null, createdAt: "2026-01-02T00:03:00Z", body: "here is the key" }); }
+        return { ok: true, text: async () => "{}" };
+      }
+      const routes = { "/agents/me": ME, "/agents/me/inbox-lite": [{ id: "iss-1" }], "/issues/iss-1": issue,
+        "/issues/iss-1/comments": comments, "/issues/iss-1/runs": running, "/issues/iss-1/activity": activity };
+      return path in routes ? { ok: true, text: async () => JSON.stringify(routes[path]) } : { ok: false, status: 404, text: async () => "" };
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    await createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: async () => `No key.\n${OUTCOME_MARK} blocked` }).tick();
+    assert.deepStrictEqual(writes, [{ status: "blocked", unblockDescriptor: UNBLOCK, blockedByIssueIds: [], comment: "No key." }, { status: "todo" }]);
+    assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).closing, {});
+  });
+
+  await check("a refused request carries Paperclip's code, in the message and on the error", () => {
+    const body = JSON.stringify({ error: "This write needs the run it belongs to.", details: { code: "cross_issue_influence_run_context_required", boundary: "b" } });
+    const err = refusal("PATCH", "/issues/x", 403, body);
+    assert.strictEqual(err.status, 403);
+    assert.strictEqual(err.code, "cross_issue_influence_run_context_required");
+    assert.match(err.message, /^PATCH \/issues\/x -> HTTP 403 cross_issue_influence_run_context_required /);
+    const plain = refusal("GET", "/agents/me", 401, "Unauthorized");
+    assert.strictEqual(plain.code, undefined);
+    assert.strictEqual(plain.message, "GET /agents/me -> HTTP 401 Unauthorized");
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

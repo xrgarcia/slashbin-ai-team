@@ -108,7 +108,8 @@ check("every session spawn loads the pack", () => {
 });
 
 check("a missing pack directory is skipped, not fatal", () => {
-  const fn = /function skillPackArgs\(\)[\s\S]*?\n}/.exec(bot)[0];
+  // Both runtimes take their packs from skillPacks(): Claude as --plugin-dir, Codex as hooks and skills.
+  const fn = /function skillPacks\(\)[\s\S]*?\n}/.exec(bot)[0];
   assert.ok(/existsSync\(d\)/.test(fn), "a deleted or unbuilt pack must not break every message");
 });
 

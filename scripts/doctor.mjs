@@ -11,7 +11,7 @@ import "dotenv/config";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import {
-  checkNode, checkClaudeCli, checkDiscordToken, checkMessageContentIntent,
+  checkNode, checkRuntimeCli, checkDiscordToken, checkMessageContentIntent,
   checkClaudeCwd, checkPortFree, checkAllowlist, checkEcosystem, checkStateDir,
   checkReservedCommands, checkScheduleCadence, checkRunningCodeFresh,
   checkBillingKeyAbsent, checkFleet, parseFleet, render, skip,
@@ -37,7 +37,10 @@ console.log(`\nslashbin-ai-team doctor${FLEET ? " — fleet" : ""}\n`);
 
 const results = [];
 results.push(await checkNode());
-results.push(await checkClaudeCli());
+// The CLI of each runtime in use, and no other: a Codex-only host needs no Claude.
+for (const runtime of PER_BOT_ENV ? [...new Set(FLEET_BOTS.map((b) => b.runtimeEnv?.BOT_RUNTIME || "claude"))] : [null]) {
+  results.push(await checkRuntimeCli(runtime ? { ...process.env, BOT_RUNTIME: runtime } : process.env));
+}
 if (PER_BOT_ENV) {
   results.push(skip("Discord token", "per-bot — not set at host level", DEFER));
   results.push(skip("Message Content Intent", "per-bot — needs a bot's own token", DEFER));
@@ -48,7 +51,7 @@ if (PER_BOT_ENV) {
   results.push(await checkClaudeCwd(process.env.CLAUDE_CWD || process.cwd(), HARNESS));
 }
 results.push(await checkPortFree(process.env.WS_PORT || 9800));
-results.push(checkReservedCommands(process.env.CLAUDE_CWD || process.cwd(), process.env.BOT_STOP_WORDS));
+results.push(checkReservedCommands(process.env.CLAUDE_CWD || process.cwd(), process.env.BOT_STOP_WORDS, (process.env.BOT_RUNTIME || "").trim() || "claude"));
 if (PER_BOT_ENV) {
   // Same reason as the token: each app sets its own in ecosystem.config.js.
   // checkFleet verifies both per bot, so nothing is lost by deferring here.

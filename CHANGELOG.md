@@ -5,6 +5,148 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **One bot can answer on more than one Paperclip board.** `PAPERCLIP_EXTRA_BOARDS`
+  lists the others as `{ id, url, keyEnv, promptChannel }`, so an agent seated
+  in two companies is answered by the same bot, with each board's replies
+  shaped by the channel whose audience matches its readers. Each board gets its
+  own poller, state file and task sessions; the first board keeps its existing
+  names, so nothing it answered is asked again. `keyEnv` names the variable
+  holding that board's key, which is kept from Claude like `PAPERCLIP_API_KEY`.
+  A broken entry is logged and skipped, and the same board listed twice is
+  refused, since two pollers would race for its runs.
+
+### Fixed
+
+- **A run Paperclip loses after a resume, or a replacement run it loses
+  too, is recovered like any other.** The wake that resumes a task checks it
+  out with no record, so the bot's earlier block used to outrank Paperclip's
+  settlement of the run it then lost: the card stayed blocked with no note and
+  no new run. A stop that was no one's choice no longer hides a newer one.
+- **A change to what a task waits on never reruns an answered ask.** An ask
+  used to be saved under a key that also named the finished waits it came back
+  from, so any later change to the waits gave it a new key and ran it again.
+  The key is now the ask alone. A blocked answer records the wait it is in, as
+  the run that wrote it, at the moment it is written; the ask resumes from that
+  wait once, when its tasks are done or someone moves the card on, and the
+  resume's own answer ends it. An answer that is not blocked is final. State
+  saved under the old keys reads back as the asks they name.
+  A saved answer whose post is retried is found delivered only in a comment
+  made after its attempt started, so the same words from the wait before are
+  not taken for it. Asks posted together each keep their own outcome: an
+  older ask finished but never posted used to take a newer ask's blocked
+  status, and ran again when that wait was done. A blocked answer that was
+  posted as a comment only stopped nothing, so it resumes on its waits or a
+  move made after it, not on a card left open. Going on at once with work
+  whose waits were already done is an attempt like any other: a bot that dies
+  in it runs it once more, told so, when allowed, or posts the fallback —
+  it used to post the earlier answer and leave the card blocked on nothing.
+- **A person who blocks a task just as the bot closes it blocked keeps the
+  hold.** The close lands as the same status reasserted, and used to count as
+  the bot's own block, so the task resumed when its wait finished. The hold
+  now stays the person's; their waits are put back, and their note, which
+  Paperclip lets no agent write back, is quoted in a comment.
+- **No bot write overwrites a person's newer change to a task.** Every status
+  or blocker write the bot makes — a close, a hold put back, a follow-up —
+  now reads the task's record first. If a person changed its status or what
+  it waits on after the board the bot decided from, their version stands and
+  the bot comments instead. A person who re-blocked a task on something new
+  while the bot was putting back their earlier hold used to get the old waits
+  back; a person who moved a card on while the bot answered, or as it closed,
+  had it closed done over them. The record is read before the task, and the
+  check made after the close's waits are looked up, so a change between the
+  reads or during the lookups is seen; a change to what the task waits on
+  that lands as it closes is put back after. A wake on an ask already answered
+  closes it as that answer left it, decided from the board as the answer was:
+  a person who moved the card to review while the bot answered used to have
+  it closed done by the next wake. An ask answered blocked keeps its card
+  blocked through those wakes — Paperclip's checkout used to leave it in
+  progress, where the finished part of its wait was never cut from the card. If
+  the last of its waits finishes during that wake, nothing is written and the
+  ask resumes on the next poll. A move a person makes on a blocked card counts
+  from the blocked answer itself, so a note the bot posts after it no longer
+  hides the move and the ask still resumes. A wait is looked up once per post: a
+  task that reopened between two looks used to leave the card blocked on
+  nothing. The board the bot decides from also keeps the entries it saw at its
+  newest time, so a person's change recorded in that same millisecond counts
+  as newer and stands — and so does every write the bot makes after one of its
+  own, a hold put back or a status restored, judged from the board as that
+  write was recorded. A blocked ask resumes when the card is reopened after the
+  answer itself, even in its millisecond, never after a note the bot posted
+  since.
+- **A board run never keeps a Discord or bridge credential under another
+  name.** Bots started from one shared environment hold every bot's token
+  under its own name (`EM_DISCORD_TOKEN`, `PO_DISCORD_TOKEN`, `DISCORD_BOT_KEY`…);
+  every board run, parity included, now withholds any variable named as one,
+  and any variable carrying one's value.
+- **A parity board run's commands get no Paperclip key under another name.**
+  The same shared environment holds every bot's board keys, the board sync's
+  admin key among them; a parity run now withholds each, and any variable
+  carrying one's value. The connector's own key still reaches a Codex MCP
+  server that names it.
+- **A run Paperclip gave up on takes no new ask.** When a newer ask came in
+  after the attempt a gone run still owes, that attempt is posted as a comment
+  only, and the newer ask waits for a live run of its own.
+- **A mirrored task answered blocked is not run again on every wake.** Its card
+  never moves for the answer, so only a status move recorded after the answer
+  brings the ask back.
+- **A wait that finishes while the bot answers does not turn the ask into a new
+  one.** The answer still closes the card, and the wake for the finished wait
+  finds the ask answered rather than running it again.
+- **Paperclip settling a lost run does not lift a person's hold.** On a task
+  already stopped, its blocked settlement is not a decision of its own: the
+  earlier stop stands, a person's included, for own and mirrored tasks.
+- **An answered blocked ask is not run again when a close clears done links.**
+  The same unchanged ask, keyed without the suffix those links gave it, is
+  still the ask already answered, across a restart too.
+- **A board session made under other access is not resumed.** Each stored board
+  session records the access it was made with (run kind, board policy,
+  permission mode, the bot's settings, and its tools, allow and deny rules);
+  after any change the next ask starts fresh, on both runtimes.
+- **A Codex session's MCP servers keep the Paperclip keys their config names.**
+  The connector keys (`PAPERCLIP_API_KEY` and each extra board's) were removed
+  after the servers' environment was set, so a server that named one ran
+  without it. They now reach that server, in Discord and parity board runs,
+  and are still excluded from every command the model runs.
+- **Credential files under the folders the bot's settings open to reading are
+  denied to a board run**, as those under the working directory already were.
+- **A blocked answer is never left waiting on tasks already done.** When the last
+  task it named finishes just before the block is posted, or before a saved
+  answer's post is retried, nothing is written: the work goes on once, told what
+  the answer said so nothing done is done again, and the card closes from the
+  result. A person's stop still holds it.
+- **A person's stop holds a mirrored task too.** A task another writer owns is
+  no longer worked after a person blocks or cancels it; a block its own writer
+  sets for the bot to clear is still worked.
+- **A parity board run's MCP servers never put back the Discord credentials.**
+  A Codex server env entry naming a withheld variable, or carrying its value
+  under another name, is left out of that run.
+- **A Paperclip card stays true after handoffs, lost runs and restarts.** A
+  task that waits on others is blocked by exactly the tasks it names, its wait
+  is trimmed as each one finishes, and when the last is done the same card
+  resumes, says which task it waited on, and closes done under the run it came
+  on; a task blocked on work that is already done goes on at once. A run the
+  board lost keeps working: the card gets a note, the bot opens a new run on
+  it, and the one answer closes it there, with no second launch. A blocked
+  answer is not taken as finished — a person moving the card on asks it
+  again — and the newest answer decides the card's status. A person's blocked
+  or cancelled stands — the bot writes no status over it, does not resume or
+  rerun a task a person holds, and a mirrored card gets only the answer as a
+  comment. Paperclip takes nothing under a run a person cancelled, so that
+  answer waits for the task's next run.
+- **Board runs cannot read secret files the scan did not reach.** Folders past
+  the scan's budget (`node_modules` is scanned last) are denied rather than
+  left readable.
+- **Codex MCP servers from two configs no longer overwrite each other's
+  keys.** A server whose variable another already set differently is skipped.
+- **A restricted Codex run's commands cannot read the bot's keys.** Board
+  runs, summaries and restricted sessions run commands with only the core
+  environment (HOME, PATH, USER…), so `MCP_CONFIG` or `DATABASE_URL` cannot be
+  printed into a reply.
+
 ## [2.8.0] — 2026-10-09
 
 ### Added

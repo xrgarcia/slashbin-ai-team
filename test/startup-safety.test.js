@@ -186,11 +186,14 @@ check("a colliding bot command warns at startup", () => {
   assert.ok(/can NEVER run/.test(bot), "the warning must say the command cannot run, not merely that it exists");
 });
 
-check("collision detection looks where Claude Code actually looks", () => {
+check("collision detection looks where the selected runtime actually looks", () => {
   const fn = /function shadowedCommands\(\)[\s\S]*?\n}/.exec(bot)[0];
-  assert.ok(/\.claude", "commands"/.test(fn), "must check .claude/commands");
-  assert.ok(/\.claude", "skills"/.test(fn), "must check .claude/skills");
-  assert.ok(/CLAUDE_CWD/.test(fn), "must look in the BOT's project, not the harness");
+  assert.ok(/LAYOUT\.commands/.test(fn), "must read the runtime's command directories");
+  assert.ok(/repoLayout\(RUNTIME\.name, CLAUDE_CWD\)/.test(bot), "layout must be the BOT's project, for the selected runtime");
+  const { repoLayout } = require("../lib/runtime/layout");
+  const dirs = (rt) => repoLayout(rt, "/r").commands.map(([d]) => d);
+  assert.deepStrictEqual(dirs("claude"), ["/r/.claude/commands", "/r/.claude/skills"], "Claude must check .claude/commands and .claude/skills");
+  assert.deepStrictEqual(dirs("codex"), ["/r/.agents/skills"], "Codex must check .agents/skills, and only that");
 });
 
 check("a bot cannot override the harness stop command", () => {
@@ -278,9 +281,10 @@ check("there is exactly ONE summarization implementation", () => {
   const promptCopies = [bot, sum, core].filter((f) => /Topics discussed/.test(f)).length;
   assert.strictEqual(promptCopies, 1, "the summarization prompt exists in more than one file");
 
-  assert.ok(!/spawn\(CLAUDE_BIN/.test(sum), "summarize.js still spawns Claude itself");
-  // bot.js keeps exactly one spawn — the agent. Summarization is not it.
-  assert.strictEqual((bot.match(/spawn\(CLAUDE_BIN/g) || []).length, 1,
+  assert.ok(!/spawn\((CLAUDE_BIN|RUNTIME\.bin)/.test(sum), "summarize.js still spawns Claude itself");
+  // bot.js keeps exactly one spawn — the agent, on whichever runtime is set.
+  // Summarization is not it.
+  assert.strictEqual((bot.match(/spawn\((CLAUDE_BIN|RUNTIME\.bin)/g) || []).length, 1,
     "bot.js should spawn Claude once (the agent); summarization goes through the module");
 
   for (const f of [bot, sum]) {
@@ -369,11 +373,13 @@ check("bypass keeps BOT_PERMISSION_DENY", () => {
 });
 
 check("BOT_SETTINGS reaches every session", () => {
-  assert.ok(/\.\.\.settingsArgs\(\{ board: Boolean\(opts\.noBufferContext\) \}\),/.test(bot), "the session argv never passes --settings");
+  assert.ok(/\.\.\.settingsArgs\(\{ board: narrowBoard, tmpDir: boardTmp \}\),/.test(bot), "the session argv never passes --settings");
   // A board run's settings are the bot's own with the sandbox layered on, never instead of them.
   const fn = /function settingsArgs[\s\S]*?\n}/.exec(bot)[0];
   assert.ok(/if \(!board\) return SESSION_SETTINGS \? \["--settings", SESSION_SETTINGS\] : \[\];/.test(fn), "a Discord run lost BOT_SETTINGS");
-  assert.ok(/boardSettings\(base,/.test(fn) && /SESSION_SETTINGS/.test(fn.split("boardSettings")[0]), "a board run dropped BOT_SETTINGS");
+  assert.ok(/boardSettings\(botSettings\(\),/.test(fn), "a board run dropped BOT_SETTINGS");
+  const read = /function botSettings[\s\S]*?\n}/.exec(bot)[0];
+  assert.ok(/SESSION_SETTINGS/.test(read) && /readFileSync\(resolve\(CLAUDE_CWD, SESSION_SETTINGS\)/.test(read), "the bot's settings are not what BOT_SETTINGS names");
 });
 
 check("restricted is the default, bypass must be asked for", () => {

@@ -248,6 +248,38 @@ ${extra}
     assert.match(r.detail, /connector stays off/);
   });
 
+  await checkAsync("the board policy is reported, and one the bot would refuse fails here too", async () => {
+    const [ro] = parseFleet(write("ro.js", BOARD(KEYED)));
+    const r = await checkPaperclip(ro, "/srv/harness", { PO_PAPERCLIP_API_KEY: "k" }, { fetch: reply(200, { name: "PO" }) });
+    assert.match(r.detail, /board runs: readonly \(Read,Glob,Grep\)/);
+    const eng = BOARD(KEYED + "\n  BOT_BOARD_EXECUTION: 'engineering',\n  BOT_BOARD_READ_PATHS: '/srv/other',\n  BOT_BOARD_NETWORK_ALLOW: 'api.example.com',");
+    const [e] = parseFleet(write("eng.js", eng));
+    assert.deepStrictEqual(e.boardEnv, { BOT_BOARD_EXECUTION: "engineering", BOT_BOARD_READ_PATHS: "/srv/other", BOT_BOARD_NETWORK_ALLOW: "api.example.com" });
+    const r2 = await checkPaperclip(e, "/srv/harness", { PO_PAPERCLIP_API_KEY: "k" }, { fetch: reply(200, {}) });
+    assert.match(r2.detail, /board runs: engineering \(Read,Glob,Grep,Edit,Write,Bash; reads \/srv\/other;/);
+    const [bad] = parseFleet(write("badpol.js", BOARD(KEYED + "\n  BOT_BOARD_EXECUTION: 'engineering',\n  BOT_BOARD_WRITE_PATHS: '/srv/harness/state',")));
+    const r3 = await checkPaperclip(bad, "/srv/harness", { PO_PAPERCLIP_API_KEY: "k" }, { fetch: reply(200, {}) });
+    assert.strictEqual(r3.status, FAIL);
+    assert.match(r3.detail, /connector stays off: BOT_BOARD_WRITE_PATHS/);
+    // Summaries inside CLAUDE_CWD: readable to an engineering shell through version control.
+    const r4 = await checkPaperclip({ ...e, historyDir: `${e.claudeCwd}/bot-history` }, "/srv/harness", { PO_PAPERCLIP_API_KEY: "k" }, { fetch: reply(200, {}) });
+    assert.strictEqual(r4.status, FAIL);
+    assert.match(r4.detail, /bot-history.*inside CLAUDE_CWD/);
+  });
+
+  await checkAsync("engineering mode warns when the sandbox's network helper sits where the shell cannot read it", async () => {
+    const { boardPolicyOf } = await import("../scripts/lib/checks.mjs");
+    const bot = { claudeCwd: "/srv/po", boardEnv: { BOT_BOARD_EXECUTION: "engineering", BOT_BOARD_READ_PATHS: "/opt/socat" } };
+    const which = (n) => ({ socat: "/home/op/.local/bin/socat", bwrap: "/usr/bin/bwrap" })[n];
+    assert.deepStrictEqual(boardPolicyOf(bot, ["/srv/harness"], { which }).unreadable, ["/home/op/.local/bin/socat"]);
+    const fixed = { ...bot, boardEnv: { ...bot.boardEnv, BOT_BOARD_READ_PATHS: "/opt/socat,/home/op/.local/bin" } };
+    assert.deepStrictEqual(boardPolicyOf(fixed, ["/srv/harness"], { which }).unreadable, []);
+    assert.deepStrictEqual(boardPolicyOf({ claudeCwd: "/srv/po" }, ["/srv/harness"], { which }).unreadable, [], "readonly runs no shell");
+    const parity = boardPolicyOf({ claudeCwd: "/srv/po", boardEnv: { BOT_BOARD_EXECUTION: "parity" }, runtimeEnv: { BOT_RUNTIME: "codex" } }, ["/srv/harness"], { which, codex: { version: null, releaseDir: null } });
+    assert.deepStrictEqual(parity.problems, [], "a parity bot was held to the board profile it does not use");
+    assert.match(parity.summary, /^parity/);
+  });
+
   await checkAsync("a key not loaded in this shell warns instead of guessing", async () => {
     const [bot] = parseFleet(write("unset.js", BOARD(KEYED)));
     const r = await checkPaperclip(bot, "/srv/harness", {}, { fetch: reply(200, {}) });
@@ -280,6 +312,11 @@ module.exports = { apps: [ { env: {
 ${keys.map((k) => `  ${k}: 'v',`).join("\n")}
 } } ] };
 `;
+
+  check("a setting read only in a lib/ subfolder is not dead (BOT_RUNTIME in lib/runtime/)", () => {
+    const line = deadOf(ECO(["BOT_RUNTIME"]), { "lib/runtime/index.js": "const raw = (env.BOT_RUNTIME || '').trim();" });
+    assert.strictEqual(line.status, PASS, line.detail);
+  });
 
   check("a switch read only by a pack hook (Python) is not dead", () => {
     const line = deadOf(ECO(["BOT_MAIL_ALLOW"]), { "skill-pack/hooks/gate.py": 'os.environ.get("BOT_MAIL_ALLOW", "")' });

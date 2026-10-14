@@ -41,20 +41,23 @@ function extractFn(name) {
 
 // The function reads CLAUDE_CWD and logs; supply both from the harness so the
 // real body runs against a real directory rather than a reimplementation.
-function loadChannelPrompt(cwd) {
+const { repoLayout } = require("../lib/runtime/layout");
+function loadFn(name, cwd, runtime = "claude") {
   const logged = [];
   const fn = new Function(
-    "join", "existsSync", "readFileSync", "CLAUDE_CWD", "log",
-    `${extractFn("channelPrompt")}; return channelPrompt;`
+    "join", "existsSync", "readFileSync", "CLAUDE_CWD", "LAYOUT", "log",
+    `${extractFn(name)}; return ${name};`
   )(
     join,
     require("fs").existsSync,
     readFileSync,
     cwd,
+    repoLayout(runtime, cwd),
     { info: (o, m) => logged.push([m, o]), warn: (o, m) => logged.push([m, o]) }
   );
   return { fn, logged };
 }
+const loadChannelPrompt = (cwd, runtime) => loadFn("channelPrompt", cwd, runtime);
 
 let pass = 0, fail = 0;
 function check(label, body) {
@@ -113,7 +116,7 @@ check("the channel block is assembled into the prompt HEAD, where clamping canno
   );
   // From the declaration onward: the head's own definition is a template literal
   // too, and it is the one thing that cannot be required to contain itself.
-  const assembly = SRC.slice(SRC.indexOf("let systemPrompt;"), SRC.indexOf("const args = ["));
+  const assembly = SRC.slice(SRC.indexOf("let systemPrompt;"), SRC.search(/const args = (CODEX \? \[\] : )?\[/));
   // Every template literal systemPrompt can be assigned — both ternary arms
   // included — has to open with the head. One that does not is a path where the
   // channel's instructions are appended last and clamped away first.
@@ -139,6 +142,49 @@ check("both files are read per request, not cached at startup", () => {
 });
 
 rmSync(root, { recursive: true, force: true });
+
+
+// --- A Codex repository: AGENTS.md, .agents/skills, .codex — no .claude, no CLAUDE.md ---
+// The selected runtime's layout and only that one: a stale Claude file in a
+// Codex repo must not reach the prompt, and the reverse.
+
+const cx = mkdtempSync(join(tmpdir(), "channel-prompt-codex-"));
+mkdirSync(join(cx, ".codex", "channel-prompts"), { recursive: true });
+writeFileSync(join(cx, "AGENTS.md"), "# Role\n");
+writeFileSync(join(cx, ".codex", "system-prompt-overrides.md"), "Codex overrides.\n");
+writeFileSync(join(cx, ".codex", "channel-prompts", "strategy.md"), "Codex channel.\n");
+
+check("Codex: the channel prompt is read from .codex/channel-prompts", () => {
+  const out = loadChannelPrompt(cx, "codex").fn("1", "strategy");
+  assert.ok(out.includes("Codex channel."), "Codex channel prompt not loaded");
+});
+
+check("Codex: the repo overrides are read from .codex/system-prompt-overrides.md", () => {
+  const out = loadFn("systemPromptOverrides", cx, "codex").fn();
+  assert.ok(out.startsWith("Codex overrides."), "Codex overrides not loaded");
+});
+
+check("Codex: a .claude file is never read — no fallback to the unselected runtime", () => {
+  mkdirSync(join(cx, ".claude", "channel-prompts"), { recursive: true });
+  writeFileSync(join(cx, ".claude", "system-prompt-overrides.md"), "STALE CLAUDE.\n");
+  writeFileSync(join(cx, ".claude", "channel-prompts", "other.md"), "STALE CLAUDE.\n");
+  assert.ok(!loadFn("systemPromptOverrides", cx, "codex").fn().includes("STALE"), "Codex read .claude overrides");
+  assert.strictEqual(loadChannelPrompt(cx, "codex").fn("1", "other"), "", "Codex read a .claude channel prompt");
+  rmSync(join(cx, ".claude"), { recursive: true, force: true });
+});
+
+check("Claude: a .codex file is never read", () => {
+  assert.strictEqual(loadFn("systemPromptOverrides", cx, "claude").fn(), "", "Claude read .codex overrides");
+  assert.strictEqual(loadChannelPrompt(cx, "claude").fn("1", "strategy"), "", "Claude read a .codex channel prompt");
+});
+
+check("Codex: a reserved name in .agents/skills is reported as shadowed", () => {
+  mkdirSync(join(cx, ".agents", "skills", "status"), { recursive: true });
+  mkdirSync(join(cx, ".agents", "skills", "roadmap"), { recursive: true });
+  const fn = new Function("readdirSync", "join", "LAYOUT", "RESERVED_COMMANDS", `${extractFn("shadowedCommands")}; return shadowedCommands;`)(
+    require("fs").readdirSync, join, repoLayout("codex", cx), ["fresh", "status", "stop"]);
+  assert.deepStrictEqual(fn(), [join(cx, ".agents", "skills", "status")]);
+});
 
 console.log(`\n  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

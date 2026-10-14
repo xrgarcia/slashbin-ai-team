@@ -21,11 +21,17 @@ const { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } = requ
 const { join } = require("path");
 const summarizeCore = require("./lib/summarize-core");
 const { summarizerArgs } = require("./lib/permission-mode");
+const { resolveRuntime } = require("./lib/runtime");
+const { codexReleaseDir } = require("./lib/runtime/codex");
 
 // --- Config ---
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
 const CLAUDE_CWD = process.env.CLAUDE_CWD || process.cwd();
+// The bot's own runtime, resolved the way bot.js resolves it: a Codex bot's
+// summaries are written by Codex too.
+const RUNTIME = resolveRuntime();
+if (RUNTIME.name === "codex") RUNTIME.releaseDir = codexReleaseDir(RUNTIME.bin);
 // Must resolve identically to bot.js. This used to hardcode .bot-history/, so
 // on any bot that sets BOT_HISTORY_DIR (both of ours do) `npm run summarize`
 // wrote summaries and checkpoints into a directory the bot never reads —
@@ -48,6 +54,11 @@ const DRY_RUN = process.argv.includes("--dry-run");
 
 if (!DISCORD_TOKEN) {
   console.error("DISCORD_TOKEN is required");
+  process.exit(1);
+}
+
+if (RUNTIME.problems.length) {
+  for (const problem of RUNTIME.problems) console.error(problem);
   process.exit(1);
 }
 
@@ -129,7 +140,8 @@ function summarizeWithClaude(channelName, date, messages) {
     date,
     claudeBin: CLAUDE_BIN,
     cwd: CLAUDE_CWD,
-    model: process.env.SUMMARIZE_MODEL || process.env.CLAUDE_MODEL,
+    model: RUNTIME.summaryModel,
+    runtime: RUNTIME,
     timeoutMs: Number.parseInt(process.env.SUMMARIZE_TIMEOUT_MS, 10) > 0
       ? Number.parseInt(process.env.SUMMARIZE_TIMEOUT_MS, 10)
       : 120000,

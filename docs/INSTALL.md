@@ -1,7 +1,7 @@
 # Install guide
 
 From nothing to a bot answering you in Discord. No prior Discord-developer or
-Claude Code knowledge assumed.
+agent-CLI knowledge assumed.
 
 **Time:** about 10 minutes, most of it in the Discord portal.
 
@@ -14,14 +14,22 @@ most common reason the later steps behave strangely.
 
 ```bash
 node -v          # need v18.0.0 or newer
-claude --version # need the Claude Code CLI
 ```
 
 If `node -v` is missing or too old, install Node 18+ from [nodejs.org](https://nodejs.org).
 
-If `claude --version` fails, install the
-[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/getting-started).
+**One agent CLI.** Each bot runs on Claude Code or Codex; you need only the one it
+uses. Pick one path:
 
+<details open>
+<summary><b>Claude Code</b> (the default)</summary>
+
+```bash
+claude --version
+```
+
+If that fails, install the
+[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/getting-started).
 **Then authenticate it**, which is separate from installing it:
 
 ```bash
@@ -30,6 +38,22 @@ claude -p -- "say ok"
 
 If that prints `ok`, you're authenticated. If it asks you to log in, do that first
 — the bot runs `claude` non-interactively and cannot log in on your behalf.
+</details>
+
+<details>
+<summary><b>Codex</b></summary>
+
+```bash
+codex --version
+codex login          # once, as the user the bot will run as
+codex login status   # must say you are logged in
+```
+
+If `codex` is missing, install the [Codex CLI](https://github.com/openai/codex).
+On Linux also install `bwrap` (bubblewrap), which Codex uses to sandbox the bot's
+read-only runs. In step 4, add `BOT_RUNTIME=codex` to the bot's `.env`.
+[docs/runtimes.md](runtimes.md) lists what differs on Codex.
+</details>
 
 You also need a Discord account and a server you can add a bot to. Creating a
 server is free: Discord → **+** in the left sidebar → **Create My Own**.
@@ -325,6 +349,7 @@ journalctl --user -u ai-employee -f
 | Hangs, exit code 143 | Timeout or an unreachable MCP server | Raise `CLAUDE_TIMEOUT_MS`; bisect `.mcp.json` |
 | Second bot won't start | `WS_PORT` collision | One port per bot |
 | "Claude exited with code 1" on every message | CLI not authenticated | Run `claude -p -- "say ok"` yourself |
+| "Codex exited with code 1" on every message | Codex not signed in, or `BOT_MODEL` not on the account | `codex login status`; check `BOT_MODEL` |
 
 Still stuck? [Open an issue](https://github.com/xrgarcia/slashbin-ai-team/issues/new/choose)
 and paste your `npm run doctor` output — it answers most of the first round of
