@@ -77,6 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write was recorded. A blocked ask resumes when the card is reopened after the
   answer itself, even in its millisecond, never after a note the bot posted
   since.
+- **An answer whose post failed is still posted when a person stops the card
+  with a comment.** The comment is a newer ask, and a stopped card takes no
+  new work: the retry used to post only the "stopped by someone else" note,
+  and the answer already made was never delivered. It goes out now as a
+  comment only, and the card stays as the person set it.
 - **A board run never keeps a Discord or bridge credential under another
   name.** Bots started from one shared environment hold every bot's token
   under its own name (`EM_DISCORD_TOKEN`, `PO_DISCORD_TOKEN`, `DISCORD_BOT_KEY`…);
