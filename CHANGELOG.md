@@ -19,6 +19,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A broken entry is logged and skipped, and the same board listed twice is
   refused, since two pollers would race for its runs.
 
+### Fixed
+
+- **A Paperclip card stays true after handoffs, lost runs and restarts.** A
+  task that waits on others is blocked by exactly the tasks it names, its wait
+  is trimmed as each one finishes, and when the last is done the same card
+  resumes, says which task it waited on, and closes done under the run it came
+  on. A run the board lost keeps working: its answer puts the card back in
+  progress with a note and closes it once, with no second run. A person's
+  blocked or cancelled stands — the bot writes no status over it, does not
+  resume a task a person holds, and a mirrored card gets only the answer as a
+  comment. Paperclip takes nothing under a run a person cancelled, so that
+  answer waits for the task's next run.
+
 ## [2.8.0] — 2026-10-09
 
 ### Added
