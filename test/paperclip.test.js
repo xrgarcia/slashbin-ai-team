@@ -798,7 +798,7 @@ const poller = (b, answer) => createPaperclipPoller({
     };
     const { boards, problems } = paperclipBoards(env);
     assert.deepStrictEqual(problems, []);
-    assert.deepStrictEqual(boards, [
+    assert.deepStrictEqual(boards.map(({ escalation, ...b }) => b), [
       { id: null, url: "https://one.example.com", apiKey: "k1", keyEnv: "PAPERCLIP_API_KEY", promptChannel: "123456789012345678" },
       { id: "two", url: "https://two.example.com", apiKey: "k2", keyEnv: "TWO_KEY", promptChannel: "chan-2" },
     ]);
@@ -808,7 +808,7 @@ const poller = (b, answer) => createPaperclipPoller({
     const only = paperclipBoards({ PAPERCLIP_EXTRA_BOARDS: '[{"id":"two","url":"https://two.example.com","keyEnv":"TWO_KEY"}]', TWO_KEY: "k" });
     assert.deepStrictEqual(only.boards.map((b) => b.id), ["two"]);
     assert.strictEqual(only.boards[0].promptChannel, undefined);
-    assert.deepStrictEqual(paperclipBoards({}), { boards: [], problems: [] });
+    assert.deepStrictEqual(paperclipBoards({}), { boards: [], problems: [], warnings: [] });
   });
 
   await check("boards: a broken entry is reported and skipped; the rest still come on", () => {
@@ -858,7 +858,7 @@ const poller = (b, answer) => createPaperclipPoller({
     const b = board({ runs: running });
     await poller(b, async () => `All done.\n${OUTCOME_MARK} done`).tick();
     assert.deepStrictEqual(b.writes.map((w) => w.body), [{ status: "done", comment: "All done." }]);
-    assert.deepStrictEqual(outcomeOf(`${OUTCOME_MARK} blocked`), { comment: "", status: "blocked", waitsOn: [] });
+    assert.deepStrictEqual(outcomeOf(`${OUTCOME_MARK} blocked`), { comment: "", status: "blocked", waitsOn: [], escalate: false });
     assert.match(buildTaskPrompt({ identifier: "T-1", title: "Q" }, [], ME, "u"), new RegExp(`${OUTCOME_MARK} blocked`));
   });
 

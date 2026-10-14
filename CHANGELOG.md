@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Paperclip escalations are worked, and can be handed up a chain.** A blocked
+  card assigned to the bot that carries one of `PAPERCLIP_ESCALATION_LABELS`
+  (default `Needs EM ruling`) is worked instead of refused, and stays blocked:
+  the wake's checkout is put back, and the run is told it is an escalation and
+  what is its to decide (`PAPERCLIP_ESCALATION_AUTHORITY`). It resolves it, or
+  ends `PAPERCLIP-OUTCOME: escalate` and the card is reassigned, inside its
+  run, to `PAPERCLIP_ESCALATE_TO` (`agent:<seat>` or `user:<id>|Name`); a
+  person is also pinged once in `PAPERCLIP_ESCALATION_CHANNEL` with
+  `PAPERCLIP_ESCALATION_MENTION`. Each setting has a per-board key in
+  `PAPERCLIP_EXTRA_BOARDS`. An escalation runs once per hand-off or comment;
+  a re-wake on an unchanged card is left blocked and quiet.
+
+### Fixed
+
+- A held card's note is no longer repeated on each of Paperclip's re-wakes of
+  an unchanged card.
+
 ## [2.9.0] — 2026-10-14
 
 ### Added
