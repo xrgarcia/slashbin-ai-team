@@ -1092,13 +1092,13 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const b = escalationBoard();
     const pings = [];
-    const opts = { stateFile, escalateTo: parseEscalateTo("user:user-ray|Ray"), onEscalate: async (p) => pings.push(p) };
+    const opts = { stateFile, escalateTo: parseEscalateTo("user:user-avery|Avery"), onEscalate: async (p) => pings.push(p) };
     const answer = async () => `Need a call on committing to the 30 s window.\nIt changes what we promise the customer.\n${OUTCOME_MARK} escalate`;
     await escalating(b, answer, opts).tick();
-    assert.deepStrictEqual(b.writes.find((w) => "assigneeUserId" in w.body).body.assigneeUserId, "user-ray");
+    assert.deepStrictEqual(b.writes.find((w) => "assigneeUserId" in w.body).body.assigneeUserId, "user-avery");
     assert.strictEqual(b.issues.get("t-1").assigneeAgentId, null);
     assert.strictEqual(b.issues.get("t-1").status, "blocked");
-    assert.deepStrictEqual(pings, [{ task: "T-1", link: "https://board.example.com/T/issues/T-1", to: "Ray", ask: "Need a call on committing to the 30 s window." }]);
+    assert.deepStrictEqual(pings, [{ task: "T-1", link: "https://board.example.com/T/issues/T-1", to: "Avery", ask: "Need a call on committing to the 30 s window." }]);
     const after = b.writes.length;
     for (const id of ["r2", "r3"]) {
       rewake(b, id);
@@ -1120,8 +1120,8 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     b = escalationBoard();
     b.state.refuseHandOff = true;
     const pings = [];
-    await escalating(b, async () => `Need a ruling.\n${OUTCOME_MARK} escalate`, { escalateTo: parseEscalateTo("user:user-ray|Ray"), onEscalate: async (p) => pings.push(p) }).tick();
-    assert.match(b.writes.at(-1).body.comment, /I could not hand this card to Ray: the board refused it \(403\)\.$/);
+    await escalating(b, async () => `Need a ruling.\n${OUTCOME_MARK} escalate`, { escalateTo: parseEscalateTo("user:user-avery|Avery"), onEscalate: async (p) => pings.push(p) }).tick();
+    assert.match(b.writes.at(-1).body.comment, /I could not hand this card to Avery: the board refused it \(403\)\.$/);
     assert.strictEqual(b.issues.get("t-1").status, "blocked");
     assert.deepStrictEqual(pings, [], "a person was pinged for a hand-off that did not happen");
   });
@@ -1129,7 +1129,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
   await check("escalation: settings — labels, next holder, return, authority, channel and mention per board", () => {
     assert.deepStrictEqual(ESCALATION_LABELS, ["Needs EM ruling"]);
     assert.deepStrictEqual(parseEscalateTo("agent:Product Owner"), { kind: "agent", ref: "Product Owner", name: "Product Owner" });
-    assert.deepStrictEqual(parseEscalateTo("user:abc123 | Ray"), { kind: "user", ref: "abc123", name: "Ray" });
+    assert.deepStrictEqual(parseEscalateTo("user:abc123 | Avery"), { kind: "user", ref: "abc123", name: "Avery" });
     assert.strictEqual(parseEscalateTo(""), null);
     assert.throws(() => parseEscalateTo("Product Owner"), /agent:<seat name or id>/);
     const { boards, problems, warnings } = paperclipBoards({
@@ -1137,7 +1137,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       PAPERCLIP_ESCALATION_LABELS: "Needs EM ruling, Needs PO ruling", PAPERCLIP_ESCALATE_TO: "agent:Product Owner",
       PAPERCLIP_ESCALATION_RETURN_TO: "agent:Foreman", PAPERCLIP_ESCALATION_AUTHORITY: "scope and mechanism", PAPERCLIP_ESCALATION_MENTION: "<@42>",
       PAPERCLIP_EXTRA_BOARDS: JSON.stringify([
-        { id: "two", url: "https://two.example.com", keyEnv: "TWO_KEY", escalateTo: "user:u-9|Ray", escalationChannel: "222", escalationReturnTo: "agent:Tech Lead" },
+        { id: "two", url: "https://two.example.com", keyEnv: "TWO_KEY", escalateTo: "user:u-9|Avery", escalationChannel: "222", escalationReturnTo: "agent:Tech Lead" },
         { id: "three", url: "https://three.example.com", keyEnv: "TWO_KEY", escalationLabels: [], escalateTo: "nonsense", escalationReturnTo: "nonsense" },
       ]),
       TWO_KEY: "k2",
@@ -1150,7 +1150,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.deepStrictEqual(one.escalateTo, { kind: "agent", ref: "Product Owner", name: "Product Owner" });
     assert.strictEqual(one.authority, "scope and mechanism");
     assert.strictEqual(one.mention, "<@42>");
-    assert.deepStrictEqual(two.escalateTo, { kind: "user", ref: "u-9", name: "Ray" });
+    assert.deepStrictEqual(two.escalateTo, { kind: "user", ref: "u-9", name: "Avery" });
     assert.strictEqual(two.channel, "222");
     assert.strictEqual(two.authority, "scope and mechanism", "an extra board falls back to the env");
     assert.deepStrictEqual(three.labels, []);
