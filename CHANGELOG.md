@@ -36,7 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saved under the old keys reads back as the asks they name.
   A saved answer whose post is retried is found delivered only in a comment
   made after its attempt started, so the same words from the wait before are
-  not taken for it.
+  not taken for it. Asks posted together each keep their own outcome: an
+  older ask finished but never posted used to take a newer ask's blocked
+  status, and ran again when that wait was done. A blocked answer that was
+  posted as a comment only stopped nothing, so it resumes on its waits or a
+  move made after it, not on a card left open. Going on at once with work
+  whose waits were already done is an attempt like any other: a bot that dies
+  in it runs it once more, told so, when allowed, or posts the fallback —
+  it used to post the earlier answer and leave the card blocked on nothing.
 - **A person who blocks a task just as the bot closes it blocked keeps the
   hold.** The close lands as the same status reasserted, and used to count as
   the bot's own block, so the task resumed when its wait finished. The hold
@@ -49,7 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the bot comments instead. A person who re-blocked a task on something new
   while the bot was putting back their earlier hold used to get the old waits
   back; a person who moved a card on while the bot answered, or as it closed,
-  had it closed done over them.
+  had it closed done over them. The record is read before the task, and the
+  check made after the close's waits are looked up, so a change between the
+  reads or during the lookups is seen; a change to what the task waits on
+  that lands as it closes is put back after.
 - **A board run never keeps a Discord or bridge credential under another
   name.** Bots started from one shared environment hold every bot's token
   under its own name (`EM_DISCORD_TOKEN`, `PO_DISCORD_TOKEN`, `DISCORD_BOT_KEY`…);
