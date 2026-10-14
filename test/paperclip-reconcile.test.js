@@ -410,6 +410,20 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(b.issues.get("t-1").status, "done");
   });
 
+  await check("case 5, a person blocks the task and stops the bot mid-run, and Paperclip cancels its run: the owed fallback is not retried under it (SLA-1337)", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    poller(b, () => new Promise(() => {}), { stateFile, watchMs: 1e6 }).tick();
+    await new Promise((r) => setTimeout(r, 20));
+    b.setStatus("t-1", "blocked", PERSON);
+    b.runs.get("t-1")[0].status = "cancelled";
+    // Blocked, the task stays in the inbox: every tick after the restart sees it.
+    await poller(b, async () => assert.fail("ran again without resumeInterrupted"), { stateFile }).tick();
+    await poller(b, async () => assert.fail("ran again without resumeInterrupted"), { stateFile }).tick();
+    assert.strictEqual(b.tries.filter((r) => r === "r1").length, 0, "written under the cancelled run");
+    assert.strictEqual(b.issues.get("t-1").status, "blocked");
+  });
+
   await check("case 5: a person's blocked or cancelled stands against every path", async () => {
     for (const decided of ["blocked", "cancelled"]) {
       // The answer lands on it.

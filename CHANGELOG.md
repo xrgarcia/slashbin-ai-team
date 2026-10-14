@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An answer owed by a run Paperclip cancelled waits for the task's next
+  run.** When a person blocked a task and stopped the bot mid-run, Paperclip
+  cancelled the run, and the bot retried the fallback under it every poll,
+  refused each time (403 `agent_run_cancelled`, SLA-1337). A cancelled run is
+  now never written under; the owed answer goes out under the task's next run.
 - **A run Paperclip loses after a resume, or a replacement run it loses
   too, is recovered like any other.** The wake that resumes a task checks it
   out with no record, so the bot's earlier block used to outrank Paperclip's
