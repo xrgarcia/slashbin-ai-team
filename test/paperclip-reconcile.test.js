@@ -45,6 +45,8 @@ function board(tasks) {
     const i = m && byName(decodeURIComponent(m[1]));
     if (!i) return { ok: false, status: 404, text: async () => "" };
     if (init.method === "PATCH") {
+      // Paperclip refuses an agent's write made outside any run.
+      if (!init.headers["x-paperclip-run-id"]) return { ok: false, status: 403, text: async () => JSON.stringify({ error: "run needed", details: { code: "cross_issue_influence_run_context_required" } }) };
       const body = JSON.parse(init.body);
       writes.push({ id: i.id, body, runId: init.headers["x-paperclip-run-id"] });
       if (body.blockedByIssueIds) i.blockedByIssueIds = body.blockedByIssueIds;
@@ -119,6 +121,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(t.status, "blocked");
     assert.deepStrictEqual(t.blockedByIssueIds, ["t-3"]);
     assert.match(t.unblockDescriptor.action, /^Waits on T-3 \(T-2 done\)\./);
+    assert.strictEqual(b.writes.find((x) => x.body.blockedByIssueIds?.length === 1).runId, "r1", "the trim is made under the task's own last run");
     const n = b.writes.length;
     await poller(b, async () => assert.fail("ran"), { stateFile }).tick();
     assert.strictEqual(b.writes.length, n, "an up-to-date card was written again");
