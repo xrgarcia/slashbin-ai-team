@@ -25,12 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   task that waits on others is blocked by exactly the tasks it names, its wait
   is trimmed as each one finishes, and when the last is done the same card
   resumes, says which task it waited on, and closes done under the run it came
-  on. A run the board lost keeps working: its answer puts the card back in
-  progress with a note and closes it once, with no second run. A person's
-  blocked or cancelled stands — the bot writes no status over it, does not
-  resume a task a person holds, and a mirrored card gets only the answer as a
+  on; a task blocked on work that is already done goes on at once. A run the
+  board lost keeps working: the card gets a note, the bot opens a new run on
+  it, and the one answer closes it there, with no second launch. A blocked
+  answer is not taken as finished — a person moving the card on asks it
+  again — and the newest answer decides the card's status. A person's blocked
+  or cancelled stands — the bot writes no status over it, does not resume or
+  rerun a task a person holds, and a mirrored card gets only the answer as a
   comment. Paperclip takes nothing under a run a person cancelled, so that
   answer waits for the task's next run.
+- **Board runs cannot read secret files the scan did not reach.** Folders past
+  the scan's budget (`node_modules` is scanned last) are denied rather than
+  left readable.
+- **Codex MCP servers from two configs no longer overwrite each other's
+  keys.** A server whose variable another already set differently is skipped.
 
 ## [2.8.0] — 2026-10-09
 
