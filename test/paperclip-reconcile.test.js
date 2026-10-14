@@ -92,7 +92,9 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(w.body.comment, "Waiting on the key.");
   });
 
-  await check("case 1: when the last task it waits on is done, the card goes back in progress with the reason, then the work resumes", async () => {
+  // Paperclip's wake usually checks the card out first — blocked to in
+  // progress with no activity record — so the bot may find either status.
+  for (const checkedOut of [false, true]) await check(`case 1${checkedOut ? " (card already checked out by the wake)" : ""}: when the last task it waits on is done, the card says it resumes and why, then the work resumes`, async () => {
     const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
     const prompts = [];
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
@@ -101,10 +103,12 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(b.issues.get("t-1").status, "blocked");
     b.setStatus("t-2", "done", PERSON);
     b.runs.set("t-1", run("r2"));       // Paperclip's issue_blockers_resolved wake
+    if (checkedOut) b.issues.get("t-1").status = "in_progress";
     await poller(b, answer, { stateFile }).tick();
-    const resume = b.writes.find((x) => x.body.status === "in_progress");
-    assert.ok(resume, "the card never went back in progress");
+    const resume = b.writes.find((x) => /^Resuming/.test(x.body.comment ?? ""));
+    assert.ok(resume, "the card never said it resumes");
     assert.strictEqual(resume.runId, "r2");
+    assert.strictEqual(resume.body.status, checkedOut ? undefined : "in_progress");
     assert.match(resume.body.comment, /^Resuming: T-2, which this task waited on, is done\.$/);
     assert.match(prompts[1], /was blocked waiting on T-2; it is now done/);
     assert.strictEqual(b.issues.get("t-1").status, "done");
