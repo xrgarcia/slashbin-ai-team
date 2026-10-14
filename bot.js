@@ -579,7 +579,7 @@ const EXIT_CONFIG = 78;
 // client is never built or logged in. Which boards are usable is settled in
 // full at the Paperclip block below (a board whose policy cannot be held is
 // off); here it is only whether any is configured at all.
-const { boards: CONFIGURED_BOARDS, problems: PAPERCLIP_PROBLEMS } = paperclipBoards(process.env);
+const { boards: CONFIGURED_BOARDS, problems: PAPERCLIP_PROBLEMS, warnings: PAPERCLIP_WARNINGS } = paperclipBoards(process.env);
 const SURFACES = botSurfaces(process.env, CONFIGURED_BOARDS.length);
 if (SURFACES.errors.length) {
   if (SURFACES.paperclipRequired) for (const problem of PAPERCLIP_PROBLEMS) log.error(`Paperclip board off — ${problem}`);
@@ -3185,6 +3185,7 @@ setInterval(runScheduledJobs, SCHEDULE_CHECK_MS);
 // PAPERCLIP_URL with PAPERCLIP_API_KEY, plus any PAPERCLIP_EXTRA_BOARDS.
 // PAPERCLIP_BOARDS is read at the start gate.
 if (SURFACES.paperclip) for (const problem of PAPERCLIP_PROBLEMS) log.warn(`Paperclip board off — ${problem}`);
+if (SURFACES.paperclip) for (const warning of PAPERCLIP_WARNINGS) log.warn(`Paperclip escalation setting — ${warning}`);
 // The sandbox binds the working directory writable over its read denials, so a
 // CLAUDE_CWD that is the harness or state folder (or inside one) would open the
 // harness secrets file and the Discord stores to a board shell. Such a bot
@@ -3232,7 +3233,7 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
   }
   for (const board of PAPERCLIP_BOARDS) {
     const pLog = log.child({ component: "paperclip", ...(board.id ? { board: board.id } : {}) });
-    const { promptChannel } = board;
+    const { promptChannel, escalation } = board;
     // The first board keeps the names it has always had, so its answered asks
     // and task sessions carry over; an extra board gets its own.
     const tag = board.id ? `paperclip-${board.id}` : "paperclip";
@@ -3244,6 +3245,24 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       log: pLog,
       resumeInterrupted: process.env.PAPERCLIP_RESUME_INTERRUPTED === "1",
       externalWriter,
+      // A blocked card held by this bot with an escalation label is worked and
+      // left blocked; one it resolves goes back down (escalationReturnTo, else
+      // whoever handed it up), one it cannot goes to escalateTo, and a person
+      // handed one is told on Discord too, once (README: Escalations).
+      escalationLabels: escalation.labels,
+      escalateTo: escalation.escalateTo,
+      escalationReturnTo: escalation.returnTo,
+      escalationAuthority: escalation.authority,
+      onEscalate: async ({ task, link, to, ask }) => {
+        const channelId = escalation.channel ?? promptChannel;
+        const channel = await resolveBridgeChannel(channelId, { paperclipTask: task, escalation: true });
+        if (!channel) return;
+        // The ask is cut, never the link: the link is what the person acts on.
+        const line = ask.length > 1500 ? `${ask.slice(0, 1499)}…` : ask;
+        await channel.send({ content: `${escalation.mention ? `${escalation.mention} ` : ""}${task} is escalated to ${to}: ${line}\n${link}`,
+          allowedMentions: { parse: ["users"] } });
+        pLog.info({ paperclipTask: task, channelId }, "Paperclip escalation — the person was told on Discord");
+      },
       // The first poll that reaches the board makes it a ready surface.
       onPoll: () => { if (surfaces.boards[tag] !== "ready") { setSurface("board", "ready", tag); pLog.info("Paperclip board ready — first poll succeeded"); } },
       // One session per task, so a reply on the task continues its conversation.
