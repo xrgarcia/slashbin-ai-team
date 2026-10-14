@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PAPERCLIP_ESCALATION_MENTION`. Each setting has a per-board key in
   `PAPERCLIP_EXTRA_BOARDS`. An escalation runs once per hand-off or comment;
   a re-wake on an unchanged card is left blocked and quiet.
+- **A resolved escalation unwinds back down its chain, still blocked.** The
+  chain is read from the card's assignment records since it last went
+  blocked. A bot that resolves hands the card back, inside its run, to whoever
+  handed it up — or to `PAPERCLIP_ESCALATION_RETURN_TO` (per board,
+  `escalationReturnTo`), for the bottom bot that returns it to the seat that
+  first raised it. A person resolves by commenting and reassigning down; the
+  bot is told the card came back with a resolution. `PAPERCLIP-OUTCOME:
+  blocked` keeps a card the bot can neither resolve nor escalate.
 
 ### Fixed
 

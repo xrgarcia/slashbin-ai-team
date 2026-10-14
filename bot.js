@@ -3246,10 +3246,12 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       resumeInterrupted: process.env.PAPERCLIP_RESUME_INTERRUPTED === "1",
       externalWriter,
       // A blocked card held by this bot with an escalation label is worked and
-      // left blocked; one it cannot resolve goes to escalateTo, and a person
+      // left blocked; one it resolves goes back down (escalationReturnTo, else
+      // whoever handed it up), one it cannot goes to escalateTo, and a person
       // handed one is told on Discord too, once (README: Escalations).
       escalationLabels: escalation.labels,
       escalateTo: escalation.escalateTo,
+      escalationReturnTo: escalation.returnTo,
       escalationAuthority: escalation.authority,
       onEscalate: async ({ task, link, to, ask }) => {
         const channelId = escalation.channel ?? promptChannel;
