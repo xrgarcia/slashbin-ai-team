@@ -377,7 +377,9 @@ check("BOT_SETTINGS reaches every session", () => {
   // A board run's settings are the bot's own with the sandbox layered on, never instead of them.
   const fn = /function settingsArgs[\s\S]*?\n}/.exec(bot)[0];
   assert.ok(/if \(!board\) return SESSION_SETTINGS \? \["--settings", SESSION_SETTINGS\] : \[\];/.test(fn), "a Discord run lost BOT_SETTINGS");
-  assert.ok(/boardSettings\(base,/.test(fn) && /SESSION_SETTINGS/.test(fn.split("boardSettings")[0]), "a board run dropped BOT_SETTINGS");
+  assert.ok(/boardSettings\(botSettings\(\),/.test(fn), "a board run dropped BOT_SETTINGS");
+  const read = /function botSettings[\s\S]*?\n}/.exec(bot)[0];
+  assert.ok(/SESSION_SETTINGS/.test(read) && /readFileSync\(resolve\(CLAUDE_CWD, SESSION_SETTINGS\)/.test(read), "the bot's settings are not what BOT_SETTINGS names");
 });
 
 check("restricted is the default, bypass must be asked for", () => {

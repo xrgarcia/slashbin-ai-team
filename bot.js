@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, parityMcpEnv, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
+const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, parityMcpEnv, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -219,15 +219,24 @@ function permissionArgs(kind = "session") {
 // session through --settings, e.g. a sandbox around the shell. Settings passed this
 // way are not loosened by the repository's own .claude/settings*.json.
 const SESSION_SETTINGS = (process.env.BOT_SETTINGS || "").trim();
+// The bot's settings as an object; null when it has none. Read per use: a
+// settings file that cannot be read fails the run rather than starting it
+// without the sandbox. A relative path is read from CLAUDE_CWD, where Claude
+// itself would resolve it for a Discord session.
+function botSettings() {
+  return !SESSION_SETTINGS ? null
+    : JSON.parse(SESSION_SETTINGS.startsWith("{") ? SESSION_SETTINGS : readFileSync(resolve(CLAUDE_CWD, SESSION_SETTINGS), "utf8"));
+}
 function settingsArgs({ board = false, tmpDir = null } = {}) {
   if (!board) return SESSION_SETTINGS ? ["--settings", SESSION_SETTINGS] : [];
   // A board run sandboxes any shell it is allowed to the working directory, on
-  // top of the bot's own settings. Read per run: a settings file that cannot be read fails the run
-  // rather than starting it without the sandbox. A relative path is read from
-  // CLAUDE_CWD, where Claude itself would resolve it for a Discord session.
-  const base = !SESSION_SETTINGS ? null
-    : JSON.parse(SESSION_SETTINGS.startsWith("{") ? SESSION_SETTINGS : readFileSync(resolve(CLAUDE_CWD, SESSION_SETTINGS), "utf8"));
-  return ["--settings", JSON.stringify(boardSettings(base, boardReadDeniedPaths(), CLAUDE_CWD, { ...BOARD_POLICY, tmpDir }))];
+  // top of the bot's own settings.
+  return ["--settings", JSON.stringify(boardSettings(botSettings(), boardReadDeniedPaths(), CLAUDE_CWD, { ...BOARD_POLICY, tmpDir }))];
+}
+// What a board run's session is made with (boardAccessKey): one made under
+// other access is never resumed.
+function boardAccess() {
+  return boardAccessKey({ kind: BOARD_KIND, policy: BOARD_POLICY, permissionMode: PERMISSION_MODE, settings: botSettings() });
 }
 
 // MCP_CONFIG adds servers; it does not remove the host's. MCP_CONFIG_STRICT=true
@@ -1221,9 +1230,11 @@ function boardDeniedPaths() {
 // memory where it lies in a git repository (its history and each worktree's
 // checkout), plus every credential file (an MCP config, an env file — see
 // DEFAULT_BOARD_SECRET_FILES) in the folders it can reach, found as the run starts. Kept apart from boardDeniedPaths: a .env in
-// CLAUDE_CWD is denied by path, it does not turn engineering off.
+// CLAUDE_CWD is denied by path, it does not turn engineering off. The folders
+// it can reach include those the bot's own settings open to reading
+// (sandbox.filesystem.allowRead), which a board run keeps.
 function boardReadDeniedPaths() {
-  const roots = [CLAUDE_CWD, ...BOARD_POLICY.readPaths, ...BOARD_POLICY.writePaths];
+  const roots = [CLAUDE_CWD, ...BOARD_POLICY.readPaths, ...BOARD_POLICY.writePaths, ...(botSettings()?.sandbox?.filesystem?.allowRead ?? [])];
   return [...boardDeniedPaths(), ...boardHistoryDenied(privateMemoryPaths()), ...boardSecretFiles(roots, BOARD_POLICY.secretFiles)];
 }
 LEGACY_STATE.push([join(__dirname, `.${BOT_NAME}-sessions.json`), SESSION_FILE]);
@@ -1923,10 +1934,13 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {
   }
 
   const existingSession = channelSessions.get(channelId);
+  // A board run's session is stamped with the access it was made under.
+  if (opts.noBufferContext) opts = { ...opts, access: boardAccess() };
   // A session from the other runtime is not carried over: after a switch the
-  // channel starts fresh.
+  // channel starts fresh. Nor is a board session made under other access.
   const canResume = existingSession &&
     (existingSession.runtime || "claude") === RUNTIME.name &&
+    (!opts.noBufferContext || existingSession.access === opts.access) &&
     (Date.now() - existingSession.lastActivity) < SESSION_TIMEOUT_MS;
 
   if (canResume) {
@@ -2297,6 +2311,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
           lastActivity: Date.now(),
           // A session belongs to the runtime that made it; another cannot resume it.
           ...(CODEX ? { runtime: RUNTIME.name } : {}),
+          ...(opts.access ? { access: opts.access } : {}),
         });
         saveSessions();
         reqLog.info({ sessionId: state.sessionId, code }, "Session stored for resume");

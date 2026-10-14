@@ -550,6 +550,51 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(n, 1, "a block its own writer set for the bot to clear held the bot");
   });
 
+  await check("Paperclip settling a lost run on a task a person already blocked does not lift the person's hold", async () => {
+    const mirror = /^source: \S+#\d+$/;
+    for (const description of ["", "source: acme/app#12\nstage review"]) {
+      const b = board([task("t-1", { description, runs: [{ id: "r1", agentId: ME.id, status: "running" }] })]);
+      b.setStatus("t-1", "blocked", PERSON);
+      b.recover("t-1", "r1");                          // already blocked: a separate hold may be on it
+      b.runs.get("t-1").push({ id: "r2", agentId: ME.id, status: "running" });
+      b.issues.get("t-1").status = "in_progress";      // the wake's checkout, unrecorded
+      await poller(b, async () => assert.fail(`worked a held task (${description ? "mirrored" : "own"})`), { externalWriter: mirror }).tick();
+      assert.deepStrictEqual(b.writes.map((x) => x.body), [{ comment: HELD_NOTE }], description);
+    }
+    // A run lost on a task no one stopped is still the bot's to bring up to date.
+    const b = board([task("t-1", { runs: run("r1") })]);
+    b.recover("t-1", "r1");
+    b.runs.get("t-1").push({ id: "r2", agentId: ME.id, status: "running" });
+    let n = 0;
+    await poller(b, async () => { n++; return "Finished."; }).tick();
+    assert.strictEqual(n, 1);
+  });
+
+  await check("a close that clears done links does not make an answered blocked ask look new", async () => {
+    const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const replies = [`Need T-2.\n${OUTCOME_MARK} blocked on T-2`, "Done with it.", `Needs approval.\n${OUTCOME_MARK} blocked`, "ran again"];
+    let n = 0;
+    const answer = async () => replies[n++];
+    await poller(b, answer, { stateFile }).tick();
+    b.setStatus("t-2", "done", PERSON); b.runs.set("t-1", run("r2"));
+    await poller(b, answer, { stateFile }).tick();
+    assert.strictEqual(n, 2);
+    b.setStatus("t-1", "todo", PERSON);
+    b.comments.get("t-1").push({ id: "p1", authorUserId: "user-1", createdAt: new Date().toISOString(), body: "Ship it?" });
+    b.runs.set("t-1", run("r3"));
+    await poller(b, answer, { stateFile }).tick();
+    assert.strictEqual(n, 3);
+    assert.deepStrictEqual(b.issues.get("t-1").blockedByIssueIds, []);
+    // Unchanged wakes, the second after a restart.
+    b.runs.set("t-1", run("r4"));
+    await poller(b, answer, { stateFile }).tick();
+    b.runs.set("t-1", run("r5"));
+    await poller(b, answer, { stateFile }).tick();
+    assert.strictEqual(n, 3, "the answered ask was run again");
+    assert.strictEqual(b.issues.get("t-1").status, "blocked");
+  });
+
   await check("case 6: a task another writer owns gets the comment, never a status", async () => {
     const mirror = /^source: \S+#\d+$/;
     const b = board([task("t-1", { description: "source: acme/app#12\nstage review", runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);

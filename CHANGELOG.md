@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Paperclip settling a lost run does not lift a person's hold.** On a task
+  already stopped, its blocked settlement is not a decision of its own: the
+  earlier stop stands, a person's included, for own and mirrored tasks.
+- **An answered blocked ask is not run again when a close clears done links.**
+  The same unchanged ask, keyed without the suffix those links gave it, is
+  still the ask already answered, across a restart too.
+- **A board session made under other access is not resumed.** Each stored board
+  session records the access it was made with (run kind, board policy,
+  permission mode, the bot's settings); after any change the next ask starts
+  fresh, on both runtimes.
+- **Credential files under the folders the bot's settings open to reading are
+  denied to a board run**, as those under the working directory already were.
 - **A blocked answer is never left waiting on tasks already done.** When the last
   task it named finishes just before the block is posted, or before a saved
   answer's post is retried, nothing is written: the work goes on once, told what

@@ -353,7 +353,7 @@ check("a board run's shell is sandboxed to the working directory, on top of the 
   assert.deepStrictEqual(loose.sandbox.filesystem.denyWrite, ["/repo/.git"]);
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
   assert.match(src, /\.\.\.settingsArgs\(\{ board: narrowBoard, tmpDir: boardTmp \}\)/, "the board run no longer gets the sandbox");
-  assert.match(src, /boardSettings\(base, boardReadDeniedPaths\(\), CLAUDE_CWD, \{ \.\.\.BOARD_POLICY, tmpDir \}\)/);
+  assert.match(src, /boardSettings\(botSettings\(\), boardReadDeniedPaths\(\), CLAUDE_CWD, \{ \.\.\.BOARD_POLICY, tmpDir \}\)/);
   // Second pass on 3c32d35: a relative BOT_SETTINGS read from the harness folder
   // failed every board run while Discord sessions, run in CLAUDE_CWD, found it.
   assert.match(src, /readFileSync\(resolve\(CLAUDE_CWD, SESSION_SETTINGS\), "utf8"\)/, "a relative settings file is read from the wrong folder");
@@ -455,7 +455,7 @@ check("credential files in reach of a board run are denied in every mode; a temp
   assert.match(src, /boardPolicyProblems\(BOARD_POLICY, boardDeniedPaths\(\), CLAUDE_CWD/);
   // Every board call site denies them: the read rules, the sandbox, and the Codex profile.
   assert.match(src, /privateMemoryDeny\(boardReadDeniedPaths\(\)/);
-  assert.match(src, /boardSettings\(base, boardReadDeniedPaths\(\), CLAUDE_CWD/);
+  assert.match(src, /boardSettings\(botSettings\(\), boardReadDeniedPaths\(\), CLAUDE_CWD/);
   assert.match(src, /denied: boardReadDeniedPaths\(\), policy: BOARD_POLICY/);
   assert.match(src, /return \[\.\.\.boardDeniedPaths\(\), \.\.\.boardHistoryDenied\(privateMemoryPaths\(\)\), \.\.\.boardSecretFiles\(roots, BOARD_POLICY\.secretFiles\)\];/, "the run-time deny list dropped the Discord memory or its copies");
 });
@@ -481,6 +481,24 @@ check("parity runs a Paperclip task as the bot's Discord session", () => {
   assert.match(src, /filesystem: narrowBoard \? codexRuntime\.boardFilesystem\(/);
   assert.match(src, /if \(!narrowBoard && CODEX_MCP\) Object\.assign\(cleanEnv, opts\.noBufferContext \? parityMcpEnv\(CODEX_MCP\.env\) : CODEX_MCP\.env\);/, "a parity Codex run lost its MCP keys, or gets them unscrubbed");
   assert.match(src, /CODEX && !BOARD_POLICY\.parity \? codexRuntime\.codexBoardProblems/);
+});
+
+check("a board session made under other access is not resumed, on either runtime", () => {
+  const { boardAccessKey } = require("../lib/permission-mode");
+  const parity = resolveBoardPolicy({ BOT_BOARD_EXECUTION: "parity" });
+  const narrow = resolveBoardPolicy({ BOT_BOARD_EXECUTION: "readonly" });
+  const key = (policy) => boardAccessKey({ kind: boardRunKind(policy), policy, permissionMode: "bypass", settings: null });
+  assert.notStrictEqual(key(parity), key(narrow));
+  assert.strictEqual(key(narrow), key(resolveBoardPolicy({ BOT_BOARD_EXECUTION: "readonly" })));
+  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.match(src, /\(!opts\.noBufferContext \|\| existingSession\.access === opts\.access\) &&/, "a board session is resumed whatever access made it");
+  assert.match(src, /if \(opts\.noBufferContext\) opts = \{ \.\.\.opts, access: boardAccess\(\) \};/);
+  assert.match(src, /\.\.\.\(opts\.access \? \{ access: opts\.access \} : \{\}\),/, "a stored session does not record its access");
+});
+
+check("credential files under the folders the bot's settings open to reading are denied to a board run", () => {
+  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.match(src, /const roots = \[CLAUDE_CWD, \.\.\.BOARD_POLICY\.readPaths, \.\.\.BOARD_POLICY\.writePaths, \.\.\.\(botSettings\(\)\?\.sandbox\?\.filesystem\?\.allowRead \?\? \[\]\)\];/);
 });
 
 check("a parity run's MCP env never puts back a withheld credential, by name or by value", () => {
