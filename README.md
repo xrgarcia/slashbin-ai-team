@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 - **Your choice of agent:** each bot runs on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or the [OpenAI Codex CLI](https://github.com/openai/codex), chosen per bot with `BOT_RUNTIME`. A bot uses only the CLI you pick — for replies, summaries, scheduled jobs and board tasks — billed however that CLI is signed in. [Runtimes →](docs/runtimes.md)
-- **Discord, a board, or both:** people reach a bot in Discord, on a [Paperclip](#paperclip) board — where it answers tasks assigned to it, read-only or with engineering tools, never with access to its Discord memory — or on both. Each is optional; a bot needs one. [Paperclip-only →](#paperclip-only)
+- **Discord, a board, or both:** people reach a bot in Discord, on a [Paperclip](#paperclip) board — where it answers tasks assigned to it, read-only or with engineering tools, never with access to its Discord memory — or on both. Discord is the default; `BOT_SURFACES=paperclip` puts a bot on its board alone. [Paperclip-only →](#paperclip-only)
 - **Focused context:** Each bot's `CLAUDE.md` is its job description. A PO bot loads product context, an SRE bot loads ops context. Separated context produces sharper output than one generalist juggling every role in one window.
 - **Async parallelism:** While you DM the PO, the EM bot can be reviewing a PR and the SRE bot can be watching a deploy. Multiple bots = multiple things happening at once, not role-play.
 - **Safe to leave running:** an agent that can merge a PR needs guarantees about what happens when it crashes. [See below.](#why-safe-to-leave-running)
@@ -216,12 +216,13 @@ Exchanges stop after `MAX_BOT_EXCHANGES` (default 2). Any human message resets t
 
 ## Configuration
 
-A surface is required: `DISCORD_TOKEN`, or a [Paperclip](#paperclip) board, or both. Every setting below is read by the code — CI fails if this table and the source disagree. **Resolution order: environment variable → default.**
+`BOT_SURFACES` declares where a bot answers: unset, on Discord (`DISCORD_TOKEN` required), plus any [Paperclip](#paperclip) board it is given; `paperclip`, on its board alone, which needs the Paperclip connector enabled first. Every setting below is read by the code — CI fails if this table and the source disagree. **Resolution order: environment variable → default.**
 
 ### Identity
 | Variable | Default | Description |
 |---|---|---|
-| `DISCORD_TOKEN` | — | Bot token from the Developer Portal. Unset: Discord is off and the bot answers only on its Paperclip board(s); with no board either, it refuses to start |
+| `BOT_SURFACES` | *(Discord)* | Where the bot answers: `discord`, `paperclip`, or `discord,paperclip`. Unset: Discord, plus any Paperclip board configured. A declared surface is a prerequisite: `paperclip` needs the Paperclip connector enabled first (`PAPERCLIP_URL` and `PAPERCLIP_API_KEY`, or `PAPERCLIP_EXTRA_BOARDS`), and the bot refuses to start (exit `78`) without it |
+| `DISCORD_TOKEN` | — | Bot token from the Developer Portal. Required unless `BOT_SURFACES` leaves Discord out: a bot with no token and no `BOT_SURFACES=paperclip` refuses to start, rather than come up on its board alone |
 | `CLAUDE_CWD` | current dir | **Your** project repo — its `CLAUDE.md` is the bot's role |
 | `BOT_NAME` | `bot` | Instance name; scopes pid, log and session files |
 | `MCP_CONFIG` | *(none)* | Path to `.mcp.json` if not in `CLAUDE_CWD` |
@@ -373,12 +374,13 @@ This connector is the inbound half only. For a bot to create, assign or comment 
 
 #### Paperclip-only
 
-Discord and Paperclip are peer surfaces. A bot with a board and no `DISCORD_TOKEN` runs on the board alone: it logs `Discord off — Paperclip-only`, never builds or logs in a Discord client, and refuses at load (with a log line) any scheduled job, which posts to a Discord channel; the background summarizer, which reads Discord, is off. A board whose connector stays off (see above) counts as no board, so a bot with neither surface exits `78` and names both. The ready marker is written once every surface is up — Discord when it connects (if on), each board on its first successful poll (if on) — and `npm run doctor:fleet` reports them separately (`Discord: off · board paperclip: ready`).
+Discord and Paperclip are peer surfaces, and a bot says which it is on. `BOT_SURFACES=paperclip` runs it on its board alone, and needs the Paperclip connector enabled first: a board configured, and its connector on (see above). It logs `Discord off — Paperclip-only`, never builds or logs in a Discord client, and refuses at load (with a log line) any scheduled job, which posts to a Discord channel; the background summarizer, which reads Discord, is off. Without the connector it exits `78`, saying the Paperclip connector must be enabled first. Paperclip-only is never inferred: a bot that loses its `DISCORD_TOKEN` without declaring `BOT_SURFACES=paperclip` also exits `78`, rather than come up deaf on Discord and report ready. The ready marker is written once every surface is up — Discord when it connects (if on), each board on its first successful poll (if on) — and `npm run doctor:fleet` reports them separately (`Discord: off · board paperclip: ready`).
 
 ```bash
 CLAUDE_CWD=/srv/code/tech-lead-repo
 BOT_NAME=tech-lead
 WS_PORT=9803
+BOT_SURFACES=paperclip
 PAPERCLIP_URL=https://board.example.com
 PAPERCLIP_API_KEY=<this agent's own key>
 ```

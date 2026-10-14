@@ -62,10 +62,10 @@ server is free: Discord → **+** in the left sidebar → **Create My Own**.
 
 ## 2. Create the Discord bot
 
-> **Discord and Paperclip are peer surfaces; a bot needs at least one.** A bot
-> that only takes tasks on a [Paperclip](../README.md#paperclip) board needs no
-> Discord bot at all: skip this section, leave `DISCORD_TOKEN` unset and see
-> [Paperclip-only](#paperclip-only) under step 4.
+> **Discord and Paperclip are peer surfaces.** A bot that only takes tasks on a
+> [Paperclip](../README.md#paperclip) board needs no Discord bot at all: skip
+> this section, enable the [Paperclip connector](#paperclip-connector) and set
+> `BOT_SURFACES=paperclip` (see [Paperclip-only](#paperclip-only) under step 4).
 
 1. Go to the [Discord Developer Portal](https://discord.com/developers/applications).
 2. **New Application** → give it a name (this is what people see — e.g. "Product Owner") → **Create**.
@@ -145,20 +145,32 @@ bot no role and lets it edit its own source; setup refuses if you try.
 cp .env.example .env
 ```
 
-Then edit `.env`. A surface is required — `DISCORD_TOKEN`, or a Paperclip board
-(`PAPERCLIP_URL` with `PAPERCLIP_API_KEY`), or both — and set `CLAUDE_CWD` too or
-the bot has no role. Run `npm run doctor` afterwards.
+Then edit `.env`. A bot answers on Discord unless `BOT_SURFACES` says otherwise,
+so `DISCORD_TOKEN` is required unless it is Paperclip-only (below). Set
+`CLAUDE_CWD` too or the bot has no role. Run `npm run doctor` afterwards.
 </details>
+
+### Paperclip connector
+
+The Paperclip connector is what puts a bot on a Paperclip board: it polls the
+bot's inbox and answers the tasks assigned to it. It is on when the bot has a
+board — `PAPERCLIP_URL` and `PAPERCLIP_API_KEY` (this agent's own key), or
+`PAPERCLIP_EXTRA_BOARDS` — and its `CLAUDE_CWD` is not the harness or state
+folder. It is the prerequisite for any bot whose `BOT_SURFACES` names
+`paperclip`: without it that bot refuses to start (exit 78) and says so. The
+settings are in the README, [Paperclip](../README.md#paperclip).
 
 ### Paperclip-only
 
-A bot can listen on a Paperclip board alone. Leave `DISCORD_TOKEN` (and the
-channel settings) unset and give it a board:
+A bot can listen on a Paperclip board alone. Enable the Paperclip connector
+(above), declare it with `BOT_SURFACES=paperclip`, and leave `DISCORD_TOKEN` (and
+the channel settings) unset:
 
 ```bash
 CLAUDE_CWD=/path/to/your/project-repo   # not this harness folder
 BOT_NAME=tech-lead
 WS_PORT=9803                            # unique per bot on the host
+BOT_SURFACES=paperclip                  # Paperclip-only: declared, never inferred
 PAPERCLIP_URL=https://board.example.com
 PAPERCLIP_API_KEY=<this agent's own key>
 ```
@@ -167,8 +179,10 @@ It logs `Discord off — Paperclip-only`, never builds a Discord client, and is
 ready once its first poll reaches the board. Scheduled jobs and the background
 summarizer post to and read from Discord, so they are off: a scheduled job left
 in its file is refused when it is loaded, with a log line, and runs again once
-`DISCORD_TOKEN` is back. With neither a token nor a usable board the bot exits
-with code 78 and names both.
+Discord is back. Without the Paperclip connector it exits with code 78, saying
+the Paperclip connector must be enabled first. A bot with no `DISCORD_TOKEN` and
+no `BOT_SURFACES=paperclip` exits 78 too: losing a token never quietly turns a
+Discord bot into a Paperclip-only one.
 
 ---
 

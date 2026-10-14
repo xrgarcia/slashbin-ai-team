@@ -1,6 +1,9 @@
 /**
- * Discord is optional: a bot on a Paperclip board starts, polls and reports
- * ready with no DISCORD_TOKEN, and a bot with neither surface refuses to start.
+ * Discord is optional: a bot that declares BOT_SURFACES=paperclip starts, polls
+ * and reports ready with no DISCORD_TOKEN. Paperclip-only is declared, never
+ * inferred: a bot with no token and no declaration refuses to start, and a bot
+ * that declares Paperclip without its connector refuses, naming the
+ * prerequisite.
  *
  * These spawn bot.js for real. Paperclip is a stub HTTP server on loopback that
  * answers the two reads a poll makes with an empty inbox; Discord is never
@@ -62,20 +65,70 @@ function waitFor(cond, ms = 15000) {
   const run = join(dir, "run"); // the bot's working directory: an empty folder, so no dotenv file is loaded
   const base = 19000 + (process.pid % 500);
 
-  console.log("\nNo surface — refuse to start, naming both");
+  const PREREQUISITE = /the Paperclip connector must be enabled first: set PAPERCLIP_URL and PAPERCLIP_API_KEY/;
 
-  await check("no DISCORD_TOKEN and no board → exit EXIT_CONFIG (78), naming Discord and Paperclip", async () => {
+  console.log("\nBOT_SURFACES — Paperclip-only is declared, and a declared surface is a prerequisite");
+
+  await check("botSurfaces: unset is Discord, with any board as an addition", () => {
+    const { botSurfaces } = require("../lib/surfaces");
+    const s = botSurfaces({ DISCORD_TOKEN: "t" }, 1);
+    assert.deepStrictEqual([s.discord, s.paperclip, s.paperclipRequired, s.errors.length], [true, true, false, 0]);
+    assert.deepStrictEqual([botSurfaces({ DISCORD_TOKEN: "t" }, 0).paperclip], [false]);
+  });
+
+  await check("botSurfaces: declared is exactly what is named, and says what it ignores", () => {
+    const { botSurfaces } = require("../lib/surfaces");
+    const only = botSurfaces({ BOT_SURFACES: "paperclip", DISCORD_TOKEN: "t" }, 1);
+    assert.deepStrictEqual([only.discord, only.paperclip, only.errors.length], [false, true, 0]);
+    assert.match(only.notes.join(), /DISCORD_TOKEN is set, but BOT_SURFACES leaves Discord off/);
+    const discord = botSurfaces({ BOT_SURFACES: "discord", DISCORD_TOKEN: "t" }, 1);
+    assert.deepStrictEqual([discord.discord, discord.paperclip], [true, false]);
+    assert.match(discord.notes.join(), /BOT_SURFACES leaves Paperclip off/);
+    const both = botSurfaces({ BOT_SURFACES: " Discord , paperclip ", DISCORD_TOKEN: "t" }, 1);
+    assert.deepStrictEqual([both.discord, both.paperclipRequired, both.errors.length], [true, true, 0]);
+  });
+
+  await check("botSurfaces: paperclip with no board names the prerequisite", () => {
+    const { botSurfaces } = require("../lib/surfaces");
+    assert.match(botSurfaces({ BOT_SURFACES: "paperclip" }, 0).errors.join(), PREREQUISITE);
+    assert.match(botSurfaces({ BOT_SURFACES: "discord,paperclip", DISCORD_TOKEN: "t" }, 0).errors.join(), PREREQUISITE);
+  });
+
+  await check("no DISCORD_TOKEN and no board → exit EXIT_CONFIG (78), naming the token, BOT_SURFACES and the prerequisite", async () => {
     const { code, out } = await runBot(botEnv(dir, "pctest-none", base), run);
     assert.strictEqual(code, 78, `exit ${code}\n${out}`);
-    assert.match(out, /DISCORD_TOKEN/);
-    assert.match(out, /PAPERCLIP_URL/);
+    assert.match(out, /DISCORD_TOKEN is required/);
+    assert.match(out, /BOT_SURFACES=paperclip/);
+    assert.match(out, PREREQUISITE);
     assert.ok(!/Discord login failed/.test(out), "tried to log in to Discord");
   });
 
-  await check("a half-configured board is no board: still EXIT_CONFIG, with the board's problem said", async () => {
-    const { code, out } = await runBot(botEnv(dir, "pctest-half", base + 1, { PAPERCLIP_URL: "http://127.0.0.1:1" }), run);
+  await check("a board but no DISCORD_TOKEN and no BOT_SURFACES → EXIT_CONFIG, not a silent Paperclip-only bot", async () => {
+    const { code, out } = await runBot(botEnv(dir, "pctest-undeclared", base + 4,
+      { PAPERCLIP_URL: "http://127.0.0.1:1", PAPERCLIP_API_KEY: "test-key" }), run);
+    assert.strictEqual(code, 78, `exit ${code}\n${out}`);
+    assert.match(out, /BOT_SURFACES is unset, so this bot answers on Discord/);
+    assert.ok(!/Paperclip connector on|Discord off/.test(out), out);
+  });
+
+  await check("BOT_SURFACES=paperclip with no board → EXIT_CONFIG, naming the prerequisite", async () => {
+    const { code, out } = await runBot(botEnv(dir, "pctest-noboard", base + 5, { BOT_SURFACES: "paperclip" }), run);
+    assert.strictEqual(code, 78, `exit ${code}\n${out}`);
+    assert.match(out, /BOT_SURFACES includes paperclip, so the Paperclip connector must be enabled first/);
+  });
+
+  await check("BOT_SURFACES=paperclip with a half-configured board → EXIT_CONFIG, with the board's problem said", async () => {
+    const { code, out } = await runBot(botEnv(dir, "pctest-half", base + 1,
+      { BOT_SURFACES: "paperclip", PAPERCLIP_URL: "http://127.0.0.1:1" }), run);
     assert.strictEqual(code, 78, `exit ${code}\n${out}`);
     assert.match(out, /PAPERCLIP_URL and PAPERCLIP_API_KEY must both be set/);
+    assert.match(out, PREREQUISITE);
+  });
+
+  await check("an unknown surface → EXIT_CONFIG", async () => {
+    const { code, out } = await runBot(botEnv(dir, "pctest-bad", base + 6, { BOT_SURFACES: "slack" }), run);
+    assert.strictEqual(code, 78, `exit ${code}\n${out}`);
+    assert.match(out, /BOT_SURFACES=slack is not a surface list/);
   });
 
   console.log("\nPaperclip-only — up, polling, ready, and never on Discord");
@@ -97,7 +150,7 @@ function waitFor(cond, ms = 15000) {
   writeFileSync(join(dir, "state", "schedules.json"), JSON.stringify([{ id: "standup", cron: "0 9 * * 1-5", prompt: "post the standup", channel: "123456789012345678" }]));
 
   const { code, out, child } = await runBot(
-    botEnv(dir, name, base + 2, { PAPERCLIP_URL: url, PAPERCLIP_API_KEY: "test-key" }), run,
+    botEnv(dir, name, base + 2, { BOT_SURFACES: "paperclip", PAPERCLIP_URL: url, PAPERCLIP_API_KEY: "test-key" }), run,
     { until: (o) => /Paperclip board ready/.test(o) });
 
   await check("the process stays up and logs Discord off — Paperclip-only", async () => {
@@ -130,13 +183,23 @@ function waitFor(cond, ms = 15000) {
     assert.strictEqual(JSON.parse(readFileSync(join(dir, "state", "schedules.json"), "utf8")).length, 1);
   });
 
-  await check("doctor:fleet reads a bot with a board and no DISCORD_TOKEN as Paperclip-only", async () => {
-    const { parseFleet } = await import("../scripts/lib/checks.mjs");
+  await check("doctor:fleet reads a bot declaring BOT_SURFACES=paperclip as Paperclip-only, and fails one that only lacks a token", async () => {
+    const { parseFleet, checkFleet, PASS, FAIL } = await import("../scripts/lib/checks.mjs");
     const eco = join(dir, "ecosystem.config.js");
-    writeFileSync(eco, `module.exports = { apps: [ { env: {\n  BOT_NAME: 'tech-lead',\n  PAPERCLIP_URL: 'https://board.example',\n  PAPERCLIP_API_KEY: process.env.TL_PAPERCLIP_KEY,\n} } ] };\n`);
+    // One app per block, each opening on a line of its own, as parseFleet splits them.
+    const app = (n, extra) => `  {\n    BOT_NAME: '${n}',\n${extra}    PAPERCLIP_URL: 'https://board.example',\n    PAPERCLIP_API_KEY: process.env.TL_PAPERCLIP_KEY,\n  },\n`;
+    writeFileSync(eco, `module.exports = { apps: [\n${app("tech-lead", "    BOT_SURFACES: 'paperclip',\n")}${app("lost-token", "")}] };\n`);
     const [b] = parseFleet(eco);
     assert.strictEqual(b.discordTokenAbsent, true);
+    assert.strictEqual(b.surfaces, "paperclip");
     assert.strictEqual(b.paperclipUrl, "https://board.example");
+    const rows = await checkFleet(eco, REPO, {});
+    const row = (n) => rows.find((r) => r.name === n);
+    assert.strictEqual(row("  tech-lead: token").status, PASS);
+    assert.match(row("  tech-lead: token").detail, /Discord off — Paperclip-only/);
+    assert.ok(!row("  tech-lead: BOT_SURFACES"), "a declared Paperclip-only bot was failed");
+    assert.strictEqual(row("  lost-token: BOT_SURFACES").status, FAIL);
+    assert.match(row("  lost-token: BOT_SURFACES").fix, /BOT_SURFACES: 'paperclip'/);
   });
 
   await check("no Discord login is ever attempted", () => {
@@ -158,11 +221,11 @@ function waitFor(cond, ms = 15000) {
     const { code, out } = await runBot(botEnv(dir, "pctest-discord", base + 3, { DISCORD_TOKEN: "not-a-real-token" }), run, { timeoutMs: 30000 });
     assert.ok(code === 78 || code === 1, `exit ${code}\n${out}`);
     assert.match(out, /Discord login failed/);
-    assert.ok(!/No surface to answer on|Discord off/.test(out), out);
+    assert.ok(!/BOT_SURFACES|Discord off/.test(out), out);
   });
 
   rmSync(dir, { recursive: true, force: true });
-  for (const n of ["pctest-none", "pctest-half", "pctest-board", "pctest-discord"]) {
+  for (const n of ["pctest-none", "pctest-undeclared", "pctest-noboard", "pctest-half", "pctest-bad", "pctest-board", "pctest-discord"]) {
     for (const f of [`.${n}.pid`, `.${n}.ready`, `.${n}.surfaces.json`]) rmSync(join(REPO, f), { force: true });
   }
   console.log(`\n${pass} passed, ${fail} failed\n`);

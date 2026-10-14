@@ -14,6 +14,7 @@ const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
 const { createPaperclipPoller, paperclipBoards, replyCollector } = require("./lib/paperclip");
+const { botSurfaces, PAPERCLIP_PREREQUISITE } = require("./lib/surfaces");
 const { resolveRuntime } = require("./lib/runtime");
 const { LAYOUTS, repoLayout } = require("./lib/runtime/layout");
 const codexRuntime = require("./lib/runtime/codex");
@@ -569,20 +570,25 @@ const MAX_OUTBOUND_BYTES = parseInt(process.env.MAX_OUTBOUND_BYTES, 10) || 8 * 1
 // restartable, because a network blip genuinely does deserve another go.
 const EXIT_CONFIG = 78;
 
-// Two peer surfaces: Discord and Paperclip boards. A bot needs at least one.
-// With no DISCORD_TOKEN the Discord client is never built or logged in, and the
-// bot answers only on its boards. Which boards are usable is settled in full
-// at the Paperclip block below (a board whose policy cannot be held is off);
-// here it is only whether any is configured at all.
-const DISCORD_ON = Boolean(DISCORD_TOKEN);
-const { boards: PAPERCLIP_BOARDS, problems: PAPERCLIP_PROBLEMS } = paperclipBoards(process.env);
-const NO_SURFACE = "No surface to answer on: set DISCORD_TOKEN for Discord, or PAPERCLIP_URL with PAPERCLIP_API_KEY (or PAPERCLIP_EXTRA_BOARDS) for a Paperclip board — see docs/INSTALL.md";
-if (!DISCORD_ON && !PAPERCLIP_BOARDS.length) {
-  for (const problem of PAPERCLIP_PROBLEMS) log.error(`Paperclip board off — ${problem}`);
-  log.fatal(NO_SURFACE);
+// Two peer surfaces: Discord and Paperclip boards, declared by BOT_SURFACES
+// (lib/surfaces.js). Unset, the bot is on Discord, with any board as an
+// addition. Paperclip-only is declared (BOT_SURFACES=paperclip), never inferred
+// from a missing DISCORD_TOKEN: a Discord bot that lost its token must refuse
+// to start, not come up deaf on Discord and report ready. With Discord off the
+// client is never built or logged in. Which boards are usable is settled in
+// full at the Paperclip block below (a board whose policy cannot be held is
+// off); here it is only whether any is configured at all.
+const { boards: CONFIGURED_BOARDS, problems: PAPERCLIP_PROBLEMS } = paperclipBoards(process.env);
+const SURFACES = botSurfaces(process.env, CONFIGURED_BOARDS.length);
+if (SURFACES.errors.length) {
+  if (SURFACES.paperclipRequired) for (const problem of PAPERCLIP_PROBLEMS) log.error(`Paperclip board off — ${problem}`);
+  for (const error of SURFACES.errors) log.fatal(error);
   process.exit(EXIT_CONFIG);
 }
-if (!DISCORD_ON) log.info("Discord off — Paperclip-only: DISCORD_TOKEN is not set, so this bot answers on its Paperclip board(s) alone");
+for (const note of SURFACES.notes) log.warn(note);
+const DISCORD_ON = SURFACES.discord;
+const PAPERCLIP_BOARDS = SURFACES.paperclip ? CONFIGURED_BOARDS : [];
+if (!DISCORD_ON) log.info("Discord off — Paperclip-only: BOT_SURFACES=paperclip, so this bot answers on its Paperclip board(s) alone");
 
 // A bot pointed at a directory that does not exist used to start happily and then
 // fail on the first message with a spawn error naming neither the variable nor the
@@ -3170,7 +3176,7 @@ setInterval(runScheduledJobs, SCHEDULE_CHECK_MS);
 // run path as Discord (see lib/paperclip.js). Off unless a board is configured:
 // PAPERCLIP_URL with PAPERCLIP_API_KEY, plus any PAPERCLIP_EXTRA_BOARDS.
 // PAPERCLIP_BOARDS is read at the start gate.
-for (const problem of PAPERCLIP_PROBLEMS) log.warn(`Paperclip board off — ${problem}`);
+if (SURFACES.paperclip) for (const problem of PAPERCLIP_PROBLEMS) log.warn(`Paperclip board off — ${problem}`);
 // The sandbox binds the working directory writable over its read denials, so a
 // CLAUDE_CWD that is the harness or state folder (or inside one) would open the
 // harness secrets file and the Discord stores to a board shell. Such a bot
@@ -3187,10 +3193,10 @@ if (PAPERCLIP_BOARDS.length && PAPERCLIP_CWD_DENIED) {
 } else if (PAPERCLIP_BOARDS.length && BOARD_POLICY_PROBLEMS.length) {
   for (const problem of BOARD_POLICY_PROBLEMS) log.error(`Paperclip connector off — ${problem}`);
 }
-// A board whose connector stays off is no surface: with Discord off too, there
-// is nothing to answer on, and no restart changes that.
-if (!DISCORD_ON && (PAPERCLIP_CWD_DENIED || BOARD_POLICY_PROBLEMS.length)) {
-  log.fatal(`${NO_SURFACE}. The Paperclip connector is off (see the error above).`);
+// A bot that declares Paperclip needs its connector on: off, it is not the bot
+// it says it is, and no restart changes that.
+if (SURFACES.paperclipRequired && (PAPERCLIP_CWD_DENIED || BOARD_POLICY_PROBLEMS.length)) {
+  log.fatal(`BOT_SURFACES includes paperclip, so ${PAPERCLIP_PREREQUISITE}. The connector is configured but off (see the error above).`);
   clearReady();
   process.exit(EXIT_CONFIG);
 }

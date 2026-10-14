@@ -313,7 +313,7 @@ export function checkEcosystem(file, sourceDir) {
   return out;
 }
 
-export { skip };
+export { skip, bad };
 
 export function render(results) {
   const icon = { [PASS]: "PASS", [FAIL]: "FAIL", [WARN]: "WARN", [SKIP]: "SKIP" };
@@ -336,6 +336,7 @@ export function render(results) {
 // failure that has really happened on a running fleet.
 
 const require_ = createRequire(import.meta.url);
+const { botSurfaces } = require_("../../lib/surfaces.js");
 
 /**
  * A schedule firing faster than the session idle timeout.
@@ -494,6 +495,8 @@ export function parseFleet(file) {
       // No DISCORD_TOKEN line at all: Discord is off for this bot (Paperclip-only).
       discordTokenAbsent: !/^\s*DISCORD_TOKEN:/m.test(block),
       paperclipExtraBoards: /^\s*PAPERCLIP_EXTRA_BOARDS:/m.test(block),
+      // Which surfaces it declares (lib/surfaces.js); null is Discord, plus any board.
+      surfaces: pick("BOT_SURFACES"),
       claudeCwd: pick("CLAUDE_CWD"),
       wsPort: pick("WS_PORT"),
       permissionMode: pick("BOT_PERMISSION_MODE"),
@@ -537,8 +540,19 @@ export async function checkFleet(file, harnessDir, env = process.env) {
     const label = `  ${b.name}`;
 
     const onBoard = Boolean(b.paperclipUrl || b.paperclipKeyVar || b.paperclipKeyLiteral || b.paperclipExtraBoards);
-    if (b.discordTokenAbsent && onBoard) {
-      out.push(ok(`${label}: token`, "no DISCORD_TOKEN — Discord off, Paperclip-only"));
+    // The bot's own start gate, on what the file declares: a token line stands
+    // for the token, since its value lives in the launch environment.
+    const surfaces = botSurfaces({ BOT_SURFACES: b.surfaces ?? "", DISCORD_TOKEN: b.discordTokenAbsent ? "" : "set" }, onBoard ? 1 : 0);
+    if (surfaces.errors.length) {
+      out.push(bad(`${label}: BOT_SURFACES`, `the bot refuses to start: ${surfaces.errors.join("; ")}`,
+        surfaces.paperclipRequired
+          ? "Put this app on its board (PAPERCLIP_URL and PAPERCLIP_API_KEY) in ecosystem.config.js, or take paperclip out of BOT_SURFACES."
+          : "Give this app its DISCORD_TOKEN, or, for a bot on its Paperclip board alone, set BOT_SURFACES: 'paperclip'."));
+    }
+    if (!surfaces.discord) {
+      if (!surfaces.errors.length) out.push(ok(`${label}: token`, "Discord off — Paperclip-only (BOT_SURFACES=paperclip)"));
+    } else if (b.discordTokenAbsent) {
+      // Reported above as the start gate's refusal.
     } else if (!b.tokenVar) {
       out.push(warn(`${label}: token`, "DISCORD_TOKEN is not a process.env reference",
         "Point it at an environment variable so the token is never stored in the file."));
