@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out with no record, so the bot's earlier block used to outrank Paperclip's
   settlement of the run it then lost: the card stayed blocked with no note and
   no new run. A stop that was no one's choice no longer hides a newer one.
+- **A wait that finishes or changes back never reruns an answered ask.** A
+  finished wait changes the key a task's ask is saved under. An attempt still
+  owed now keeps its own key, so its saved answer is posted rather than run
+  again, and an interrupted one reruns only as `resumeInterrupted` allows. An
+  answer that is not blocked now clears the ask's earlier blocks under every
+  key, so unlinking or reopening the wait does not bring the ask back.
 - **A person who blocks a task just as the bot closes it blocked keeps the
   hold.** The close lands as the same status reasserted, and used to count as
   the bot's own block, so the task resumed when its wait finished. The hold

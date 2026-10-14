@@ -615,6 +615,55 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.match(b.writes.at(-1).body.comment, /^Need T-2\.\n\nResuming: T-2[\s\S]*Finished\.$/);
   });
 
+  await check("a wait that finishes between an attempt and its retry is the same ask: a saved answer posts once, and an interrupted one is not run again", async () => {
+    const linked = () => board([task("t-1", { blockedByIssueIds: ["t-2"], runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
+    // Its post fails; then the task it is linked to is done.
+    let b = linked();
+    let stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let n = 0;
+    await poller(b, async () => { n++; b.state.down = new Set(["t-1"]); return "Update sent."; }, { stateFile }).tick();
+    b.state.down = null;
+    b.setStatus("t-2", "done", PERSON);
+    await poller(b, async () => { n++; return "Update sent."; }, { stateFile }).tick();
+    assert.strictEqual(n, 1, "the work ran again");
+    assert.strictEqual(b.writes.filter((x) => x.body.comment?.includes("Update sent.")).length, 1);
+    // The bot dies mid-run; then the task it is linked to is done.
+    for (const resumeInterrupted of [false, true]) {
+      b = linked();
+      stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+      poller(b, () => new Promise(() => {}), { stateFile, resumeInterrupted, watchMs: 1e6 }).tick();
+      await new Promise((r) => setTimeout(r, 20));
+      b.setStatus("t-2", "done", PERSON);
+      const prompts = [];
+      await poller(b, async (p) => { prompts.push(p); return "sent"; }, { stateFile, resumeInterrupted }).tick();
+      if (resumeInterrupted) assert.ok(prompts.length === 1 && prompts[0].includes(INTERRUPTED_NOTE), "not run once, told it was interrupted");
+      else {
+        assert.strictEqual(prompts.length, 0, "run again without resumeInterrupted");
+        assert.ok(b.writes.some((x) => x.body.comment === FALLBACK_REPLY));
+      }
+    }
+  });
+
+  await check("an ask answered done after its resume is not run again when its waits change back", async () => {
+    for (const change of ["unlink", "reopen"]) {
+      const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
+      const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+      let n = 0;
+      const answer = async () => (++n === 1 ? `Need T-2.\n${OUTCOME_MARK} blocked on T-2` : "Finished.");
+      await poller(b, answer, { stateFile }).tick();
+      b.setStatus("t-2", "done", PERSON);
+      b.runs.set("t-1", run("r2"));
+      await poller(b, answer, { stateFile }).tick();
+      assert.strictEqual(b.issues.get("t-1").status, "done");
+      if (change === "unlink") b.issues.get("t-1").blockedByIssueIds = [];
+      else b.issues.get("t-2").status = "todo";
+      b.issues.get("t-1").status = "in_progress";      // requeued, unrecorded
+      b.runs.set("t-1", run("r3"));
+      await poller(b, answer, { stateFile }).tick();
+      assert.strictEqual(n, 2, `${change}: the answered ask ran again`);
+    }
+  });
+
   await check("a mirrored task a person stopped is not worked; one its own writer blocked still is", async () => {
     const mirror = /^source: \S+#\d+$/;
     let b = board([task("t-1", { description: "source: acme/app#12\nstage review", runs: run("r1") })]);
