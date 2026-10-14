@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left readable.
 - **Codex MCP servers from two configs no longer overwrite each other's
   keys.** A server whose variable another already set differently is skipped.
+- **A restricted Codex run's commands cannot read the bot's keys.** Board
+  runs, summaries and restricted sessions run commands with only the core
+  environment (HOME, PATH, USER…), so `MCP_CONFIG` or `DATABASE_URL` cannot be
+  printed into a reply.
 
 ## [2.8.0] — 2026-10-09
 

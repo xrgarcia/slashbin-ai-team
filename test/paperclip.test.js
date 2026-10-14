@@ -849,7 +849,7 @@ const poller = (b, answer) => createPaperclipPoller({
       const b = board({ runs: running });
       await poller(b, async () => `I could not run the tests: Bash is not available here. The owner can enable it.\n\n${tail}`).tick();
       assert.deepStrictEqual(b.writes.map((w) => w.body),
-        [{ status: "blocked", unblockDescriptor: UNBLOCK, comment: "I could not run the tests: Bash is not available here. The owner can enable it." }], tail);
+        [{ status: "blocked", unblockDescriptor: UNBLOCK, blockedByIssueIds: [], comment: "I could not run the tests: Bash is not available here. The owner can enable it." }], tail);
       assert.ok(b.writes.every((w) => w.body.status !== "done"), "a blocked answer closed the task as done");
     }
     const b = board({ runs: running });
@@ -880,7 +880,7 @@ const poller = (b, answer) => createPaperclipPoller({
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     await createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
       answer: async () => `No key.\n${OUTCOME_MARK} blocked` }).tick();
-    assert.deepStrictEqual(writes, [{ status: "blocked", unblockDescriptor: UNBLOCK, comment: "No key." }, { status: "todo" }]);
+    assert.deepStrictEqual(writes, [{ status: "blocked", unblockDescriptor: UNBLOCK, blockedByIssueIds: [], comment: "No key." }, { status: "todo" }]);
     assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).closing, {});
   });
 

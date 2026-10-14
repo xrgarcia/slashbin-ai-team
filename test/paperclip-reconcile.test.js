@@ -52,6 +52,7 @@ function board(tasks) {
         .map((i) => ({ id: i.id, status: i.status, unresolvedBlockerIssueIds: blockedBy(i).filter((b) => b.status !== "done").map((b) => b.id) })));
     }
     const m = path.match(/^\/issues\/([^/]+)(\/[a-z]+)?$/);
+    if (m && state.down?.has(decodeURIComponent(m[1]))) return { ok: false, status: 503, text: async () => "unavailable" };
     const i = m && byName(decodeURIComponent(m[1]));
     if (!i) return { ok: false, status: 404, text: async () => "" };
     if (init.method === "PATCH") {
@@ -383,6 +384,62 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     const w = b.writes.at(-1);
     assert.strictEqual(w.body.comment, "Need T-2.\n\nResuming: T-2, which this task waited on, is already done.\n\nFinished.");
     assert.strictEqual(b.issues.get("t-1").status, "done");
+  });
+
+  await check("blocked on tasks already done, but a person stopped it meanwhile: not worked again; the answer lands as a comment", async () => {
+    const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "done" })]);
+    let n = 0;
+    await poller(b, async () => { n++; b.setStatus("t-1", "blocked", PERSON); return `Need T-2.\n${OUTCOME_MARK} blocked on T-2`; }).tick();
+    assert.strictEqual(n, 1, "worked over the person's stop");
+    assert.ok(b.writes.some((x) => x.body.comment === "Need T-2."));
+    assert.ok(!b.writes.some((x) => x.body.status), "a status was written over the person's stop");
+  });
+
+  await check("a blocked answer that names nothing replaces the links of an earlier wait", async () => {
+    const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    await poller(b, async () => `Need T-2.\n${OUTCOME_MARK} blocked on T-2`, { stateFile }).tick();
+    assert.deepStrictEqual(b.issues.get("t-1").blockedByIssueIds, ["t-2"]);
+    // A person's new ask, answered blocked on an approval only.
+    b.setStatus("t-1", "todo", PERSON);
+    b.comments.get("t-1").push({ id: "p1", authorUserId: "user-1", createdAt: new Date().toISOString(), body: "Ship it?" });
+    b.runs.set("t-1", run("r2"));
+    await poller(b, async () => `Needs approval.\n${OUTCOME_MARK} blocked`, { stateFile }).tick();
+    assert.strictEqual(b.issues.get("t-1").status, "blocked");
+    assert.deepStrictEqual(b.issues.get("t-1").blockedByIssueIds, [], "the earlier wait is still linked");
+  });
+
+  await check("waiting on the same task a second time resumes again; a repeat wake for one wait does not", async () => {
+    const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" }), task("t-3", { assigneeAgentId: null, status: "todo" })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const replies = [`Need T-2.\n${OUTCOME_MARK} blocked on T-2`, `Need T-3.\n${OUTCOME_MARK} blocked on T-3`, `T-2 again.\n${OUTCOME_MARK} blocked on T-2`, "Finished."];
+    let n = 0;
+    const answer = async () => replies[n++];
+    await poller(b, answer, { stateFile }).tick();
+    b.setStatus("t-2", "done", PERSON); b.runs.set("t-1", run("r2"));
+    await poller(b, answer, { stateFile }).tick();
+    b.setStatus("t-3", "done", PERSON); b.runs.set("t-1", run("r3"));
+    b.setStatus("t-2", "todo", PERSON);                 // T-2 reopened
+    await poller(b, answer, { stateFile }).tick();
+    assert.deepStrictEqual(b.issues.get("t-1").blockedByIssueIds, ["t-2"]);
+    b.setStatus("t-2", "done", PERSON); b.runs.set("t-1", run("r4"));
+    await poller(b, answer, { stateFile }).tick();
+    assert.strictEqual(n, 4, "the second wait on T-2 was taken as already answered");
+    assert.strictEqual(b.issues.get("t-1").status, "done");
+    b.runs.set("t-1", run("r5"));
+    await poller(b, async () => assert.fail("a repeat wake ran it again"), { stateFile }).tick();
+  });
+
+  await check("a wait that cannot be looked up is not dropped: the post is retried with it linked", async () => {
+    const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    b.state.down = new Set(["T-2"]);
+    await poller(b, async () => `Need T-2.\n${OUTCOME_MARK} blocked on T-2`, { stateFile }).tick();
+    assert.ok(!b.writes.some((x) => x.body.status), "closed without its wait");
+    b.state.down = null;
+    await poller(b, async () => assert.fail("ran again"), { stateFile }).tick();
+    assert.deepStrictEqual(b.issues.get("t-1").blockedByIssueIds, ["t-2"]);
+    assert.strictEqual(b.issues.get("t-1").status, "blocked");
   });
 
   await check("case 1, a resumed task blocks on something new: the change of waits is no newer ask — it stays blocked and is not run again", async () => {
