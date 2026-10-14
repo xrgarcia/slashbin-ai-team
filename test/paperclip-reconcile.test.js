@@ -732,6 +732,14 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
         race: { before: (b) => b.relink("t-1", PERSON, ["t-3"]), after: (b) => { b.relink("t-1", PERSON, ["t-4"]); b.tie("t-1"); } },
         replies: [blockedOn("T-2")], steps: [["wake", "r1"]], ran: 1, links: ["t-4"],
         check: (b) => assert.ok(b.comments.get("t-1").some((c) => c.body === PERSON_STANDS)) },
+      { name: "a person blocks the card with a comment mid-answer and the answer's post fails: the retry still posts it, a comment only",
+        replies: [(b) => {
+          b.setStatus("t-1", "blocked", PERSON);
+          b.comments.get("t-1").push({ id: "p1", authorUserId: "user-1", createdAt: b.now(), body: "Holding this." });
+          b.state.down = new Set(["t-1"]);
+          return "Did it.";
+        }], steps: [["wake", "r1"], ["up"], ["retry"]], ran: 1, status: "blocked",
+        check: (b) => assert.ok(b.writes.some((x) => x.body.comment === "Did it." && !x.body.status)) },
       { name: "a person cancels as the bot closes: their cancel stands", race: { before: (b) => b.setStatus("t-1", "cancelled", PERSON) },
         replies: ["Did it."], steps: [["wake", "r1"]], ran: 1, status: "cancelled" },
       { name: "a person moves the card on as the bot closes: their status stands", race: { before: (b) => b.setStatus("t-1", "in_review", PERSON) },
