@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.0] — 2026-10-14
+
 ### Added
+
+- **A bot can listen on Paperclip alone, with Discord off.** Discord and
+  Paperclip are peer surfaces: a bot needs `DISCORD_TOKEN` or a usable board,
+  either or both. With a board and no token it logs `Discord off —
+  Paperclip-only` and never builds or logs in a Discord client; a scheduled job
+  (which posts to a Discord channel) is refused when it is loaded, with a log
+  line, and kept in its file; the background summarizer is off. With neither
+  surface, or a board whose connector stays off, it exits 78 naming both.
+  Readiness is per surface: the ready marker is written once Discord is ready
+  (if on) and each board's first poll has succeeded (if on), each board is
+  polled once at startup rather than after the first interval, and
+  `doctor:fleet` reports each surface (`Discord: off · board paperclip:
+  ready`) and treats a bot with a board and no `DISCORD_TOKEN` as
+  Paperclip-only rather than a missing token. A bot on both surfaces is now
+  ready only once its board has answered a poll too.
 
 - **One bot can answer on more than one Paperclip board.** `PAPERCLIP_EXTRA_BOARDS`
   lists the others as `{ id, url, keyEnv, promptChannel }`, so an agent seated

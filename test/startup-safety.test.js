@@ -536,11 +536,15 @@ check("manager distinguishes connected from merely alive", () => {
   assert.ok(/\.ready/.test(manager), "manager has no readiness signal, so status cannot tell deaf from healthy");
 });
 
-check("bot writes a readiness marker only once Discord is ready", () => {
+check("bot writes a readiness marker only once every surface is ready", () => {
   assert.ok(/markReady\(\)/.test(bot), "no readiness marker written");
-  const readyIdx = bot.indexOf('client.once("ready"');
+  const readyIdx = bot.indexOf('client?.once("ready"');
   assert.ok(readyIdx > -1, "no ready handler");
-  assert.ok(bot.indexOf("markReady()", readyIdx) - readyIdx < 100, "markReady must be inside the ready handler");
+  assert.ok(bot.indexOf('setSurface("discord", "ready")', readyIdx) - readyIdx < 100, "Discord readiness must be reported inside the ready handler");
+  // markReady is called from setSurface alone, once no surface is still not ready.
+  const calls = [...bot.matchAll(/(?<!function )\bmarkReady\(\)/g)].map((m) => m.index);
+  const setSurface = bot.indexOf("function setSurface(");
+  assert.ok(calls.length === 1 && calls[0] > setSurface && calls[0] - setSurface < 600, "markReady must be called only by setSurface");
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

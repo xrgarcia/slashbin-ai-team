@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 - **Your choice of agent:** each bot runs on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or the [OpenAI Codex CLI](https://github.com/openai/codex), chosen per bot with `BOT_RUNTIME`. A bot uses only the CLI you pick — for replies, summaries, scheduled jobs and board tasks — billed however that CLI is signed in. [Runtimes →](docs/runtimes.md)
-- **Discord, plus an optional board:** people reach a bot in Discord; with [Paperclip](#paperclip) set, it also answers tasks assigned to it on a board, read-only or with engineering tools, never with access to its Discord memory.
+- **Discord, a board, or both:** people reach a bot in Discord, on a [Paperclip](#paperclip) board — where it answers tasks assigned to it, read-only or with engineering tools, never with access to its Discord memory — or on both. Each is optional; a bot needs one. [Paperclip-only →](#paperclip-only)
 - **Focused context:** Each bot's `CLAUDE.md` is its job description. A PO bot loads product context, an SRE bot loads ops context. Separated context produces sharper output than one generalist juggling every role in one window.
 - **Async parallelism:** While you DM the PO, the EM bot can be reviewing a PR and the SRE bot can be watching a deploy. Multiple bots = multiple things happening at once, not role-play.
 - **Safe to leave running:** an agent that can merge a PR needs guarantees about what happens when it crashes. [See below.](#why-safe-to-leave-running)
@@ -216,12 +216,12 @@ Exchanges stop after `MAX_BOT_EXCHANGES` (default 2). Any human message resets t
 
 ## Configuration
 
-Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI fails if this table and the source disagree. **Resolution order: environment variable → default.**
+A surface is required: `DISCORD_TOKEN`, or a [Paperclip](#paperclip) board, or both. Every setting below is read by the code — CI fails if this table and the source disagree. **Resolution order: environment variable → default.**
 
 ### Identity
 | Variable | Default | Description |
 |---|---|---|
-| `DISCORD_TOKEN` | *(required)* | Bot token from the Developer Portal |
+| `DISCORD_TOKEN` | — | Bot token from the Developer Portal. Unset: Discord is off and the bot answers only on its Paperclip board(s); with no board either, it refuses to start |
 | `CLAUDE_CWD` | current dir | **Your** project repo — its `CLAUDE.md` is the bot's role |
 | `BOT_NAME` | `bot` | Instance name; scopes pid, log and session files |
 | `MCP_CONFIG` | *(none)* | Path to `.mcp.json` if not in `CLAUDE_CWD` |
@@ -370,6 +370,18 @@ Two busy weeks of summaries will reach it. The default is also a cost decision �
 Answer tasks assigned to this bot on a [Paperclip](https://paperclip.ing) board. A task Paperclip hands to an agent is checked out to the run it opened, and writes to a checked-out task must come from that run, so the agent's command on the board must hold its run open until a comment lands under it; the bot polls its inbox, answers through the same run path as Discord, and posts the reply under the run. A board is read by people outside the bot's Discord channels, so a board run gets least privilege in every permission mode, `bypass` included: by default (`BOT_BOARD_EXECUTION=readonly`, see [Engineering board runs](#engineering-board-runs)) only `BOT_BOARD_TOOLS` (read-only built-ins), in `dontAsk` mode, which confines the read tools to `CLAUDE_CWD`, plus whatever `BOT_BOARD_PERMISSION_ALLOW` pre-approves. A Paperclip run cannot reach Discord memory — the buffer, summaries, uploads, sessions, scheduled jobs, the state folder and the outbox of files already sent are kept out of its prompt and environment, denied to the read tools, and unreadable to any shell it is allowed, which always runs in Claude Code's sandbox confined to `CLAUDE_CWD` (the host needs it: `bwrap` and `socat` on Linux; without it the task gets the fallback reply; besides `CLAUDE_CWD` it reads only the system folders — `/usr`, `/bin`, `/lib`, `/etc` and the like — so a tool kept anywhere else, such as the home folder, needs an `allowRead` in `BOT_SETTINGS`; nothing else in `BOT_SETTINGS` can loosen a board run's sandbox). No settings file — user, project or local — is read for a board run, and of `BOT_SETTINGS` it takes only the model and those sandbox rules, so no approval made for Discord sessions carries over; the `CLAUDE_CWD` CLAUDE.md still loads. Claude Code's project auto-memory, which the Discord sessions in the same `CLAUDE_CWD` write and the CLI loads at startup, is off for a board run. Its environment carries none of the bot's own configuration — every `BOT_*` variable except the few the skill pack's hooks read (the mail and calendar gates among them), `MCP_CONFIG*`, anything naming Paperclip, `DISCORD_TOKEN` and `BRIDGE_TOKEN` — since a credential inside, say, an inline `BOT_SETTINGS` could otherwise be printed into a reply; other host variables, such as one an MCP server needs, still reach it, so give a board run a shell only if those can be read by every board reader. The whole harness folder is withheld too (its `.env`, logs and default state), so set `CLAUDE_CWD` to the folder board tasks should read: a bot whose `CLAUDE_CWD` is the harness or state folder, or inside one, keeps the connector off and logs why, since Claude Code's sandbox always opens its working directory. Each task keeps its own session.
 
 This connector is the inbound half only. For a bot to create, assign or comment on tasks itself, add Paperclip's own MCP server (`@paperclipai/mcp-server`) to that bot's MCP config and allow its tools. Give every agent its own key, used by both halves, and never share it between bots — the board's record of who did what is only as true as that. The bot hides `PAPERCLIP_API_KEY` from Claude, so hand the MCP server its key under another name: set it in the bot's `env` (pm2 passes only what the ecosystem lists) and reference it from the MCP config as `${THAT_NAME}`.
+
+#### Paperclip-only
+
+Discord and Paperclip are peer surfaces. A bot with a board and no `DISCORD_TOKEN` runs on the board alone: it logs `Discord off — Paperclip-only`, never builds or logs in a Discord client, and refuses at load (with a log line) any scheduled job, which posts to a Discord channel; the background summarizer, which reads Discord, is off. A board whose connector stays off (see above) counts as no board, so a bot with neither surface exits `78` and names both. The ready marker is written once every surface is up — Discord when it connects (if on), each board on its first successful poll (if on) — and `npm run doctor:fleet` reports them separately (`Discord: off · board paperclip: ready`).
+
+```bash
+CLAUDE_CWD=/srv/code/tech-lead-repo
+BOT_NAME=tech-lead
+WS_PORT=9803
+PAPERCLIP_URL=https://board.example.com
+PAPERCLIP_API_KEY=<this agent's own key>
+```
 
 An agent can sit on more than one board — the same bot as a seat in two companies, say — with a key per board. List the others in `PAPERCLIP_EXTRA_BOARDS` and give each the prompt channel whose audience matches that board's readers.
 

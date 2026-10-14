@@ -45,6 +45,11 @@ if (PER_BOT_ENV) {
   results.push(skip("Discord token", "per-bot — not set at host level", DEFER));
   results.push(skip("Message Content Intent", "per-bot — needs a bot's own token", DEFER));
   results.push(skip("CLAUDE_CWD", "per-bot — each app sets its own", DEFER));
+} else if (!process.env.DISCORD_TOKEN && (process.env.PAPERCLIP_URL || process.env.PAPERCLIP_EXTRA_BOARDS)) {
+  // Discord is optional: a bot on a Paperclip board with no token is Paperclip-only.
+  results.push(skip("Discord token", "not set — Discord off, Paperclip-only", null));
+  results.push(skip("Message Content Intent", "Discord off", null));
+  results.push(await checkClaudeCwd(process.env.CLAUDE_CWD || process.cwd(), HARNESS));
 } else {
   results.push(await checkDiscordToken(process.env.DISCORD_TOKEN));
   results.push(await checkMessageContentIntent(process.env.DISCORD_TOKEN));

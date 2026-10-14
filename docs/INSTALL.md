@@ -62,6 +62,11 @@ server is free: Discord → **+** in the left sidebar → **Create My Own**.
 
 ## 2. Create the Discord bot
 
+> **Discord and Paperclip are peer surfaces; a bot needs at least one.** A bot
+> that only takes tasks on a [Paperclip](../README.md#paperclip) board needs no
+> Discord bot at all: skip this section, leave `DISCORD_TOKEN` unset and see
+> [Paperclip-only](#paperclip-only) under step 4.
+
 1. Go to the [Discord Developer Portal](https://discord.com/developers/applications).
 2. **New Application** → give it a name (this is what people see — e.g. "Product Owner") → **Create**.
 3. Left sidebar → **Bot**.
@@ -140,9 +145,30 @@ bot no role and lets it edit its own source; setup refuses if you try.
 cp .env.example .env
 ```
 
-Then edit `.env`. Only `DISCORD_TOKEN` is strictly required, but set `CLAUDE_CWD`
-too or the bot has no role. Run `npm run doctor` afterwards.
+Then edit `.env`. A surface is required — `DISCORD_TOKEN`, or a Paperclip board
+(`PAPERCLIP_URL` with `PAPERCLIP_API_KEY`), or both — and set `CLAUDE_CWD` too or
+the bot has no role. Run `npm run doctor` afterwards.
 </details>
+
+### Paperclip-only
+
+A bot can listen on a Paperclip board alone. Leave `DISCORD_TOKEN` (and the
+channel settings) unset and give it a board:
+
+```bash
+CLAUDE_CWD=/path/to/your/project-repo   # not this harness folder
+BOT_NAME=tech-lead
+WS_PORT=9803                            # unique per bot on the host
+PAPERCLIP_URL=https://board.example.com
+PAPERCLIP_API_KEY=<this agent's own key>
+```
+
+It logs `Discord off — Paperclip-only`, never builds a Discord client, and is
+ready once its first poll reaches the board. Scheduled jobs and the background
+summarizer post to and read from Discord, so they are off: a scheduled job left
+in its file is refused when it is loaded, with a log line, and runs again once
+`DISCORD_TOKEN` is back. With neither a token nor a usable board the bot exits
+with code 78 and names both.
 
 ---
 
@@ -204,6 +230,12 @@ npm run status
 Then in Discord, **DM your bot**: `hello, what repo are you working in?`
 
 You should see it start typing, then reply. That's a working install.
+
+The ready marker means **every** surface the bot runs is up: Discord once it
+connects (if on), and each Paperclip board once its first poll succeeds (if on).
+`npm run doctor:fleet` shows each one separately, e.g.
+`Discord: off · board paperclip: ready`. A Paperclip-only bot is checked by
+assigning it a task on its board.
 
 ---
 
