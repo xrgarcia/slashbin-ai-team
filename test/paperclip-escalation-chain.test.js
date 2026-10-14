@@ -102,24 +102,24 @@ const seat = (b, agentId, answer, opts) => createPaperclipPoller({ url: "https:/
     ];
     const poAnswers = [
       `Need your call: do we commit customers to a 30 s retry window?\nIt is a commitment, not product shape.\n${OUTCOME_MARK} escalate`,
-      "Ray ruled 30 s. Handing back to the EM to write it on the issue.",
+      "Avery ruled 30 s. Handing back to the EM to write it on the issue.",
     ];
     const EM = seat(b, "agent-em", async (p) => { em.push(p); return emAnswers[em.length - 1]; },
       { escalateTo: parseEscalateTo("agent:Product Owner"), escalationReturnTo: parseEscalateTo("agent:Foreman"), escalationAuthority: "scope and mechanism" });
     const PO = seat(b, "agent-po", async (p) => { po.push(p); return poAnswers[po.length - 1]; },
-      { escalateTo: parseEscalateTo("user:user-ray|Ray"), escalationAuthority: "product shape", onEscalate: async (x) => pings.push(x) });
+      { escalateTo: parseEscalateTo("user:user-avery|Avery"), escalationAuthority: "product shape", onEscalate: async (x) => pings.push(x) });
     const both = async () => { for (let n = 0; n < 2; n++) { await EM.tick(); await PO.tick(); } };
 
     b.foremanEscalates();
-    await both();                                       // up: EM → PO → Ray
-    assert.strictEqual(b.card.assigneeUserId, "user-ray", JSON.stringify(b.writes));
+    await both();                                       // up: EM → PO → Avery
+    assert.strictEqual(b.card.assigneeUserId, "user-avery", JSON.stringify(b.writes));
     assert.strictEqual(b.card.status, "blocked");
     assert.deepStrictEqual([em.length, po.length, pings.length], [1, 1, 1]);
-    assert.deepStrictEqual(pings[0], { task: "SLA-1", link: "https://board.example.com/SLA/issues/SLA-1", to: "Ray", ask: "Need your call: do we commit customers to a 30 s retry window?" });
+    assert.deepStrictEqual(pings[0], { task: "SLA-1", link: "https://board.example.com/SLA/issues/SLA-1", to: "Avery", ask: "Need your call: do we commit customers to a 30 s retry window?" });
 
-    b.personRules("user-ray", "30 s. We commit to it.", "agent-po");
-    await both();                                       // down: Ray → PO → EM → Foreman
-    assert.match(po[1], /Ray handed it back down to you with their resolution/);
+    b.personRules("user-avery", "30 s. We commit to it.", "agent-po");
+    await both();                                       // down: Avery → PO → EM → Foreman
+    assert.match(po[1], /Avery handed it back down to you with their resolution/);
     assert.match(po[1], /goes back to Engineering Manager/, "the PO was not told where the card goes next");
     assert.match(em[1], /Product Owner handed it back down to you/);
     assert.match(em[1], /goes back to Foreman/);
@@ -130,7 +130,7 @@ const seat = (b, agentId, answer, opts) => createPaperclipPoller({ url: "https:/
     // No bot ever moved the card out of blocked; the Foreman's mirror does that from GitHub.
     assert.ok(b.writes.every((w) => !w.body.status || w.body.status === "blocked"), JSON.stringify(b.writes));
     assert.deepStrictEqual(b.writes.filter((w) => "assigneeAgentId" in w.body).map((w) => [w.agentId, w.body.assigneeAgentId ?? w.body.assigneeUserId]),
-      [["agent-em", "agent-po"], ["agent-po", "user-ray"], ["agent-po", "agent-em"], ["agent-em", "agent-foreman"]]);
+      [["agent-em", "agent-po"], ["agent-po", "user-avery"], ["agent-po", "agent-em"], ["agent-em", "agent-foreman"]]);
     await both();
     assert.deepStrictEqual([em.length, po.length], [2, 2], "an unchanged card was worked again");
   });
