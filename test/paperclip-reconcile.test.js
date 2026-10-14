@@ -7,7 +7,7 @@ const assert = require("assert");
 const { mkdtempSync, readFileSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, statusSetter, reconcilable, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY, HELD_NOTE } = require("../lib/paperclip");
+const { createPaperclipPoller, statusSetter, reconcilable, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY, HELD_NOTE, decidedStatus } = require("../lib/paperclip");
 
 let pass = 0, fail = 0;
 async function check(label, fn) {
@@ -118,6 +118,39 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.match(resume.body.comment, /^Resuming: T-2, which this task waited on, is done\.$/);
     assert.match(prompts[1], /was blocked waiting on T-2; it is now done/);
     assert.strictEqual(b.issues.get("t-1").status, "done");
+  });
+
+  await check("case 1, Paperclip's notice mid-resume: a system comment is no new ask, so the resumed answer still closes the card", async () => {
+    const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let n = 0;
+    const answer = async () => {
+      if (++n === 1) return `Need T-2.\n${OUTCOME_MARK} blocked on T-2`;
+      b.comments.get("t-1").push({ id: "sys", authorAgentId: null, authorUserId: null, authorType: "system",
+        createdAt: new Date().toISOString(), body: "Paperclip exhausted the bounded disposition repair." });
+      return "Finished.";
+    };
+    await poller(b, answer, { stateFile }).tick();
+    b.setStatus("t-2", "done", PERSON);
+    b.runs.set("t-1", run("r2"));
+    b.issues.get("t-1").status = "in_progress";
+    await poller(b, answer, { stateFile }).tick();
+    assert.strictEqual(b.issues.get("t-1").status, "done");
+    // A later wake on the same done waits does not resume it again.
+    b.runs.set("t-1", run("r3"));
+    await poller(b, answer, { stateFile }).tick();
+    assert.strictEqual(n, 2, "the work ran again");
+    assert.strictEqual(b.writes.filter((x) => /^Resuming/.test(x.body.comment ?? "")).length, 1);
+  });
+
+  await check("a resume note since the bot's own block is its move out of it; without one the block stands", () => {
+    const block = [{ action: "issue.updated", actorType: "agent", actorId: ME.id, createdAt: "2026-01-02T00:00:00Z",
+      details: { changes: { status: { from: "in_progress", to: "blocked" } } } }];
+    const note = { authorAgentId: ME.id, createdAt: "2026-01-02T00:05:00Z", body: "Resuming: T-2, which this task waited on, is done." };
+    assert.strictEqual(decidedStatus("in_progress", block, [], ME.id), "blocked");
+    assert.strictEqual(decidedStatus("in_progress", block, [note], ME.id), "in_progress");
+    assert.strictEqual(decidedStatus("in_progress", block, [{ ...note, createdAt: "2026-01-01T00:00:00Z" }], ME.id), "blocked");
+    assert.strictEqual(decidedStatus("in_progress", block, [{ ...note, authorAgentId: "someone" }], ME.id), "blocked");
   });
 
   await check("case 2: one of two waits done — still blocked, linked and described by the open one only", async () => {
