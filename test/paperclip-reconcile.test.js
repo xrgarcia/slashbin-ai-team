@@ -595,6 +595,30 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(b.issues.get("t-1").status, "blocked");
   });
 
+  await check("a wait that finishes while the bot answers a newer ask: the answer closes the card, and the ask is not run again", async () => {
+    const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let n = 0;
+    const answer = async () => {
+      n++;
+      if (n === 1) return `Need T-2.\n${OUTCOME_MARK} blocked on T-2`;
+      b.setStatus("t-2", "done", PERSON);              // finishes mid-answer
+      return "Did it.";
+    };
+    await poller(b, answer, { stateFile }).tick();
+    b.setStatus("t-1", "todo", PERSON);
+    b.comments.get("t-1").push({ id: "p1", authorUserId: "user-1", createdAt: new Date().toISOString(), body: "And this?" });
+    b.runs.set("t-1", run("r2"));
+    await poller(b, answer, { stateFile }).tick();
+    assert.strictEqual(n, 2);
+    assert.strictEqual(b.issues.get("t-1").status, "done", "the answer was posted but the card left open");
+    // An unchanged wake, after a restart.
+    b.issues.get("t-1").status = "in_progress";
+    b.runs.set("t-1", run("r3"));
+    await poller(b, answer, { stateFile }).tick();
+    assert.strictEqual(n, 2, "the answered ask was run again");
+  });
+
   await check("case 6: a task another writer owns gets the comment, never a status", async () => {
     const mirror = /^source: \S+#\d+$/;
     const b = board([task("t-1", { description: "source: acme/app#12\nstage review", runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);

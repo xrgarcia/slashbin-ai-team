@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A wait that finishes while the bot answers does not turn the ask into a new
+  one.** The answer still closes the card, and the wake for the finished wait
+  finds the ask answered rather than running it again.
 - **Paperclip settling a lost run does not lift a person's hold.** On a task
   already stopped, its blocked settlement is not a decision of its own: the
   earlier stop stands, a person's included, for own and mirrored tasks.
