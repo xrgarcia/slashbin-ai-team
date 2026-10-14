@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wait once, when its tasks are done or someone moves the card on, and the
   resume's own answer ends it. An answer that is not blocked is final. State
   saved under the old keys reads back as the asks they name.
+  A saved answer whose post is retried is found delivered only in a comment
+  made after its attempt started, so the same words from the wait before are
+  not taken for it.
 - **A person who blocks a task just as the bot closes it blocked keeps the
   hold.** The close lands as the same status reasserted, and used to count as
   the bot's own block, so the task resumed when its wait finished. The hold
