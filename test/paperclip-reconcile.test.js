@@ -7,7 +7,7 @@ const assert = require("assert");
 const { mkdtempSync, readFileSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, statusSetter, reconcilable, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY, HELD_NOTE, decidedStatus } = require("../lib/paperclip");
+const { createPaperclipPoller, statusSetter, reconcilable, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus } = require("../lib/paperclip");
 
 let pass = 0, fail = 0;
 async function check(label, fn) {
@@ -88,6 +88,8 @@ function board(tasks) {
         activity.get(i.id).unshift({ action: "issue.updated", createdAt: now(), actorType: "agent", actorId: ME.id, runId, details: { ...(body.status ? { status: body.status } : {}), changes } });
       }
       if (body.comment) comments.get(i.id).push({ id: `c${writes.length}`, authorAgentId: ME.id, createdAt: now(), body: body.comment, createdByRunId: init.headers["x-paperclip-run-id"] });
+      // Whatever lands just after this write, before the bot looks again.
+      if (state.afterWrite && body.status) { const f = state.afterWrite; delete state.afterWrite; f(i); }
       return ok({});
     }
     if (!m[2]) return ok({ ...i, blockedBy: blockedBy(i) });
@@ -99,13 +101,20 @@ function board(tasks) {
   // Blocking a task that is already blocked changes no status string: Paperclip
   // records it as a new statusVersion and the wait's new owner, nothing more.
   const reassert = (id, actor) => {
-    activity.get(id).unshift({ action: "issue.updated", ...actor, details: { status: "blocked",
+    activity.get(id).unshift({ action: "issue.updated", createdAt: now(), ...actor, details: { status: "blocked",
       changes: { statusVersion: { from: 1, to: 2 }, unblockDescriptor: { from: null, to: { owner: { userId: actor.actorId } } } } } });
   };
-  return { fetch, writes, tries, wakes, state, issues, runs, comments, setStatus, reassert, now,
+  // A person changes what a blocked task waits on: a fresh decision, its status unchanged.
+  const rehold = (id, actor, waits, note) => {
+    const i = issues.get(id);
+    activity.get(id).unshift({ action: "issue.updated", createdAt: now(), ...actor, details: { status: "blocked",
+      changes: { statusVersion: { from: 2, to: 3 }, blockedByIssueIds: { from: i.blockedByIssueIds ?? [], to: waits }, unblockDescriptor: { from: i.unblockDescriptor ?? null, to: note } } } });
+    i.blockedByIssueIds = waits; i.unblockDescriptor = note;
+  };
+  return { fetch, writes, tries, wakes, state, issues, runs, comments, setStatus, reassert, rehold, now,
     // Paperclip lost the run: it has ended, and the task is blocked.
     recover: (id, runId) => {
-      activity.get(id).unshift({ action: "issue.execution_recovery_settled", actorType: "system", actorId: "execution-recovery", runId, details: { outcome: "blocked" } });
+      activity.get(id).unshift({ action: "issue.execution_recovery_settled", createdAt: now(), actorType: "system", actorId: "execution-recovery", runId, details: { outcome: "blocked" } });
       issues.get(id).status = "blocked";
       const r = runs.get(id).find((x) => x.id === runId);
       if (r) r.status = "failed";
@@ -669,6 +678,21 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       { name: "interrupted in a later wait after a fallback: run once more when allowed, not taken as delivered", opts: { resumeInterrupted: true },
         replies: ["Done now."], steps: [["die", "r1"], ["die", "r1b"], ["retry"], ["move", "todo"], ["die", "r2"], ["retry"]], ran: 1, status: "done",
         check: (b, prompts) => assert.ok(prompts[0].includes(INTERRUPTED_NOTE)) },
+      { name: "a person's hold lands as the bot closes blocked, then they change what it waits on: their newer hold stands",
+        race: { before: (b, i) => { b.setStatus("t-1", "blocked", PERSON); i.unblockDescriptor = { owner: { userId: PERSON.actorId }, action: "Hold for T-3." }; i.blockedByIssueIds = ["t-3"]; },
+          after: (b) => b.rehold("t-1", PERSON, ["t-4"], { owner: { userId: PERSON.actorId }, action: "Hold for T-4." }) },
+        replies: [blockedOn("T-2")], steps: [["wake", "r1"]], ran: 1, status: "blocked", links: ["t-4"],
+        check: (b) => {
+          assert.strictEqual(b.issues.get("t-1").unblockDescriptor.action, "Hold for T-4.");
+          assert.ok(b.comments.get("t-1").some((c) => c.body === PERSON_STANDS));
+        } },
+      { name: "a person cancels as the bot closes: their cancel stands", race: { before: (b) => b.setStatus("t-1", "cancelled", PERSON) },
+        replies: ["Did it."], steps: [["wake", "r1"]], ran: 1, status: "cancelled" },
+      { name: "a person moves the card on as the bot closes: their status stands", race: { before: (b) => b.setStatus("t-1", "in_review", PERSON) },
+        replies: ["Did it."], steps: [["wake", "r1"]], ran: 1, status: "in_review" },
+      { name: "a person moves the card on mid-answer: the answer is a comment, their status stands",
+        replies: [(b) => { b.setStatus("t-1", "in_review", PERSON); return "Did it."; }], steps: [["wake", "r1"]], ran: 1, status: "in_review",
+        check: (b) => assert.ok(b.writes.some((x) => x.body.comment === "Did it." && !x.body.status)) },
       { name: "a person moves a blocked card on: asked again; a re-wake alone is not", replies: [`Cannot yet.\n${OUTCOME_MARK} blocked`, "Done now."],
         steps: [["wake", "r1"], ["wake", "r2"], ["move", "todo"], ["wake", "r3"]], ran: 2, status: "done" },
       { name: "lost run after a resume: the one answer closes it under the run the wake opened", opts: { watchMs: 10 },
@@ -691,7 +715,9 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
         steps: [["wake", "r1"], ["done", "t-2"], ["wake", "r2"], ["done", "t-2"], ["wake", "r3"]], ran: 3, status: "done" },
     ];
     for (const row of rows) {
-      const b = board([task("t-1", { runs: [], ...row.start }), task("t-2", { assigneeAgentId: null, status: "todo" }), task("t-3", { assigneeAgentId: null, status: "todo" })]);
+      const b = board([task("t-1", { runs: [], ...row.start }), ...["t-2", "t-3", "t-4"].map((t) => task(t, { assigneeAgentId: null, status: "todo" }))]);
+      if (row.race?.before) b.state.beforeWrite = (i) => row.race.before(b, i);
+      if (row.race?.after) b.state.afterWrite = (i) => row.race.after(b, i);
       const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
       const prompts = [];
       const answer = async (p) => { const r = row.replies[prompts.length]; prompts.push(p); return typeof r === "function" ? r(b) : r ?? assert.fail("ran again"); };

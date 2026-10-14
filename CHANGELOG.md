@@ -42,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the bot's own block, so the task resumed when its wait finished. The hold
   now stays the person's; their waits are put back, and their note, which
   Paperclip lets no agent write back, is quoted in a comment.
+- **No bot write overwrites a person's newer change to a task.** Every status
+  or blocker write the bot makes — a close, a hold put back, a follow-up —
+  now reads the task's record first. If a person changed its status or what
+  it waits on after the board the bot decided from, their version stands and
+  the bot comments instead. A person who re-blocked a task on something new
+  while the bot was putting back their earlier hold used to get the old waits
+  back; a person who moved a card on while the bot answered, or as it closed,
+  had it closed done over them.
 - **A board run never keeps a Discord or bridge credential under another
   name.** Bots started from one shared environment hold every bot's token
   under its own name (`EM_DISCORD_TOKEN`, `PO_DISCORD_TOKEN`, `DISCORD_BOT_KEY`…);

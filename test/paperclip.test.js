@@ -690,7 +690,7 @@ const poller = (b, answer) => createPaperclipPoller({
       const path = url.replace(/^.*\/api/, "");
       if (init.method === "PATCH") { writes.push(JSON.parse(init.body).comment); return { ok: true, text: async () => "{}" }; }
       const routes = { "/agents/me": ME, "/agents/me/inbox-lite": [{ id: "iss-1" }], "/issues/iss-1": issue,
-        "/issues/iss-1/comments": comments, "/issues/iss-1/runs": [{ id: `run-${run}`, agentId: ME.id, status: "running" }] };
+        "/issues/iss-1/comments": comments, "/issues/iss-1/activity": [], "/issues/iss-1/runs": [{ id: `run-${run}`, agentId: ME.id, status: "running" }] };
       return path in routes ? { ok: true, text: async () => JSON.stringify(routes[path]) } : { ok: false, status: 404, text: async () => "" };
     };
     const writes = [];
@@ -716,6 +716,7 @@ const poller = (b, answer) => createPaperclipPoller({
       routes[`GET /issues/iss-${n}/runs`] = [{ id: `run-${n}`, agentId: ME.id, status: "running" }];
       routes[`GET /issues/iss-${n}`] = { id: `iss-${n}`, identifier: `T-${n}`, title: "Q", createdAt: "2026-01-01T00:00:00Z" };
       routes[`GET /issues/iss-${n}/comments`] = [];
+      routes[`GET /issues/iss-${n}/activity`] = [];
       routes[`GET /heartbeat-runs/run-${n}`] = { contextSnapshot: {} };
     }
     const fetch = async (url, init) => {
@@ -746,6 +747,7 @@ const poller = (b, answer) => createPaperclipPoller({
       routes[`GET /issues/iss-${n}/runs`] = [{ id: `run-${n}`, agentId: ME.id, status: "running" }];
       routes[`GET /issues/iss-${n}`] = { id: `iss-${n}`, identifier: `T-${n}`, title: "Q", createdAt: "2026-01-01T00:00:00Z" };
       routes[`GET /issues/iss-${n}/comments`] = [];
+      routes[`GET /issues/iss-${n}/activity`] = [];
       routes[`GET /heartbeat-runs/run-${n}`] = { contextSnapshot: {} };
     }
     let down = true; const writes = [];
