@@ -574,6 +574,22 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(n, 1, "a block its own writer set for the bot to clear held the bot");
   });
 
+  await check("a mirrored task its sync blocked and handed to the bot, with a board user's key, is worked (SLA-1335)", async () => {
+    const mirror = /^source: \S+#\d+$/;
+    let b = board([task("t-1", { description: "source: acme/app#12\nstage review", runs: run("r1") })]);
+    b.setStatus("t-1", "blocked", PERSON, {}, { assigneeAgentId: { from: "agent-foreman", to: ME.id } });
+    b.issues.get("t-1").status = "in_progress";        // the wake's checkout, unrecorded
+    let n = 0;
+    await poller(b, async () => { n++; return "Ruled."; }, { externalWriter: mirror }).tick();
+    assert.strictEqual(n, 1, "the sync's hand-off read as a person's stop");
+    assert.ok(!b.writes.some((x) => x.body.comment === HELD_NOTE), JSON.stringify(b.writes));
+    // A person's stop that hands the task to someone else still holds.
+    b = board([task("t-1", { description: "source: acme/app#12\nstage review", runs: run("r1") })]);
+    b.setStatus("t-1", "blocked", PERSON, {}, { assigneeAgentId: { from: ME.id, to: "agent-other" } });
+    b.issues.get("t-1").status = "in_progress";
+    await poller(b, async () => assert.fail("worked a mirrored task over a person's stop"), { externalWriter: mirror }).tick();
+  });
+
   await check("Paperclip settling a lost run on a task a person already blocked does not lift the person's hold", async () => {
     const mirror = /^source: \S+#\d+$/;
     for (const description of ["", "source: acme/app#12\nstage review"]) {

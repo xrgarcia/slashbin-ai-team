@@ -82,6 +82,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new work: the retry used to post only the "stopped by someone else" note,
   and the answer already made was never delivered. It goes out now as a
   comment only, and the card stays as the person set it.
+- **A card the Foreman blocks and hands to the bot is worked.** The Foreman's
+  sync writes with a board user's key, so its escalation (blocked, assigned to
+  the EM) read as a person's stop: the bot posted the "stopped by someone else"
+  note on each wake and Paperclip escalated the retries. On a mirrored card, a
+  stop whose write also assigns the card to the bot is now that hand-off; a
+  person's stop that does not hand it over still holds.
 - **A board run never keeps a Discord or bridge credential under another
   name.** Bots started from one shared environment hold every bot's token
   under its own name (`EM_DISCORD_TOKEN`, `PO_DISCORD_TOKEN`, `DISCORD_BOT_KEY`…);
