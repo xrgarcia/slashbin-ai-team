@@ -72,7 +72,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   task that reopened between two looks used to leave the card blocked on
   nothing. The board the bot decides from also keeps the entries it saw at its
   newest time, so a person's change recorded in that same millisecond counts
-  as newer and stands.
+  as newer and stands — and so does every write the bot makes after one of its
+  own, a hold put back or a status restored, judged from the board as that
+  write was recorded. A blocked ask resumes when the card is reopened after the
+  answer itself, even in its millisecond, never after a note the bot posted
+  since.
 - **A board run never keeps a Discord or bridge credential under another
   name.** Bots started from one shared environment hold every bot's token
   under its own name (`EM_DISCORD_TOKEN`, `PO_DISCORD_TOKEN`, `DISCORD_BOT_KEY`…);

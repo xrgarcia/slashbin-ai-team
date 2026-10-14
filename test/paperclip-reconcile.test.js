@@ -81,6 +81,7 @@ function board(tasks) {
       if (body.comment && actorRun) actorRun.status = "succeeded";
       writes.push({ id: i.id, body, runId: init.headers["x-paperclip-run-id"] });
       const was = { blockedByIssueIds: i.blockedByIssueIds ?? [], unblockDescriptor: i.unblockDescriptor ?? null };
+      const recorded = activity.get(i.id).length;
       if (body.blockedByIssueIds) i.blockedByIssueIds = body.blockedByIssueIds;
       if (body.unblockDescriptor) i.unblockDescriptor = body.unblockDescriptor;
       const runId = init.headers["x-paperclip-run-id"];
@@ -92,7 +93,14 @@ function board(tasks) {
       else if (i.status === "blocked" && (body.status === "blocked" || body.blockedByIssueIds || body.unblockDescriptor)) {
         activity.get(i.id).unshift({ action: "issue.updated", createdAt: now(), actorType: "agent", actorId: ME.id, runId, details: { ...(body.status ? { status: body.status } : {}), changes: { statusVersion: { from: 1, to: 2 }, ...replaced } } });
       } else if (Object.keys(replaced).length) activity.get(i.id).unshift({ action: "issue.updated", createdAt: now(), actorType: "agent", actorId: ME.id, runId, details: { changes: replaced } });
-      if (body.comment) comments.get(i.id).push({ id: `c${writes.length}`, authorAgentId: ME.id, createdAt: now(), body: body.comment, createdByRunId: init.headers["x-paperclip-run-id"] });
+      if (body.comment) {
+        // One write, one time: a comment sent with a status or waits shares the time of their record.
+        const at = activity.get(i.id).length > recorded ? activity.get(i.id)[0].createdAt : now();
+        const c = { id: `c${writes.length}`, authorAgentId: ME.id, createdAt: at, body: body.comment, createdByRunId: runId };
+        comments.get(i.id).push(c);
+        // Paperclip records each comment's posting too, in the record's order.
+        activity.get(i.id).unshift({ action: "issue.comment_added", createdAt: c.createdAt, actorType: "agent", actorId: ME.id, runId, details: { commentId: c.id } });
+      }
       // Whatever lands just after this write, before the bot looks again.
       if (state.afterWrite && body.status) { const f = state.afterWrite; delete state.afterWrite; f(i); }
       return ok({});
@@ -101,12 +109,18 @@ function board(tasks) {
       const v = ok({ ...i, blockedBy: blockedBy(i) });
       // Whatever lands just after the bot reads this task (the `nth` read of it).
       const r = state.afterRead;
-      if (r && r.of === decodeURIComponent(m[1]) && --r.nth === 0) { delete state.afterRead; r.f(i); }
+      if (r && !r.on && r.of === decodeURIComponent(m[1]) && --r.nth === 0) { delete state.afterRead; r.f(i); }
       return v;
     }
     // Each entry has its own id, as Paperclip's do.
     if (m[2] === "/activity") { for (const a of activity.get(i.id)) a.id ??= `a${++ids}`; return ok(activity.get(i.id)); }
-    if (m[2] === "/comments") return ok(comments.get(i.id));
+    if (m[2] === "/comments") {
+      const v = ok(comments.get(i.id));
+      // Or just after it reads this task's comments.
+      const r = state.afterRead;
+      if (r?.on === "comments" && r.of === decodeURIComponent(m[1]) && --r.nth === 0) { delete state.afterRead; r.f(i); }
+      return v;
+    }
     if (m[2] === "/runs") return ok(runs.get(i.id));
     return { ok: false, status: 404, text: async () => "" };
   };
@@ -706,6 +720,18 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
           assert.strictEqual(b.issues.get("t-1").unblockDescriptor.action, "Hold for T-4.");
           assert.ok(b.comments.get("t-1").some((c) => c.body === PERSON_STANDS));
         } },
+      { name: "a person's hold lands as the bot closes blocked, then they change it in the close's millisecond: their newer hold stands",
+        race: { before: (b, i) => { b.setStatus("t-1", "blocked", PERSON); i.unblockDescriptor = { owner: { userId: PERSON.actorId }, action: "Hold for T-3." }; i.blockedByIssueIds = ["t-3"]; },
+          after: (b) => { b.rehold("t-1", PERSON, ["t-4"], { owner: { userId: PERSON.actorId }, action: "Hold for T-4." }); b.tie("t-1"); } },
+        replies: [blockedOn("T-2")], steps: [["wake", "r1"]], ran: 1, status: "blocked", links: ["t-4"],
+        check: (b) => {
+          assert.strictEqual(b.issues.get("t-1").unblockDescriptor.action, "Hold for T-4.");
+          assert.ok(b.comments.get("t-1").some((c) => c.body === PERSON_STANDS));
+        } },
+      { name: "a person changes the card's waits as the bot closes blocked, then again in the close's millisecond: their newer waits stand",
+        race: { before: (b) => b.relink("t-1", PERSON, ["t-3"]), after: (b) => { b.relink("t-1", PERSON, ["t-4"]); b.tie("t-1"); } },
+        replies: [blockedOn("T-2")], steps: [["wake", "r1"]], ran: 1, links: ["t-4"],
+        check: (b) => assert.ok(b.comments.get("t-1").some((c) => c.body === PERSON_STANDS)) },
       { name: "a person cancels as the bot closes: their cancel stands", race: { before: (b) => b.setStatus("t-1", "cancelled", PERSON) },
         replies: ["Did it."], steps: [["wake", "r1"]], ran: 1, status: "cancelled" },
       { name: "a person moves the card on as the bot closes: their status stands", race: { before: (b) => b.setStatus("t-1", "in_review", PERSON) },
@@ -802,6 +828,14 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
           return blockedOn("T-2");
         }, "Finished."],
         steps: [["wake", "r1"], ["done", "t-2"], ["wake", "r2"]], ran: 2, status: "done" },
+      { name: "a person reopens the card a person blocked as the bot closed it, before the bot's note on their hold: the ask resumes once, across restarts",
+        race: { before: (b, i) => { b.setStatus("t-1", "blocked", PERSON); i.unblockDescriptor = { owner: { userId: PERSON.actorId }, action: "Hold for T-3." }; i.blockedByIssueIds = ["t-3"]; },
+          after: (b) => { b.state.afterRead = { of: "t-1", on: "comments", nth: 2, f: () => b.setStatus("t-1", "todo", PERSON) }; } },
+        replies: [blockedOn("T-2"), "Finished."], steps: [["wake", "r1"], ["wake", "r2"], ["wake", "r3"]], ran: 2, status: "done",
+        check: (b) => assert.ok(b.comments.get("t-1").some((c) => c.body.startsWith("Someone blocked this task as I closed it"))) },
+      { name: "a person reopens a blocked card in the blocked answer's millisecond: the ask resumes once",
+        replies: [`Cannot yet.\n${OUTCOME_MARK} blocked`, "Done now."], steps: [["wake", "r1"], ["move", "todo"], ["tie"], ["wake", "r2"], ["wake", "r3"]],
+        ran: 2, status: "done" },
       { name: "a person moves the card on mid-answer in the same millisecond as the board's last entry: their status stands",
         replies: [`Cannot yet.\n${OUTCOME_MARK} blocked`, (b) => { b.setStatus("t-1", "in_review", PERSON); b.tie("t-1"); return "Done now."; }],
         steps: [["wake", "r1"], ["move", "todo"], ["wake", "r2"]], ran: 2, status: "in_review",
@@ -834,6 +868,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
         // Lands just after the next tick reads t-1, before anything it decides is written.
         else if (what === "onRead") b.state.afterRead = { of: "t-1", nth: 1, f: () => arg(b) };
         else if (what === "retry") await tick();
+        else if (what === "tie") b.tie("t-1");
         else if (what === "hang") {
           wake(arg);
           poller(b, answer, { stateFile, ...row.opts, watchMs: 1e6 }).tick();
