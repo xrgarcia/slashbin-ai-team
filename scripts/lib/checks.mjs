@@ -251,6 +251,16 @@ export function checkEcosystem(file, sourceDir) {
     ? bad("ecosystem: WS_PORT", `collision on ${[...new Set(dupPorts)].join(", ")}`, "Each bot needs a unique WS_PORT — the second one crashes at startup.")
     : ok("ecosystem: WS_PORT", ports.length ? `${ports.join(", ")} — unique` : "none set"));
 
+  // One run limit for every bot, Discord and Paperclip alike: a bot set apart
+  // drifts (Nova at 25 minutes beside 45, SLA-1399). The board waiter keeps no
+  // clock, so these two are the whole policy.
+  for (const key of ["CLAUDE_TIMEOUT_MS", "CLAUDE_MAX_TURNS"]) {
+    const values = [...new Set([...text.matchAll(new RegExp(`\\b${key}\\s*:\\s*['"]?(\\d+)`, "g"))].map((m) => m[1]))];
+    out.push(values.length > 1
+      ? bad(`ecosystem: ${key}`, `differs between bots: ${values.join(", ")}`, "Every bot runs under one limit. Set it once (RUN_LIMITS) and spread it into each app.")
+      : ok(`ecosystem: ${key}`, values.length ? `one value for every bot: ${values[0]}` : "not set — the bot default applies"));
+  }
+
   const literals = [];
   for (const m of text.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(['"])([\s\S]*?)\2/gm)) {
     if (SECRET_KEY.test(m[1])) literals.push({ key: m[1], len: m[3].length });
