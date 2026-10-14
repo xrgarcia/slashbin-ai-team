@@ -2250,6 +2250,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       sessionId: null,
       resultSubtype: null,
       progress,
+      // A board answer is the card's record: only what follows the last tool
+      // call is posted there, whatever REPLY_FINAL_TEXT_ONLY says for chat.
+      finalTextOnly: Boolean(opts.finalTextOnly),
       // Did this process actually DO anything? Decides whether a failed run can
       // be safely retried — see isSafeToRetryFresh.
       toolCalls: 0,
@@ -2457,7 +2460,7 @@ function handleStreamEvent(event, reqLog, sendMessage, state) {
             // Everything written so far was working notes, not the answer.
             // Dropped from the reply AND from the returned response, so the
             // conversation history records what was posted, not what was thought.
-            if (REPLY_FINAL_TEXT_ONLY) state.setTurnText("");
+            if (REPLY_FINAL_TEXT_ONLY || state.finalTextOnly) state.setTurnText("");
             state.progress?.tool(block.name, block.input);
             if (block.name === "Write" && block.input?.file_path) {
               const fp = block.input.file_path;
@@ -3269,7 +3272,7 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       answer: (prompt, issue) => {
         const reply = replyCollector();
         return runClaude(prompt, `${tag}-${issue.identifier}`, pLog.child({ paperclipTask: issue.identifier }),
-          reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true })
+          reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true, finalTextOnly: true })
           .then(() => reply.text());
       },
     });
