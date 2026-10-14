@@ -64,7 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a person who moved the card to review while the bot answered used to have
   it closed done by the next wake. An ask answered blocked keeps its card
   blocked through those wakes — Paperclip's checkout used to leave it in
-  progress, where the finished part of its wait was never cut from the card.
+  progress, where the finished part of its wait was never cut from the card. If
+  the last of its waits finishes during that wake, nothing is written and the
+  ask resumes on the next poll. A move a person makes on a blocked card counts
+  from the blocked answer itself, so a note the bot posts after it no longer
+  hides the move and the ask still resumes.
 - **A board run never keeps a Discord or bridge credential under another
   name.** Bots started from one shared environment hold every bot's token
   under its own name (`EM_DISCORD_TOKEN`, `PO_DISCORD_TOKEN`, `DISCORD_BOT_KEY`…);

@@ -772,6 +772,18 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       { name: "an unchanged wake leaves a blocked answer with no waits blocked",
         replies: [`Cannot yet.\n${OUTCOME_MARK} blocked`], steps: [["wake", "r1"], ["wake", "r2"]], ran: 1, status: "blocked",
         check: (b) => assert.strictEqual(b.issues.get("t-1").status, "blocked") },
+      { name: "its last wait finishes as an unchanged wake acknowledges it: the ask resumes once, across restarts",
+        replies: [blockedOn("T-2"), "Finished."], steps: [["wake", "r1"], ["onRead", (b) => b.setStatus("t-2", "done", PERSON)], ["wake", "r2"], ["retry"]],
+        ran: 2, status: "done", check: (b) => assert.match(b.writes.at(-1).body.comment, /^Resuming: T-2/) },
+      { name: "its last wait finishes as a wake the card was not checked out on acknowledges it: the ask resumes once",
+        replies: [blockedOn("T-2"), "Finished."], steps: [["wake", "r1"], ["onRead", (b) => b.setStatus("t-2", "done", PERSON)], ["rewake", "r2"], ["retry"]],
+        ran: 2, status: "done" },
+      { name: "a person moves the blocked card on as an unchanged wake acknowledges it: the next wake resumes it, once",
+        replies: [blockedOn("T-2"), "Finished."], steps: [["wake", "r1"], ["onRead", (b) => b.setStatus("t-1", "todo", PERSON)], ["wake", "r2"], ["wake", "r3"]],
+        ran: 2, status: "done" },
+      { name: "a person moves a blocked card with no waits on as an unchanged wake acknowledges it: the next wake resumes it, once",
+        replies: [`Cannot yet.\n${OUTCOME_MARK} blocked`, "Done now."], steps: [["wake", "r1"], ["onRead", (b) => b.setStatus("t-1", "todo", PERSON)], ["wake", "r2"], ["wake", "r3"]],
+        ran: 2, status: "done" },
     ];
     for (const row of rows) {
       const b = board([task("t-1", { runs: [], ...row.start }), ...["t-2", "t-3", "t-4"].map((t) => task(t, { assigneeAgentId: null, status: "todo" }))]);
@@ -791,6 +803,10 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       const t1 = b.issues.get("t-1");
       for (const [what, arg] of row.steps) {
         if (what === "wake") { wake(arg); await tick(); }
+        // A wake Paperclip does not check the card out on: it waits on an open task.
+        else if (what === "rewake") { b.runs.set("t-1", run(arg)); await tick(); }
+        // Lands just after the next tick reads t-1, before anything it decides is written.
+        else if (what === "onRead") b.state.afterRead = { of: "t-1", nth: 1, f: () => arg(b) };
         else if (what === "retry") await tick();
         else if (what === "hang") {
           wake(arg);
