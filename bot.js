@@ -271,7 +271,8 @@ function codexMcp() {
       skipped.push({ name: source.trim().startsWith("{") ? "(inline MCP config)" : source, reason: "not readable as JSON" });
       continue;
     }
-    const got = codexRuntime.mcpServers(config, process.env);
+    // One child environment for every source: a key another source set differently is refused, not overwritten.
+    const got = codexRuntime.mcpServers(config, process.env, env);
     Object.assign(servers, got.servers);
     Object.assign(env, got.env);
     skipped.push(...got.skipped);

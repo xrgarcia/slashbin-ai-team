@@ -222,6 +222,13 @@ check("MCP: local servers carry over with their keys in the child env only; othe
   assert.deepStrictEqual(got.skipped.map((s) => s.name), ["web", "bad name"]);
   const args = cx.codexArgs({ kind: "session", mode: "bypass", mcp: got.servers, prompt: "p" });
   assert.ok(!args.join(" ").includes("postgres://k"), "a key must never reach the command line");
+  // A second config's server whose key differs from the first's is refused, never handed the other's value.
+  const extra = cx.mcpServers({ mcpServers: { other: { command: "node", env: { DB_URL: "${OTHER_URL}" } }, same: { command: "node", env: { DB_URL: "${SECRET_URL}" } } } },
+    { SECRET_URL: "postgres://k", OTHER_URL: "postgres://o" }, got.env);
+  assert.deepStrictEqual(Object.keys(extra.servers), ["same"]);
+  assert.deepStrictEqual(extra.skipped.map((s) => s.name), ["other"]);
+  assert.deepStrictEqual(extra.env, { DB_URL: "postgres://k" });
+  assert.match(readFileSync(join(__dirname, "..", "bot.js"), "utf8"), /codexRuntime\.mcpServers\(config, process\.env, env\)/, "codexMcp must pass the env the earlier configs set");
 });
 
 check("Codex events become the stream events the harness reads", () => {

@@ -434,8 +434,18 @@ check("credential files in reach of a board run are denied in every mode; a temp
   for (const execution of ["", "engineering"]) {
     const policy = resolveBoardPolicy({ BOT_BOARD_EXECUTION: execution });
     assert.deepStrictEqual(policy.secretFiles, DEFAULT_BOARD_SECRET_FILES);
-    assert.deepStrictEqual([...new Set(rel(boardSecretFiles([repo], policy.secretFiles)))], [".env", ".mcp.json", "sub/.env.local", "sub/deploy.pem"]);
+    assert.deepStrictEqual([...new Set(rel(boardSecretFiles([repo], policy.secretFiles)))], [".env", ".mcp.json", "node_modules/x/.env", "sub/.env.local", "sub/deploy.pem"]);
   }
+  // However deep a folder lies, it is walked; past the walk's budget, every folder
+  // not walked is denied whole, so nothing the bound left unread is readable.
+  const deep = join(repo, "a/b/c/d/e/f/g");
+  mkdirSync(deep, { recursive: true });
+  writeFileSync(join(deep, ".env"), "x");
+  assert.ok(rel(boardSecretFiles([repo], DEFAULT_BOARD_SECRET_FILES)).includes("a/b/c/d/e/f/g/.env"));
+  const bounded = rel(boardSecretFiles([repo], DEFAULT_BOARD_SECRET_FILES, { maxEntries: 12 }));
+  assert.ok(bounded.includes(".env") && bounded.includes("sub/.env.local"), bounded.join());
+  assert.ok(!bounded.includes("a/b/c/d/e/f/g/.env") && bounded.some((d) => "a/b/c/d/e/f/g/.env".startsWith(`${d}/`)), bounded.join());
+  assert.ok(bounded.includes("node_modules"), "the dependency folder, walked last, is closed when the budget runs out");
   // BOT_BOARD_DENY_FILES adds a pattern; the defaults stay.
   const added = resolveBoardPolicy({ BOT_BOARD_DENY_FILES: "*.secret" });
   assert.ok(rel(boardSecretFiles([repo], added.secretFiles)).includes("custom.secret"));
