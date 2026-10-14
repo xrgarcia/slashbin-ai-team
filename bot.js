@@ -3,7 +3,7 @@ const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
 const { WebSocketServer } = require("ws");
 const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync, readlinkSync, renameSync, mkdtempSync, rmSync } = require("fs");
-const { join, resolve } = require("path");
+const { basename, join, resolve } = require("path");
 const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
 const pino = require("pino");
@@ -15,6 +15,7 @@ const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
 const { createPaperclipPoller, paperclipBoards, replyCollector } = require("./lib/paperclip");
 const { resolveRuntime } = require("./lib/runtime");
+const { LAYOUTS, repoLayout } = require("./lib/runtime/layout");
 const codexRuntime = require("./lib/runtime/codex");
 
 // --- Logger ---
@@ -62,6 +63,10 @@ if (CODEX) {
   RUNTIME.releaseDir = codexRuntime.codexReleaseDir(RUNTIME.bin);
   RUNTIME.version = codexRuntime.codexVersion(RUNTIME.bin);
 }
+// Where CLAUDE_CWD keeps what this runtime reads — overrides, channel prompts,
+// skills (lib/runtime/layout). The selected runtime's layout only; an unknown
+// runtime has none and refuses to start below.
+const LAYOUT = LAYOUTS[RUNTIME.name] ? repoLayout(RUNTIME.name, CLAUDE_CWD) : null;
 const MAX_DISCORD_LENGTH = parseInt(process.env.MAX_DISCORD_LENGTH, 10) || 1900;
 const CLAUDE_TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS, 10) || 3600000;
 // 0 lifts the step cap: CLAUDE_TIMEOUT_MS alone then bounds a run.
@@ -310,12 +315,12 @@ const RESERVED_COMMANDS = ["fresh", "status", ...STOP_WORDS];
 
 /**
  * Commands in the bot's own project that a reserved name would shadow.
- * Read from CLAUDE_CWD, which is where Claude Code looks for them.
+ * Read from CLAUDE_CWD, where the runtime looks for them: .claude/commands and
+ * .claude/skills on Claude, .agents/skills on Codex.
  */
 function shadowedCommands() {
   const hits = [];
-  for (const [dir, suffix] of [[join(CLAUDE_CWD, ".claude", "commands"), ".md"],
-                               [join(CLAUDE_CWD, ".claude", "skills"), ""]]) {
+  for (const [dir, suffix] of LAYOUT.commands) {
     let entries = [];
     try { entries = readdirSync(dir); } catch { continue; }
     for (const entry of entries) {
@@ -338,7 +343,8 @@ function shadowedCommands() {
  * --append-system-prompt, which this spawn already uses.
  */
 function systemPromptOverrides() {
-  const file = join(CLAUDE_CWD, ".claude", "system-prompt-overrides.md");
+  // .claude/system-prompt-overrides.md on Claude, .codex/ on Codex.
+  const file = LAYOUT.overrides;
   if (!existsSync(file)) return "";
   try {
     const text = readFileSync(file, "utf8").trim();
@@ -369,7 +375,8 @@ function systemPromptOverrides() {
  * Rides at the HEAD with the overrides, for the truncation reason given there.
  */
 function channelPrompt(channelId, channelName) {
-  const dir = join(CLAUDE_CWD, ".claude", "channel-prompts");
+  // .claude/channel-prompts on Claude, .codex/channel-prompts on Codex.
+  const dir = LAYOUT.channelPrompts;
   const candidates = [channelId && `${channelId}.md`, channelName && `${channelName}.md`].filter(Boolean);
   for (const candidate of candidates) {
     const file = join(dir, candidate);
@@ -553,7 +560,7 @@ if (!DISCORD_TOKEN) {
 if (!existsSync(CLAUDE_CWD)) {
   log.fatal(
     { CLAUDE_CWD },
-    "CLAUDE_CWD does not exist. Set it to YOUR project directory — the repo holding the CLAUDE.md that gives this bot its role. It is not this repo."
+    `CLAUDE_CWD does not exist. Set it to YOUR project directory — the repo holding the ${CODEX ? "AGENTS.md" : "CLAUDE.md"} that gives this bot its role. It is not this repo.`
   );
   process.exit(EXIT_CONFIG);
 }
@@ -577,6 +584,11 @@ if (RUNTIME.problems.length) {
 }
 log.info({ runtime: RUNTIME.name, source: RUNTIME.source, bin: RUNTIME.bin, model: RUNTIME.model, ...(CODEX ? { version: RUNTIME.version } : {}) },
   `Runtime: ${RUNTIME.name} — every run of this bot uses it`);
+// The role file this runtime loads from CLAUDE_CWD. Absent, every run starts
+// with no role and nothing else says so.
+log.info({ instructions: LAYOUT.instructions, overrides: LAYOUT.overrides, channelPrompts: LAYOUT.channelPrompts, skills: LAYOUT.commands.map(([d]) => d) },
+  `Repository layout: ${RUNTIME.name}`);
+if (!LAYOUT.instructions.some((f) => existsSync(f))) log.error({ files: LAYOUT.instructions }, `CLAUDE_CWD has no ${basename(LAYOUT.instructions[0])} — this bot runs with no role`);
 if (CODEX && !RUNTIME.version) log.error({ bin: RUNTIME.bin }, "BOT_RUNTIME=codex but the Codex CLI did not run — install it, sign in (codex login), or set CODEX_BIN");
 // Built once: what a Codex bypass session connects to.
 const CODEX_MCP = CODEX && PERMISSION_MODE === "bypass" ? codexMcp() : null;

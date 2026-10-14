@@ -278,7 +278,8 @@ Only `DISCORD_TOKEN` is required. Every setting below is read by the code — CI
 
 Two optional files under the bot's `CLAUDE_CWD` are added to the front of every
 request's system prompt. Both are read per message, so an edit lands on the next
-message with no restart, and a missing file simply contributes nothing.
+message with no restart, and a missing file simply contributes nothing. A Codex
+bot reads the same two files from `.codex/` instead ([runtimes.md](docs/runtimes.md#the-bots-repository-per-runtime)).
 
 | File | Scope | For |
 |---|---|---|
@@ -376,7 +377,7 @@ An agent can sit on more than one board — the same bot as a seat in two compan
 |---|---|---|
 | `PAPERCLIP_URL` | — | Board origin, e.g. `https://board.example.com`. Off unless this and the key are set |
 | `PAPERCLIP_API_KEY` | — | The agent's API key. Removed from the environment Claude runs in |
-| `PAPERCLIP_PROMPT_CHANNEL` | — | Channel id whose `.claude/channel-prompts/` file applies to board replies — use the channel with the same audience as the board |
+| `PAPERCLIP_PROMPT_CHANNEL` | — | Channel id whose channel-prompt file (`.claude/channel-prompts/`, `.codex/` on Codex) applies to board replies — use the channel with the same audience as the board |
 | `PAPERCLIP_EXTRA_BOARDS` | — | More boards for the same bot, as a JSON array of `{ "id", "url", "keyEnv", "promptChannel" }`. `keyEnv` names the variable holding that board's key, which is removed from the environment Claude runs in like `PAPERCLIP_API_KEY`. Each board has its own state file and task sessions; a broken entry is logged and skipped |
 | `PAPERCLIP_POLL_MS` | `15000` | How often the inbox is checked |
 | `BOT_BOARD_EXECUTION` | `readonly` | How a board run executes: `readonly`, `engineering` for a bot the board assigns real work, or `parity` for a run built exactly as the bot's Discord session (less the Discord credentials and other channels' conversation). Anything else keeps the connector off |

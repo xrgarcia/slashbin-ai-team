@@ -186,11 +186,14 @@ check("a colliding bot command warns at startup", () => {
   assert.ok(/can NEVER run/.test(bot), "the warning must say the command cannot run, not merely that it exists");
 });
 
-check("collision detection looks where Claude Code actually looks", () => {
+check("collision detection looks where the selected runtime actually looks", () => {
   const fn = /function shadowedCommands\(\)[\s\S]*?\n}/.exec(bot)[0];
-  assert.ok(/\.claude", "commands"/.test(fn), "must check .claude/commands");
-  assert.ok(/\.claude", "skills"/.test(fn), "must check .claude/skills");
-  assert.ok(/CLAUDE_CWD/.test(fn), "must look in the BOT's project, not the harness");
+  assert.ok(/LAYOUT\.commands/.test(fn), "must read the runtime's command directories");
+  assert.ok(/repoLayout\(RUNTIME\.name, CLAUDE_CWD\)/.test(bot), "layout must be the BOT's project, for the selected runtime");
+  const { repoLayout } = require("../lib/runtime/layout");
+  const dirs = (rt) => repoLayout(rt, "/r").commands.map(([d]) => d);
+  assert.deepStrictEqual(dirs("claude"), ["/r/.claude/commands", "/r/.claude/skills"], "Claude must check .claude/commands and .claude/skills");
+  assert.deepStrictEqual(dirs("codex"), ["/r/.agents/skills"], "Codex must check .agents/skills, and only that");
 });
 
 check("a bot cannot override the harness stop command", () => {

@@ -51,7 +51,7 @@ if (PER_BOT_ENV) {
   results.push(await checkClaudeCwd(process.env.CLAUDE_CWD || process.cwd(), HARNESS));
 }
 results.push(await checkPortFree(process.env.WS_PORT || 9800));
-results.push(checkReservedCommands(process.env.CLAUDE_CWD || process.cwd(), process.env.BOT_STOP_WORDS));
+results.push(checkReservedCommands(process.env.CLAUDE_CWD || process.cwd(), process.env.BOT_STOP_WORDS, (process.env.BOT_RUNTIME || "").trim() || "claude"));
 if (PER_BOT_ENV) {
   // Same reason as the token: each app sets its own in ecosystem.config.js.
   // checkFleet verifies both per bot, so nothing is lost by deferring here.

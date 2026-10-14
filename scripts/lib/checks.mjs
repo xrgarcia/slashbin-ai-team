@@ -179,11 +179,13 @@ export async function checkPortFree(port, label = "WS_PORT") {
  * command in the bot's own repo can never run — and the bot still lists it when
  * asked what it can do, because from inside Claude that command is real.
  */
-export function checkReservedCommands(claudeCwd, stopWords) {
+export function checkReservedCommands(claudeCwd, stopWords, runtime = "claude") {
   const reserved = ["fresh", "status", ...(stopWords || "stop,halt,abort,cancel").split(",").map((w) => w.trim()).filter(Boolean)];
   const hits = [];
-  for (const [dir, suffix] of [[join(claudeCwd, ".claude", "commands"), ".md"],
-                               [join(claudeCwd, ".claude", "skills"), ""]]) {
+  // The selected runtime's own skill folders (lib/runtime/layout.js).
+  const { LAYOUTS, repoLayout } = createRequire(import.meta.url)("../../lib/runtime/layout.js");
+  if (!LAYOUTS[runtime]) return bad("Reserved commands", `BOT_RUNTIME="${runtime}" has no repository layout`, "Set BOT_RUNTIME to claude or codex.");
+  for (const [dir, suffix] of repoLayout(runtime, claudeCwd).commands) {
     let entries = [];
     try { entries = readdirSync(dir); } catch { continue; }
     for (const e of entries) {

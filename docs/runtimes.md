@@ -40,11 +40,26 @@ To go back, remove `BOT_RUNTIME` (or set `claude`) and restart.
 
 ## What stays the same
 
-- **The role.** Codex reads the bot's `CLAUDE.md` in `CLAUDE_CWD` as its project
-  instructions, so one repo serves either runtime. A repo that also has an
-  `AGENTS.md` gives Codex that file instead.
-- **The harness prompt, memory and channel prompts.** Built the same way and passed
-  as Codex's developer instructions.
+- **The harness prompt and memory.** Built the same way and passed as Codex's
+  developer instructions.
+
+## The bot's repository, per runtime
+
+The bot reads its own files from `CLAUDE_CWD` in the selected runtime's native
+layout, and only that layout (`lib/runtime/layout.js`). A Codex bot never reads
+`.claude/`, and a Claude bot never reads `.codex/`, so a stale copy left behind
+by a conversion cannot reach the prompt.
+
+| | Claude | Codex |
+|---|---|---|
+| Role | `CLAUDE.md` (or `.claude/CLAUDE.md`), loaded by Claude Code | `AGENTS.md`, loaded by Codex itself (`CLAUDE.md` only when there is no `AGENTS.md`) |
+| Repo overrides | `.claude/system-prompt-overrides.md` | `.codex/system-prompt-overrides.md` |
+| Channel prompts | `.claude/channel-prompts/<id or name>.md` | `.codex/channel-prompts/<id or name>.md` |
+| Skills (and reserved-name check) | `.claude/skills/`, `.claude/commands/` | `.agents/skills/`, discovered by Codex itself |
+
+Switching a bot's runtime therefore moves these files too. At startup the log line
+`Repository layout: <runtime>` names every path, and an error says so when the role
+file is missing.
 - **The skill pack.** Its hooks run on Codex with the same contract, and its skills
   (`schedule`, `land`, `remember`, `bot-state`) are listed in the instructions with
   the file to read. The mail and calendar gates guard the claude.ai Gmail and
@@ -96,8 +111,8 @@ to start and the log names each one; unset them or go back to `claude`:
 1. `npm run doctor` (or `npm run doctor:fleet` for a team): `Agent CLI (codex)` is
    `PASS` with the version and "signed in", and each bot's `runtime` line names its
    CLI.
-2. Restart the bot; the log shows `Runtime: codex — every run of this bot uses it`
-   and `Bot online`.
+2. Restart the bot; the log shows `Runtime: codex — every run of this bot uses it`,
+   `Repository layout: codex` with no "no role" error, and `Bot online`.
 3. Message the bot on Discord. The reply comes back as usual, and the log shows
    `Starting fresh Codex session`, then `Resuming Codex session` on the next message.
 4. A summary (the buffer rotation or the daily run) is written as usual.
