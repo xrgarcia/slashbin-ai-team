@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A run Paperclip loses after a resume, or a replacement run it loses
+  too, is recovered like any other.** The wake that resumes a task checks it
+  out with no record, so the bot's earlier block used to outrank Paperclip's
+  settlement of the run it then lost: the card stayed blocked with no note and
+  no new run. A stop that was no one's choice no longer hides a newer one.
+- **A person who blocks a task just as the bot closes it blocked keeps the
+  hold.** The close lands as the same status reasserted, and used to count as
+  the bot's own block, so the task resumed when its wait finished. The hold
+  now stays the person's; their waits are put back, and their note, which
+  Paperclip lets no agent write back, is quoted in a comment.
 - **A board run never keeps a Discord or bridge credential under another
   name.** Bots started from one shared environment hold every bot's token
   under its own name (`EM_DISCORD_TOKEN`, `PO_DISCORD_TOKEN`, `DISCORD_BOT_KEY`…);
