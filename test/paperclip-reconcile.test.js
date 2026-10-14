@@ -21,7 +21,7 @@ const PERSON = { actorType: "user", actorId: "user-1" };
 /** A board of several tasks. Each status write is recorded as Paperclip records it: actor, run, from/to. */
 function board(tasks) {
   const issues = new Map(), activity = new Map(), comments = new Map(), runs = new Map();
-  const writes = [];
+  const writes = [], tries = [];
   for (const t of tasks) {
     issues.set(t.id, { createdAt: "2026-01-01T00:00:00Z", title: t.id, description: "", ...t });
     activity.set(t.id, []); comments.set(t.id, t.comments ?? []); runs.set(t.id, t.runs ?? []);
@@ -51,6 +51,8 @@ function board(tasks) {
       // Only a live run may write to an in-progress task; and the board's
       // waiter ends a run once a comment lands under it.
       const actorRun = runs.get(i.id).find((r) => r.id === init.headers["x-paperclip-run-id"]);
+      tries.push(init.headers["x-paperclip-run-id"]);
+      if (actorRun?.status === "cancelled") return { ok: false, status: 403, text: async () => JSON.stringify({ error: "This run was cancelled", code: "agent_run_cancelled" }) };
       if (i.status === "in_progress" && actorRun?.status !== "running") return { ok: false, status: 409, text: async () => JSON.stringify({ error: "Issue run ownership conflict" }) };
       if (body.comment && actorRun) actorRun.status = "succeeded";
       writes.push({ id: i.id, body, runId: init.headers["x-paperclip-run-id"] });
@@ -72,7 +74,7 @@ function board(tasks) {
     activity.get(id).unshift({ action: "issue.updated", ...actor, details: { status: "blocked",
       changes: { statusVersion: { from: 1, to: 2 }, unblockDescriptor: { from: null, to: { owner: { userId: actor.actorId } } } } } });
   };
-  return { fetch, writes, issues, runs, comments, setStatus, reassert,
+  return { fetch, writes, tries, issues, runs, comments, setStatus, reassert,
     // Paperclip lost the run: it has ended, and the task is blocked.
     recover: (id, runId) => {
       activity.get(id).unshift({ action: "issue.execution_recovery_settled", actorType: "system", actorId: "execution-recovery", runId, details: { outcome: "blocked" } });
@@ -261,6 +263,31 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     b.recover("t-1", "r1");
     await poller(b, async () => assert.fail("ran again without resumeInterrupted"), { stateFile }).tick();
     assert.ok(b.writes.some((x) => x.body.comment === FALLBACK_REPLY && x.body.status === "blocked"));
+  });
+
+  await check("case 5, a person cancels the task mid-answer and Paperclip cancels its run: no retry under it; the answer waits for the task's next run", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let n = 0;
+    const answer = async () => {
+      if (++n > 1) return "Second answer.";
+      b.setStatus("t-1", "cancelled", PERSON);
+      b.runs.get("t-1")[0].status = "cancelled";
+      return "First answer.";
+    };
+    await poller(b, answer, { stateFile }).tick();
+    await poller(b, answer, { stateFile }).tick();
+    assert.strictEqual(b.writes.length, 0, "written under the cancelled run");
+    assert.strictEqual(b.tries.filter((r) => r === "r1").length, 1, "retried under the cancelled run");
+    assert.strictEqual(b.issues.get("t-1").status, "cancelled");
+    // A person reopens it with a new ask: both answers go out under the new run.
+    b.setStatus("t-1", "todo", PERSON);
+    b.comments.get("t-1").push({ id: "p1", authorUserId: "user-1", createdAt: new Date().toISOString(), body: "And now?" });
+    b.runs.set("t-1", run("r2"));
+    await poller(b, answer, { stateFile }).tick();
+    const w = b.writes.find((x) => x.runId === "r2" && x.body.comment);
+    assert.ok(w && w.body.comment.includes("First answer.") && w.body.comment.includes("Second answer."), w?.body.comment);
+    assert.strictEqual(b.issues.get("t-1").status, "done");
   });
 
   await check("case 5: a person's blocked or cancelled stands against every path", async () => {
