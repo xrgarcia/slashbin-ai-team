@@ -3114,6 +3114,14 @@ if (PAPERCLIP_BOARDS.length && PAPERCLIP_CWD_DENIED) {
           : "Paperclip board runs: readonly — set BOT_BOARD_EXECUTION=engineering to let board tasks edit and run commands");
     }
   }
+  // A task whose description starts with a line this matches has another
+  // writer (a mirror of an issue tracker, say): the bot comments on it but
+  // never sets its status.
+  let externalWriter = null;
+  if (process.env.PAPERCLIP_EXTERNAL_WRITER) {
+    try { externalWriter = new RegExp(process.env.PAPERCLIP_EXTERNAL_WRITER); }
+    catch (e) { log.error({ err: e.message }, "PAPERCLIP_EXTERNAL_WRITER is not a valid pattern; every task's status is the bot's to set"); }
+  }
   for (const board of PAPERCLIP_BOARDS) {
     const pLog = log.child({ component: "paperclip", ...(board.id ? { board: board.id } : {}) });
     const { promptChannel } = board;
@@ -3125,6 +3133,8 @@ if (PAPERCLIP_BOARDS.length && PAPERCLIP_CWD_DENIED) {
       apiKey: board.apiKey,
       stateFile: join(STATE_DIR, `${tag}.json`),
       log: pLog,
+      resumeInterrupted: process.env.PAPERCLIP_RESUME_INTERRUPTED === "1",
+      externalWriter,
       // One session per task, so a reply on the task continues its conversation.
       answer: (prompt, issue) => {
         const reply = replyCollector();

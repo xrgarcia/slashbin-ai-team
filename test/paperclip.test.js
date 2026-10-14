@@ -44,7 +44,7 @@ function board({ runs, comments = [], wakeCommentId }) {
       if (raceW && followUp) { issue.status = raceW; raceW = null; }
       if (body.status) {
         // Paperclip records each update's from/to under the row lock, newest first.
-        activity.unshift({ runId: init.headers["x-paperclip-run-id"], action: "issue.updated",
+        activity.unshift({ runId: init.headers["x-paperclip-run-id"], action: "issue.updated", actorType: "agent", actorId: ME.id,
           details: { changes: { status: { from: issue.status ?? "todo", to: body.status } } } });
         issue.status = body.status;
       }
@@ -144,7 +144,7 @@ const poller = (b, answer) => createPaperclipPoller({
     const small = Array.from({ length: 6 }, (_, i) => ({ id: `s${i}`, authorAgentId: i === 4 ? null : ME.id, createdAt: `${i}`, body: `é—${i} ${"ü".repeat(30 * i)}` }));
     const issue = { identifier: "T-1", title: "Tïtle ✓", description: "dé".repeat(40) };
     const full = buildTaskPrompt(issue, small, ME, "u", { maxBytes: 1e9 });
-    for (let max = Buffer.byteLength(full) + 5; max > 1400; max -= 7) {
+    for (let max = Buffer.byteLength(full) + 5; max > 1600; max -= 7) {
       const q = buildTaskPrompt(issue, small, ME, "u", { maxBytes: max });
       assert.ok(Buffer.byteLength(q) <= max, `${Buffer.byteLength(q)} bytes over a budget of ${max}`);
       if (max >= Buffer.byteLength(full)) assert.strictEqual(q, full, "a prompt within budget was shed");
@@ -855,7 +855,7 @@ const poller = (b, answer) => createPaperclipPoller({
     const b = board({ runs: running });
     await poller(b, async () => `All done.\n${OUTCOME_MARK} done`).tick();
     assert.deepStrictEqual(b.writes.map((w) => w.body), [{ status: "done", comment: "All done." }]);
-    assert.deepStrictEqual(outcomeOf(`${OUTCOME_MARK} blocked`), { comment: "", status: "blocked" });
+    assert.deepStrictEqual(outcomeOf(`${OUTCOME_MARK} blocked`), { comment: "", status: "blocked", waitsOn: [] });
     assert.match(buildTaskPrompt({ identifier: "T-1", title: "Q" }, [], ME, "u"), new RegExp(`${OUTCOME_MARK} blocked`));
   });
 

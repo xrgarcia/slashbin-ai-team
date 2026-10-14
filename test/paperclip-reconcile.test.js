@@ -1,0 +1,214 @@
+/**
+ * Paperclip — a task's card stays true after the work moves on: a block the
+ * bot set itself, or one Paperclip set when it lost a run, is brought up to
+ * date; a decision someone else made is left alone.
+ */
+const assert = require("assert");
+const { mkdtempSync, readFileSync } = require("fs");
+const { join } = require("path");
+const { tmpdir } = require("os");
+const { createPaperclipPoller, statusSetter, reconcilable, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY } = require("../lib/paperclip");
+
+let pass = 0, fail = 0;
+async function check(label, fn) {
+  try { await fn(); console.log(`  ok   ${label}`); pass++; }
+  catch (e) { console.log(`  FAIL ${label}\n       ${e.message}`); fail++; }
+}
+const silent = { info() {}, warn() {}, error() {}, child() { return silent; } };
+const ME = { id: "agent-1", name: "Bot" };
+const PERSON = { actorType: "user", actorId: "user-1" };
+
+/** A board of several tasks. Each status write is recorded as Paperclip records it: actor, run, from/to. */
+function board(tasks) {
+  const issues = new Map(), activity = new Map(), comments = new Map(), runs = new Map();
+  const writes = [];
+  for (const t of tasks) {
+    issues.set(t.id, { createdAt: "2026-01-01T00:00:00Z", title: t.id, description: "", ...t });
+    activity.set(t.id, []); comments.set(t.id, t.comments ?? []); runs.set(t.id, t.runs ?? []);
+  }
+  const byName = (n) => [...issues.values()].find((i) => i.identifier === n || i.id === n);
+  const setStatus = (id, to, actor, extra = {}) => {
+    const i = issues.get(id);
+    activity.get(id).unshift({ action: "issue.updated", ...actor, ...extra, details: { changes: { status: { from: i.status, to } } } });
+    i.status = to;
+  };
+  const blockedBy = (i) => (i.blockedByIssueIds ?? []).map((b) => ({ id: b, identifier: issues.get(b).identifier, status: issues.get(b).status }));
+  const fetch = async (url, init) => {
+    const path = url.replace(/^.*\/api/, "");
+    const ok = (v) => ({ ok: true, text: async () => JSON.stringify(v) });
+    if (path === "/agents/me") return ok(ME);
+    if (path === "/agents/me/inbox-lite") {
+      return ok([...issues.values()].filter((i) => i.assigneeAgentId === ME.id && !["done", "cancelled"].includes(i.status))
+        .map((i) => ({ id: i.id, status: i.status, unresolvedBlockerIssueIds: blockedBy(i).filter((b) => b.status !== "done").map((b) => b.id) })));
+    }
+    const m = path.match(/^\/issues\/([^/]+)(\/[a-z]+)?$/);
+    const i = m && byName(decodeURIComponent(m[1]));
+    if (!i) return { ok: false, status: 404, text: async () => "" };
+    if (init.method === "PATCH") {
+      const body = JSON.parse(init.body);
+      writes.push({ id: i.id, body, runId: init.headers["x-paperclip-run-id"] });
+      if (body.blockedByIssueIds) i.blockedByIssueIds = body.blockedByIssueIds;
+      if (body.unblockDescriptor) i.unblockDescriptor = body.unblockDescriptor;
+      if (body.status && body.status !== i.status) setStatus(i.id, body.status, { actorType: "agent", actorId: ME.id }, { runId: init.headers["x-paperclip-run-id"] });
+      if (body.comment) comments.get(i.id).push({ id: `c${writes.length}`, authorAgentId: ME.id, createdAt: new Date().toISOString(), body: body.comment, createdByRunId: init.headers["x-paperclip-run-id"] });
+      return ok({});
+    }
+    if (!m[2]) return ok({ ...i, blockedBy: blockedBy(i) });
+    if (m[2] === "/activity") return ok(activity.get(i.id));
+    if (m[2] === "/comments") return ok(comments.get(i.id));
+    if (m[2] === "/runs") return ok(runs.get(i.id));
+    return { ok: false, status: 404, text: async () => "" };
+  };
+  return { fetch, writes, issues, runs, setStatus,
+    recover: (id, runId) => { activity.get(id).unshift({ action: "issue.execution_recovery_settled", actorType: "system", actorId: "execution-recovery", runId, details: { outcome: "blocked" } }); issues.get(id).status = "blocked"; } };
+}
+const task = (id, extra = {}) => ({ id, identifier: id.toUpperCase(), status: "in_progress", assigneeAgentId: ME.id, ...extra });
+const run = (id) => [{ id, agentId: ME.id, status: "running" }];
+const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k",
+  stateFile: opts.stateFile ?? join(mkdtempSync(join(tmpdir(), "pc-")), "s.json"), log: silent, fetch: b.fetch, answer, ...opts });
+
+(async () => {
+  await check("the bot's own block and Paperclip's lost-run block are reconcilable; a person's, another agent's or an unexplained one is not", () => {
+    const own = { action: "issue.updated", actorType: "agent", actorId: ME.id, details: { changes: { status: { from: "in_progress", to: "blocked" } } } };
+    assert.ok(reconcilable(statusSetter([own], "blocked"), ME.id));
+    assert.ok(reconcilable(statusSetter([{ action: "issue.execution_recovery_settled", actorType: "system", details: { outcome: "blocked" } }], "blocked"), ME.id));
+    assert.ok(!reconcilable(statusSetter([{ ...own, ...PERSON }], "blocked"), ME.id), "a person's block");
+    assert.ok(!reconcilable(statusSetter([{ ...own, actorId: "agent-2" }], "blocked"), ME.id), "another agent's block");
+    assert.ok(!reconcilable(statusSetter([own], "cancelled"), ME.id), "a record that names another status");
+    assert.ok(!reconcilable(statusSetter([], "blocked"), ME.id), "no record");
+    const putBack = { ...own, details: { changes: { status: { from: "done", to: "blocked" } } } };
+    assert.ok(!reconcilable(statusSetter([putBack], "blocked"), ME.id), "a person's block the bot put back");
+  });
+
+  await check("a blocked answer that names what it waits on links those tasks and says so on the card", async () => {
+    assert.deepStrictEqual(outcomeOf(`No.\n${OUTCOME_MARK} blocked on T-2, T-3`).waitsOn, ["T-2", "T-3"]);
+    const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" }), task("t-3", { assigneeAgentId: null, status: "todo" }), task("t-9", { assigneeAgentId: null, status: "done" })]);
+    await poller(b, async () => `Waiting on the key.\n${OUTCOME_MARK} blocked on T-2, T-3, T-9, NOPE-1`).tick();
+    const w = b.writes.find((x) => x.body.status === "blocked");
+    assert.deepStrictEqual(w.body.blockedByIssueIds, ["t-2", "t-3"], "a done or unknown task is not linked");
+    assert.match(w.body.unblockDescriptor.action, /^Waits on T-2, T-3\./);
+    assert.strictEqual(w.body.comment, "Waiting on the key.");
+  });
+
+  await check("case 1: when the last task it waits on is done, the card goes back in progress with the reason, then the work resumes", async () => {
+    const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
+    const prompts = [];
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const answer = async (p) => { prompts.push(p); return prompts.length === 1 ? `Need T-2.\n${OUTCOME_MARK} blocked on T-2` : "Finished."; };
+    await poller(b, answer, { stateFile }).tick();
+    assert.strictEqual(b.issues.get("t-1").status, "blocked");
+    b.setStatus("t-2", "done", PERSON);
+    b.runs.set("t-1", run("r2"));       // Paperclip's issue_blockers_resolved wake
+    await poller(b, answer, { stateFile }).tick();
+    const resume = b.writes.find((x) => x.body.status === "in_progress");
+    assert.ok(resume, "the card never went back in progress");
+    assert.strictEqual(resume.runId, "r2");
+    assert.match(resume.body.comment, /^Resuming: T-2, which this task waited on, is done\.$/);
+    assert.match(prompts[1], /was blocked waiting on T-2; it is now done/);
+    assert.strictEqual(b.issues.get("t-1").status, "done");
+  });
+
+  await check("case 2: one of two waits done — still blocked, linked and described by the open one only", async () => {
+    const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" }), task("t-3", { assigneeAgentId: null, status: "todo" })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    await poller(b, async () => `Need both.\n${OUTCOME_MARK} blocked on T-2, T-3`, { stateFile }).tick();
+    b.runs.set("t-1", [{ id: "r1", agentId: ME.id, status: "succeeded" }]);
+    b.setStatus("t-2", "done", PERSON);
+    await poller(b, async () => assert.fail("a partial wait ran the task"), { stateFile }).tick();
+    const t = b.issues.get("t-1");
+    assert.strictEqual(t.status, "blocked");
+    assert.deepStrictEqual(t.blockedByIssueIds, ["t-3"]);
+    assert.match(t.unblockDescriptor.action, /^Waits on T-3 \(T-2 done\)\./);
+    const n = b.writes.length;
+    await poller(b, async () => assert.fail("ran"), { stateFile }).tick();
+    assert.strictEqual(b.writes.length, n, "an up-to-date card was written again");
+  });
+
+  await check("case 3: Paperclip loses the run mid-answer — the card goes back in progress once, and the one answer closes it", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    let launches = 0;
+    await poller(b, async () => {
+      launches++;
+      b.recover("t-1", "r1");
+      await new Promise((r) => setTimeout(r, 60));
+      return "sent";
+    }, { watchMs: 10 }).tick();
+    assert.strictEqual(launches, 1);
+    const notes = b.writes.filter((x) => x.body.comment === TRANSPORT_NOTE);
+    assert.strictEqual(notes.length, 1, "the transport note was not posted exactly once");
+    assert.strictEqual(notes[0].body.status, "in_progress");
+    assert.strictEqual(b.issues.get("t-1").status, "done");
+  });
+
+  await check("case 3b: Paperclip lost the run before the answer — the answer still closes it from its own outcome", async () => {
+    for (const [reply, want] of [["sent", "done"], [`failed: bounce\n${OUTCOME_MARK} blocked`, "blocked"]]) {
+      const b = board([task("t-1", { runs: run("r1") })]);
+      await poller(b, async () => { b.recover("t-1", "r1"); return reply; }, { watchMs: 1e6 }).tick();
+      assert.strictEqual(b.issues.get("t-1").status, want, reply);
+    }
+  });
+
+  await check("case 4: a restart mid-run with its run gone — resumed once when allowed, closed from the verdict; else the fallback", async () => {
+    for (const [verdict, want] of [["sent", "done"], [`failed\n${OUTCOME_MARK} blocked`, "blocked"]]) {
+      const b = board([task("t-1", { runs: run("r1") })]);
+      const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+      // The first bot dies mid-run: its answer never returns.
+      const dying = poller(b, () => new Promise(() => {}), { stateFile, resumeInterrupted: true, watchMs: 1e6 });
+      dying.tick();
+      await new Promise((r) => setTimeout(r, 20));
+      b.recover("t-1", "r1");
+      b.runs.set("t-1", [{ id: "r1", agentId: ME.id, status: "failed" }]);
+      const prompts = [];
+      await poller(b, async (p) => { prompts.push(p); return verdict; }, { stateFile, resumeInterrupted: true }).tick();
+      assert.strictEqual(prompts.length, 1);
+      assert.ok(prompts[0].includes(INTERRUPTED_NOTE));
+      assert.strictEqual(b.issues.get("t-1").status, want);
+      assert.ok(b.writes.filter((x) => x.body.status).every((x) => x.runId === "r1"), "written outside the run the attempt was under");
+      await poller(b, async () => assert.fail("ran again"), { stateFile, resumeInterrupted: true }).tick();
+      assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies, {});
+    }
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    poller(b, () => new Promise(() => {}), { stateFile, watchMs: 1e6 }).tick();
+    await new Promise((r) => setTimeout(r, 20));
+    b.runs.set("t-1", [{ id: "r1", agentId: ME.id, status: "failed" }]);
+    await poller(b, async () => assert.fail("ran again without resumeInterrupted"), { stateFile }).tick();
+    assert.ok(b.writes.some((x) => x.body.comment === FALLBACK_REPLY && x.body.status === "blocked"));
+  });
+
+  await check("case 5: a person's blocked or cancelled stands against every path", async () => {
+    for (const decided of ["blocked", "cancelled"]) {
+      // The answer lands on it.
+      let b = board([task("t-1", { runs: run("r1") })]);
+      await poller(b, async () => { b.setStatus("t-1", decided, PERSON); return "done it"; }).tick();
+      assert.strictEqual(b.issues.get("t-1").status, decided, `${decided}: the answer closed over it`);
+      // Its waits come done.
+      b = board([task("t-1", { status: decided, blockedByIssueIds: ["t-2"], runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "done" })]);
+      b.setStatus("t-1", decided, PERSON);
+      await poller(b, async () => "resumed").tick();
+      assert.strictEqual(b.issues.get("t-1").status, decided, `${decided}: resumed over it`);
+      assert.ok(!b.writes.some((x) => x.body.status), `${decided}: a status was written`);
+      // Partly done.
+      b = board([task("t-1", { blockedByIssueIds: ["t-2", "t-3"] }), task("t-2", { assigneeAgentId: null, status: "done" }), task("t-3", { assigneeAgentId: null, status: "todo" })]);
+      b.setStatus("t-1", "blocked", PERSON);
+      await poller(b, async () => assert.fail("ran")).tick();
+      assert.deepStrictEqual(b.writes, [], "a person's block was rewritten");
+      // Paperclip loses the run after a person blocked it.
+      b = board([task("t-1", { runs: run("r1") })]);
+      await poller(b, async () => { b.setStatus("t-1", "blocked", PERSON); await new Promise((r) => setTimeout(r, 40)); return "x"; }, { watchMs: 5 }).tick();
+      assert.ok(!b.writes.some((x) => x.body.comment === TRANSPORT_NOTE), "the transport note moved a person's block");
+    }
+  });
+
+  await check("case 6: a task another writer owns gets the comment, never a status", async () => {
+    const mirror = /^source: \S+#\d+$/;
+    const b = board([task("t-1", { description: "source: acme/app#12\nstage review", runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
+    await poller(b, async () => { b.recover("t-1", "r1"); await new Promise((r) => setTimeout(r, 30)); return `x\n${OUTCOME_MARK} blocked on T-2`; },
+      { externalWriter: mirror, watchMs: 5 }).tick();
+    assert.ok(b.writes.length >= 1);
+    assert.ok(b.writes.every((x) => !x.body.status && !x.body.blockedByIssueIds && !x.body.unblockDescriptor), JSON.stringify(b.writes));
+  });
+
+  console.log(`\n${pass} passed, ${fail} failed`);
+  process.exit(fail ? 1 : 0);
+})();
