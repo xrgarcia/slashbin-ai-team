@@ -58,6 +58,11 @@ function board() {
       if (!run) return { ok: false, status: 403, text: async () => JSON.stringify({ error: "run needed", details: { code: "cross_issue_influence_run_context_required" } }) };
       if (card.status === "in_progress" && run.status !== "running") return { ok: false, status: 409, text: async () => JSON.stringify({ error: "Issue run ownership conflict" }) };
       const body = JSON.parse(init.body);
+      // As the live board: entering blocked names what unblocks it, and an agent may name only itself.
+      if (body.status === "blocked" && card.status !== "blocked" && !body.unblockDescriptor && !body.blockedByIssueIds?.length) {
+        return { ok: false, status: 422, text: async () => JSON.stringify({ error: "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor" }) };
+      }
+      if (body.unblockDescriptor && body.unblockDescriptor.owner?.agentId !== agentId) return { ok: false, status: 422, text: async () => JSON.stringify({ error: "owner must be the caller" }) };
       writes.push({ agentId, runId, body });
       const actor = { actorType: "agent", actorId: agentId };
       if (body.status && body.status !== card.status) { record(actor, { status: { from: card.status, to: body.status } }, runId); card.status = body.status; }

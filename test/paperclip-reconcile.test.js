@@ -7,7 +7,7 @@ const assert = require("assert");
 const { mkdtempSync, readFileSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, statusSetter, reconcilable, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus, ESCALATION_LABELS, parseEscalateTo, paperclipBoards } = require("../lib/paperclip");
+const { createPaperclipPoller, statusSetter, reconcilable, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus, ESCALATION_LABELS, parseEscalateTo, paperclipBoards, UNBLOCK_ACTION } = require("../lib/paperclip");
 
 let pass = 0, fail = 0;
 async function check(label, fn) {
@@ -16,6 +16,7 @@ async function check(label, fn) {
 }
 const silent = { info() {}, warn() {}, error() {}, child() { return silent; } };
 const ME = { id: "agent-1", name: "Bot", companyId: "co-1" };
+const KEEP_BLOCKED = { status: "blocked", unblockDescriptor: { owner: { agentId: ME.id }, action: UNBLOCK_ACTION } };
 const SEATS = [{ id: "agent-1", name: "Bot" }, { id: "agent-po", name: "Product Owner" }];
 const PERSON = { actorType: "user", actorId: "user-1" };
 
@@ -1012,9 +1013,9 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.match(prompts[0], /source: owner\/repo#N/);
     assert.ok(!b.writes.some((w) => w.body.comment === HELD_NOTE), JSON.stringify(b.writes));
     assert.ok(b.writes.every((w) => !w.body.status || w.body.status === "blocked"), JSON.stringify(b.writes));
-    // The checkout is undone by status alone before the note, which ends the
-    // run; resolved, the card goes back to whoever handed it up, still blocked.
-    assert.deepStrictEqual(b.writes.map((w) => w.body), [{ status: "blocked" },
+    // The checkout is undone before the note, which ends the run — naming
+    // this bot as what unblocks it, as the board demands; resolved, the card goes back to whoever handed it up, still blocked.
+    assert.deepStrictEqual(b.writes.map((w) => w.body), [KEEP_BLOCKED,
       { assigneeAgentId: "agent-foreman", assigneeUserId: null, comment: "Ruled on acme/app#12: 30 s retry window." }]);
     assert.strictEqual(b.issues.get("t-1").status, "blocked");
     assert.strictEqual(b.issues.get("t-1").assigneeAgentId, "agent-foreman");
@@ -1111,7 +1112,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
   await check("escalation: with no one to hand it to, or a hand-off the board refuses, the card keeps its holder and says why", async () => {
     let b = escalationBoard();
     await escalating(b, async () => `Need a ruling.\n${OUTCOME_MARK} escalate`).tick();
-    assert.deepStrictEqual(b.writes.map((w) => w.body), [{ status: "blocked" }, { comment: "Need a ruling." }]);
+    assert.deepStrictEqual(b.writes.map((w) => w.body), [KEEP_BLOCKED, { comment: "Need a ruling." }]);
     assert.strictEqual(b.issues.get("t-1").assigneeAgentId, ME.id);
     b = escalationBoard();
     await escalating(b, async () => `Need a ruling.\n${OUTCOME_MARK} escalate`, { escalateTo: parseEscalateTo("agent:Nobody") }).tick();
