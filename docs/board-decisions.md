@@ -80,6 +80,11 @@ a note only when all of these hold:
    (its first 120 characters). The unblock step is read from the move's request
    fields, else from the descriptor history.
 
+The burst runs forward too: it is X's move and every commented restatement X
+wrote after it within the 60 s, each with its own comment, up to X's first
+write of any other shape. So a session's summary, written before its note, is in
+the note's burst, and both are notes (a5b).
+
 Anything else by X is X's own decision, and so a hold: a bare restatement, a
 rewrite of the waits, a different comment after the burst, or any restatement
 after 60 s. Other identities' writes inside a burst are their own decisions.
@@ -160,3 +165,16 @@ insertion order:
 **Why r6 leaves the unblock step alone.** The Foreman reads the card's unblock
 step back into its own state (`mirror.ts:874-879`). A link write that also
 rewrote the step would change what the Foreman thinks the card waits for.
+
+## Known limits
+
+Each of these errs toward reading a write as a hold, except the last.
+
+- **A Foreman re-move of a card it has not changed** (same status, holder and
+  step) records nothing to anchor a burst, so its note reads as a hold.
+- **A note whose text the Foreman redacts or caps** before posting no longer
+  matches the unblock step, so it reads as a hold.
+- **Ray, under the Foreman's identity, typing a commented restatement within
+  60 s of a Foreman move** whose burst also carries the matching note reads as
+  a note. Nothing in the record separates the two; telling them apart needs a
+  separate key for the Foreman's sync.
