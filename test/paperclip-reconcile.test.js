@@ -7,7 +7,7 @@ const assert = require("assert");
 const { mkdtempSync, readFileSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, decisionKind, lastDecision, personSince, markAt, BURST_MS, statusSetter, reconcilable, handedBack, movable, wakeStep, ESCALATION_KEPT, CARD_CHANGED, NEWER_ASK, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus, ESCALATION_LABELS, parseEscalateTo, paperclipBoards, UNBLOCK_ACTION } = require("../lib/paperclip");
+const { createPaperclipPoller, decisionKind, lastDecision, personSince, markAt, handedWith, statusSetter, reconcilable, handedBack, movable, wakeStep, ESCALATION_KEPT, CARD_CHANGED, NEWER_ASK, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus, ESCALATION_LABELS, parseEscalateTo, paperclipBoards, UNBLOCK_ACTION } = require("../lib/paperclip");
 
 let pass = 0, fail = 0;
 async function check(label, fn) {
@@ -659,7 +659,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
   const SYNC = { actorType: "user", actorId: "user-sync" };
   const SYNC_NOTE = "Blocked at review: two specs disagree on the retry window.";
   const STAGE_STEP = { owner: { agentId: ME.id }, action: SYNC_NOTE };
-  const SUMMARY = "Session finished: review ran 4 min, 2 findings.";
+  const SUMMARY = "**Review finished** — PR #12\n\n2 findings.";
   // A commented restatement as Paperclip records it: the write, then its comment.
   const restate = (b, actor, text) => {
     b.record("t-1", actor, { status: "blocked", source: "comment", changes: { statusVersion: { from: 2, to: 3 } } });
@@ -711,12 +711,12 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       { name: "the hand-off's own key restates blocked after it, changing nothing else", works: false,
         after: (b) => b.record("t-1", SYNC, { status: "blocked", changes: { statusVersion: { from: 3, to: 4 } } }) },
       { name: "the hand-off's own key reasserts the block, naming what unblocks it", works: false, after: (b) => b.reassert("t-1", SYNC) },
-      { name: "the hand-off's own key restates blocked with a comment of its own, after the burst", works: false,
-        after: (b) => { b.skew(BURST_MS + 1000); restate(b, SYNC, "Holding this until Monday."); } },
+      { name: "the hand-off's own key restates blocked with a comment of its own, after the note", works: false,
+        after: (b) => restate(b, SYNC, "Holding this until Monday.") },
       { name: "the hand-off's own key restates blocked between the move and the note", works: false,
         opts: { between: (b) => b.record("t-1", SYNC, { status: "blocked", changes: { statusVersion: { from: 2, to: 3 } } }) } },
-      { name: "the hand-off's own key repeats the note's text, after the burst", works: false,
-        after: (b) => { b.skew(BURST_MS + 1000); restate(b, SYNC, SYNC_NOTE); } },
+      { name: "the hand-off's own key repeats the note's text, after the note", works: false,
+        after: (b) => restate(b, SYNC, SYNC_NOTE) },
     ];
     for (const label of [false, true]) for (const row of rows) {
       const name = `${row.name}${label ? ", labelled an escalation" : ""}`;
@@ -1585,6 +1585,13 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     // The Foreman's move: blocked, handed to the bot, its unblock step the note's text.
     const move = (b) => b.setStatus("t-1", "blocked", SYNC, {}, { assigneeAgentId: { from: "agent-foreman", to: ME.id }, unblockDescriptor: { from: null, to: STEP } });
     const bare = (b, actor) => b.record("t-1", actor, { status: "blocked", changes: { statusVersion: { from: 2, to: 3 } } });
+    const AGENT = { actorType: "agent", actorId: "agent-tl" };
+    // A move by `actor` whose unblock step is `action`.
+    const moveAs = (b, actor, action) => b.setStatus("t-1", "blocked", actor, {}, { assigneeAgentId: { from: "agent-foreman", to: ME.id }, unblockDescriptor: { from: null, to: { owner: { agentId: ME.id }, action } } });
+    // The update half of a commented restatement; its comment is posted separately.
+    const noteUpdate = (b, actor) => b.record("t-1", actor, { status: "blocked", source: "comment", changes: { statusVersion: { from: 2, to: 3 } } });
+    const SECRET_STEP = "Blocked: the push used api_key=notarealvalue1 and was refused.";
+    const LONG_STEP = `Blocked at review: ${"the two specs disagree on the retry window, and ".repeat(6)}nobody has ruled.`;
     // Each builds the record and gives the index (newest first) of the write the row is about.
     const A = {
       a1: (b) => { b.setStatus("t-1", "blocked", PERSON); return 0; },
@@ -1593,8 +1600,8 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       a4: (b) => { move(b); bare(b, PERSON); return 0; },
       a5: (b) => { move(b); restate(b, SYNC, SYNC_NOTE); return 1; },
       a5b: (b) => { move(b); restate(b, SYNC, SUMMARY); restate(b, SYNC, SYNC_NOTE); return 3; },
-      a6: (b) => { move(b); restate(b, SYNC, SYNC_NOTE); b.skew(BURST_MS + 1000); restate(b, SYNC, "Holding this until Monday."); return 1; },
-      a7: (b) => { move(b); bare(b, SYNC); restate(b, SYNC, SYNC_NOTE); return 1; },
+      a6: (b) => { move(b); restate(b, SYNC, SYNC_NOTE); restate(b, SYNC, "Holding this until Monday."); return 1; },
+      a7: (b) => { move(b); bare(b, SYNC); restate(b, SYNC, SYNC_NOTE); return 2; },
       a8: (b) => { move(b); restate(b, PERSON, SYNC_NOTE); return 1; },
       a9: (b) => { move(b); b.record("t-1", SYNC, { status: "blocked", source: "comment", changes: { statusVersion: { from: 2, to: 3 } } }); return 0; },
       a10: (b) => { move(b); b.rehold("t-1", PERSON, ["t-2"], { owner: { userId: PERSON.actorId }, action: "Wait on T-2." }); return 0; },
@@ -1605,17 +1612,93 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       a15: (b) => { b.setStatus("t-1", "in_progress", BOT); b.recover("t-1", "r1"); return 0; },
       a16: (b) => { b.setStatus("t-1", "blocked", PERSON); b.recover("t-1", "r1"); return 0; },
       a17: (b) => { move(b); b.edit("t-1", PERSON, "title", "Retry window, revised"); return 0; },
+      a18: (b) => { move(b); restate(b, SYNC, "Holding this until Monday."); restate(b, SYNC, SYNC_NOTE); return 3; },
+      a19: (b) => { move(b); noteUpdate(b, SYNC); b.say("t-1", PERSON, "Any news?"); b.say("t-1", SYNC, SYNC_NOTE); return 2; },
+      a20: (b) => { move(b); noteUpdate(b, SYNC); b.edit("t-1", PERSON, "title", "Retry window, revised"); b.say("t-1", SYNC, SYNC_NOTE); return 2; },
+      a21: (b) => { move(b); noteUpdate(b, SYNC); b.recover("t-1", "r1"); b.say("t-1", SYNC, SYNC_NOTE); return 2; },
+      a22: (b) => {
+        move(b); noteUpdate(b, SYNC);
+        b.activity.get("t-1").unshift({ action: "issue.comment_added", createdAt: b.now(), ...SYNC, runId: "run-x", details: { commentId: "cx", bodySnippet: SYNC_NOTE } });
+        b.say("t-1", SYNC, "Holding this until Monday.");
+        return 2;
+      },
+      a23: (b) => { moveAs(b, SYNC, SECRET_STEP); restate(b, SYNC, "Blocked: the push used api_key=[REDACTED] and was refused."); return 1; },
+      a24: (b) => {
+        moveAs(b, SYNC, LONG_STEP);
+        const posted = `${LONG_STEP.slice(0, 200).trimEnd()}\n\n… (truncated)`;
+        restate(b, SYNC, posted);
+        b.activity.get("t-1")[0].details.body = posted;   // read whole from the thread (activityOf)
+        return 1;
+      },
+      a25: (b) => { moveAs(b, SYNC, LONG_STEP); restate(b, SYNC, `${LONG_STEP.slice(0, 120)} — but hold this until Monday.`); return 1; },
+      a26: (b) => { move(b); b.skew(10 * 60 * 1000); restate(b, SYNC, SYNC_NOTE); return 1; },
+      a27: (b) => {
+        move(b);
+        b.record("t-1", SYNC, { status: "blocked", unblockDescriptor: null, changes: { statusVersion: { from: 2, to: 3 }, unblockDescriptor: { from: STEP, to: null } } });
+        restate(b, SYNC, SYNC_NOTE);
+        return 1;
+      },
+      a28: (b) => {
+        move(b);
+        b.record("t-1", SYNC, { status: "blocked", assigneeAgentId: ME.id, unblockDescriptor: STEP, changes: { statusVersion: { from: 2, to: 3 } } });
+        restate(b, SYNC, SYNC_NOTE);
+        return 1;
+      },
+      a29: (b) => {
+        move(b);
+        b.setStatus("t-1", "in_progress", BOT, { runId: "r1" });
+        b.record("t-1", SYNC, { status: "blocked", source: "comment", changes: { status: { from: "in_progress", to: "blocked" }, statusVersion: { from: 3, to: 4 } } });
+        b.say("t-1", SYNC, SYNC_NOTE);
+        b.issues.get("t-1").status = "blocked";
+        // The note's status is the move's: a hand-off to this bot, read as one.
+        return { i: 1, also: (all) => assert.ok(lastDecision(all, ME.id)?.w === all[3] && lastDecision(all, ME.id).to === "blocked" && handedWith(all[3], all, ME.id)) };
+      },
+      a30: (b) => {
+        b.setStatus("t-1", "blocked", SYNC, {}, { assigneeAgentId: { from: "agent-foreman", to: "agent-po" } });
+        b.record("t-1", PERSON, { status: "blocked", assigneeAgentId: ME.id, changes: { statusVersion: { from: 2, to: 3 }, assigneeAgentId: { from: "agent-po", to: ME.id } } });
+        return 0;
+      },
+      a31: (b) => { move(b); b.record("t-1", PERSON, { blockedByIssueIds: [], changes: { statusVersion: { from: 2, to: 3 } } }); return 0; },
+      a32: (b) => { move(b); restate(b, SYNC, "Hold one."); restate(b, SYNC, "Hold two."); restate(b, SYNC, SYNC_NOTE); return 3; },
+      a33: (b) => { moveAs(b, AGENT, SYNC_NOTE); restate(b, AGENT, SYNC_NOTE); restate(b, AGENT, "Hold on, the spec changed."); return 1; },
+      a34: (b) => { move(b); restate(b, SYNC, SUMMARY); b.edit("t-1", SYNC, "title", "Retry window, revised"); restate(b, SYNC, SYNC_NOTE); return 1; },
+      a35: (b) => { move(b); restate(b, SYNC, SYNC_NOTE); restate(b, SYNC, SYNC_NOTE); return 1; },
+      a36: (b) => { move(b); b.reassert("t-1", AGENT); return 0; },
+      a37: (b) => { move(b); bare(b, PERSON); b.tie("t-1"); return { i: 0, mark: b.activity.get("t-1")[1].createdAt }; },
+      a38: (b) => { move(b); restate(b, SYNC, SUMMARY); return 1; },
     };
     sameIds("a", A);
     for (const [id, , writer, kind, decides, persons] of rowsOf("a")) {
       const b = board([task("t-1", { assigneeAgentId: "agent-foreman", runs: run("r1") }), task("t-2", { status: "todo" })]);
-      const i = A[id](b);
+      const built = A[id](b);
+      const { i, mark, also } = typeof built === "number" ? { i: built } : built;
       const all = b.activity.get("t-1");
+      for (const a of all) a.id ??= `x${all.indexOf(a)}`;
       const name = `${id} (${writer})`;
       assert.strictEqual(decisionKind(all, i, ME.id), kind, `${name}: kind`);
       assert.strictEqual(lastDecision(all, ME.id)?.w === all[i] ? "yes" : "no", decides, `${name}: status decision`);
-      assert.strictEqual(personSince(all, markAt(all, i + 1), ME.id) ? "yes" : "no", persons, `${name}: a person's change since the mark`);
+      // A write returned as the decision carries the status the card is in.
+      if (decides === "yes") assert.strictEqual(lastDecision(all, ME.id).to, b.issues.get("t-1").status, `${name}: the status decided`);
+      assert.strictEqual(personSince(all, mark ?? markAt(all, i + 1), ME.id) ? "yes" : "no", persons, `${name}: someone else's change since the mark`);
+      also?.(all);
     }
+  });
+
+  await check("table (a) reads a long record in one pass: hundreds of notes, thousands of the bot's own restatements", () => {
+    const at = (n) => new Date(Date.UTC(2026, 0, 1) + n).toISOString();
+    const notes = [];
+    for (let k = 0; k < 256; k++) {
+      const step = { owner: { agentId: ME.id }, action: `Step ${k}.` };
+      notes.unshift({ action: "issue.updated", createdAt: at(3 * k), ...SYNC, details: { status: "blocked", unblockDescriptor: step, changes: { statusVersion: { from: k, to: k + 1 } } } });
+      notes.unshift({ action: "issue.updated", createdAt: at(3 * k + 1), ...SYNC, details: { status: "blocked", source: "comment", changes: { statusVersion: { from: k + 1, to: k + 2 } } } });
+      notes.unshift({ action: "issue.comment_added", createdAt: at(3 * k + 2), ...SYNC, details: { commentId: `c${k}`, bodySnippet: `Step ${k}.` } });
+    }
+    assert.strictEqual(decisionKind(notes, 1, ME.id), "note");
+    assert.strictEqual(lastDecision(notes, ME.id).w, notes[2]);
+    const keeps = [{ action: "issue.updated", createdAt: at(0), ...PERSON, details: { changes: { status: { from: "todo", to: "blocked" } } } }];
+    for (let k = 1; k <= 8000; k++) keeps.unshift({ action: "issue.updated", createdAt: at(k), actorType: "agent", actorId: ME.id, details: { status: "blocked", changes: { statusVersion: { from: k, to: k + 1 } } } });
+    assert.strictEqual(lastDecision(keeps, ME.id).w, keeps.at(-1), "the bot's restatements took the person's block");
+    assert.strictEqual(personSince(keeps, markAt(keeps, 8000), ME.id), undefined);
   });
 
   // An escalation worked through the lifecycle: `answers` are the model's
