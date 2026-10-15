@@ -7,7 +7,7 @@ const assert = require("assert");
 const { mkdtempSync, readFileSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, decisionKind, lastDecision, personSince, markAt, handedWith, statusSetter, reconcilable, handedBack, movable, wakeStep, ESCALATION_KEPT, CARD_CHANGED, NEWER_ASK, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus, ESCALATION_LABELS, parseEscalateTo, paperclipBoards, UNBLOCK_ACTION } = require("../lib/paperclip");
+const { createPaperclipPoller, decisionKind, lastDecision, personSince, markAt, handedWith, statusSetter, reconcilable, handedBack, movable, wakeStep, ESCALATION_KEPT, CARD_CHANGED, NEWER_ASK, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, HANDED_AWAY, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus, ESCALATION_LABELS, parseEscalateTo, paperclipBoards, UNBLOCK_ACTION } = require("../lib/paperclip");
 
 let pass = 0, fail = 0;
 async function check(label, fn) {
@@ -936,9 +936,13 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       { name: "a resume that blocks on the same wait again resumes once more when it is done",
         replies: [blockedOn("T-2"), async (b) => { b.setStatus("t-2", "todo", PERSON); return blockedOn("T-2"); }, "Finished."],
         steps: [["wake", "r1"], ["done", "t-2"], ["wake", "r2"], ["done", "t-2"], ["wake", "r3"]], ran: 3, status: "done" },
+      // Exposed again when the newer ask is deleted, it is the card's ask anew
+      // (docs/board-decisions.md w6) — worked as new, never resumed from the
+      // newer ask's wait: its own answer was final.
       { name: "an ask finished while its run was cancelled, posted with a newer ask's blocked answer: still finished",
-        replies: [(b) => { b.runs.get("t-1").find((r) => r.id === "r1").status = "cancelled"; return "Did it."; }, blockedOn("T-2")],
-        steps: [["wake", "r1"], ["ask", "And this?"], ["wake", "r2"], ["unask"], ["done", "t-2"], ["wake", "r3"]], ran: 2 },
+        replies: [(b) => { b.runs.get("t-1").find((r) => r.id === "r1").status = "cancelled"; return "Did it."; }, blockedOn("T-2"), "Did it again."],
+        steps: [["wake", "r1"], ["ask", "And this?"], ["wake", "r2"], ["unask"], ["done", "t-2"], ["wake", "r3"]], ran: 3, status: "done",
+        check: (b, prompts) => assert.ok(!/waited on|Resuming/.test(prompts[2]), prompts[2]) },
       { name: "a person moves the card on between the bot's reads of it: the answer is a comment, their status stands",
         read: { of: "t-1", nth: 1, f: (b) => b.setStatus("t-1", "in_review", PERSON) },
         replies: ["Did it."], steps: [["wake", "r1"]], ran: 1, status: "in_review",
@@ -1897,6 +1901,192 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     sameIds("p", P);
     for (const [id] of rowsOf("p")) {
       try { await P[id](); } catch (e) { e.message = `${id}: ${e.message}`; throw e; }
+    }
+  });
+
+  await check("table (c): what the card says now wins over what the bot read before — as the doc's rows say", async () => {
+    const SEATED = [...SEATS, { id: "agent-x", name: "agent-po" }];
+    const ordinary = (extra = {}) => board([task("t-1", { runs: run("r1"), ...extra }), task("t-2", { status: "todo", assigneeAgentId: "agent-po" }), task("t-3", { status: "todo", assigneeAgentId: "agent-po" })]);
+    const ask = async (b, answers, opts = {}) => {
+      const prompts = [];
+      const answer = async (p) => { prompts.push(p); const a = answers[prompts.length - 1]; return typeof a === "function" ? a(b, p) : a; };
+      await poller(b, answer, opts).tick();
+      return prompts;
+    };
+    const commentOnly = (b) => b.writes.filter((x) => x.id === "t-1").every((x) => Object.keys(x.body).join() === "comment");
+    const AWAY = { "another agent": { agentId: "agent-po" }, "a person": { userId: "user-1" }, "nobody": {} };
+    const W = {
+      w1: async () => {
+        for (const [who, to] of Object.entries(AWAY)) {
+          const b = ordinary();
+          // Handed away as the bot reads the task, after the inbox listed it.
+          let done = false;
+          const read = async (u, init) => { if (!done && /\/issues\/t-1$/.test(u) && init?.method !== "PATCH") { done = true; b.reassign("t-1", PERSON, to); } return b.fetch(u, init); };
+          const prompts = await ask({ ...b, fetch: read }, ["Did it."], { fetch: read });
+          assert.deepStrictEqual(prompts, [], `${who}: worked a card handed away`);
+          assert.deepStrictEqual(b.writes.map((x) => x.body), [{ comment: HANDED_AWAY }], who);
+          const t = b.issues.get("t-1");
+          assert.deepStrictEqual([t.assigneeAgentId, t.assigneeUserId ?? null], [to.agentId ?? null, to.userId ?? null], who);
+        }
+      },
+      w2: async () => {
+        for (const [why, a] of [["done", "Did it."], ["return", `Fix the path.\n${OUTCOME_MARK} return`], ["blocked", `Cannot yet.\n${OUTCOME_MARK} blocked`], ["blocked on an unknown task", `Need NOPE-1.\n${OUTCOME_MARK} blocked on NOPE-1`]]) {
+          const b = ordinary({ createdByAgentId: "agent-po" });
+          await ask(b, [(x) => { x.reassign("t-1", PERSON, {}); return a; }]);
+          assert.ok(commentOnly(b), `${why}: wrote more than the answer`);
+          const t = b.issues.get("t-1");
+          assert.deepStrictEqual([t.status, t.assigneeAgentId, t.assigneeUserId], ["in_progress", null, null], why);
+        }
+      },
+      w3: async () => {
+        for (const [who, actor] of [["a person", PERSON], ["another agent", { actorType: "agent", actorId: "agent-po" }]]) {
+          for (const a of ["Did it.", `Fix the path.\n${OUTCOME_MARK} return`]) {
+            const b = ordinary({ createdByAgentId: "agent-po" });
+            await ask(b, [(x) => { x.reassign("t-1", actor, { agentId: "agent-tl" }); x.reassign("t-1", actor, { agentId: ME.id }); return a; }]);
+            assert.ok(commentOnly(b), `${who}: closed or returned on a hand-off the card no longer shows`);
+            assert.strictEqual(b.issues.get("t-1").status, "in_progress", who);
+          }
+        }
+      },
+      w4: async () => {
+        // A non-mirrored escalation linked to T-2 and T-3; they finish one at a
+        // time, a wake-less tick trimming the done one between; then a restart or not.
+        for (const [first, second] of [["t-2", "t-3"], ["t-3", "t-2"]]) for (const restart of [false, true]) {
+          const b = ordinary({ labels: [{ name: "Needs EM ruling" }] });
+          b.setStatus("t-1", "blocked", PERSON);
+          b.issues.get("t-1").status = "in_progress";
+          const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+          const prompts = [];
+          const answer = async (p) => { prompts.push(p); return prompts.length === 1 ? `Need both.\n${OUTCOME_MARK} blocked on T-2, T-3` : "Ruled."; };
+          const o = { stateFile, externalWriter: /^source: \S+#\d+$/, escalationAuthority: "scope and mechanism" };
+          let p = poller(b, answer, o);
+          await p.tick();
+          assert.deepStrictEqual(b.issues.get("t-1").blockedByIssueIds, ["t-2", "t-3"]);
+          b.setStatus(first, "done", PERSON);
+          await p.tick();
+          if (restart) p = poller(b, answer, o);
+          b.setStatus(second, "done", PERSON);
+          rewake(b, "r2");
+          await p.tick();
+          assert.strictEqual(prompts.length, 2, `${first} then ${second}${restart ? ", restarted" : ""}: not resumed`);
+          assert.match(prompts[1], /waited on/);
+          rewake(b, "r3");
+          b.issues.get("t-1").assigneeAgentId = ME.id;
+          await poller(b, async () => assert.fail("resumed twice"), o).tick();
+        }
+      },
+      w5: async () => {
+        // The link write lands; its response is lost (502). A restart reads the links back.
+        let fails = 1;
+        const lost = (b) => async (u, init) => {
+          const r = await b.fetch(u, init);
+          return init?.method === "PATCH" && JSON.parse(init.body).blockedByIssueIds && fails-- > 0 ? { ok: false, status: 502, text: async () => "bad gateway" } : r;
+        };
+        const w = await worked({ answers: [`Need T-2 first.\n${OUTCOME_MARK} blocked on T-2`], extra: [T2()], fetch: lost });
+        assert.deepStrictEqual(w.t.blockedByIssueIds, ["t-2"]);
+        await escalating(w.b, async () => assert.fail("ran again on restart"), w.o).tick();
+        w.b.issues.get("t-2").status = "done";
+        rewake(w.b, "r2");
+        await escalating(w.b, async (p) => { w.prompts.push(p); return "Ruled."; }, w.o).tick();
+        assert.strictEqual(w.prompts.length, 2, "the link written before the restart never resumed the card");
+        assert.match(w.prompts[1], /This card waited on T-2; it is now done/);
+      },
+      w6: async () => {
+        // An ordinary card's ask A→B→A across wakes: A, re-exposed, is worked as new.
+        const b = ordinary();
+        const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+        const prompts = [];
+        const answer = async (p) => { prompts.push(p); return `Cannot yet ${prompts.length}.\n${OUTCOME_MARK} blocked`; };
+        await poller(b, answer, { stateFile }).tick();
+        for (const [title, r] of [["Retry window B", "r2"], ["t-1", "r3"]]) {
+          titleTo(b, title);
+          rewake(b, r);
+          await poller(b, answer, { stateFile }).tick();
+        }
+        assert.strictEqual(prompts.length, 3, "the reverted ask was skipped as answered");
+      },
+      w7: async () => {
+        for (const ref of ["agent:agent-po", "agent:Product Owner"]) {
+          const w = await worked({ answers: [up("Need a call.")], opts: { escalateTo: parseEscalateTo(ref) }, fetch: (b) => { b.state.seats = [SEATED[2], ...SEATS]; return b.fetch; } });
+          assert.strictEqual(w.holder, "agent-po", ref);
+        }
+      },
+      w8: async () => {
+        // Taken away mid-answer, or after the answer and before its go-on runs.
+        for (const late of [false, true]) {
+          let armed = false;
+          const away = (b) => async (u, init) => {
+            // The last read before a go-on is whether its run is still live.
+            if (armed && init?.method !== "PATCH" && /\/issues\/t-1\/runs$/.test(u)) { armed = false; b.reassign("t-1", PERSON, { agentId: "agent-po" }); }
+            return b.fetch(u, init);
+          };
+          const w = await worked({ extra: [T2()], fetch: away, answers: [(b) => {
+            b.issues.get("t-2").status = "done";
+            if (late) armed = true; else b.reassign("t-1", PERSON, { agentId: "agent-po" });
+            return `Need T-2 first.\n${OUTCOME_MARK} blocked on T-2`;
+          }, "Went on."] });
+          assert.strictEqual(w.prompts.length, 1, `${late ? "after" : "mid"}-answer: went on with a card taken away`);
+          assert.strictEqual(w.holder, "agent-po");
+          assert.deepStrictEqual(w.said.map((x) => x.body), [{ comment: "Need T-2 first." }]);
+        }
+      },
+      w9: async () => {
+        const changes = {
+          unassigned: (b) => b.reassign("t-1", PERSON, {}),
+          cycled: (b) => { b.reassign("t-1", PERSON, { agentId: "agent-tl" }); b.reassign("t-1", PERSON, { agentId: ME.id }); },
+          moved: (b) => b.setStatus("t-1", "todo", PERSON),
+          "re-waited": (b) => b.relink("t-1", PERSON, ["t-2"]),
+          retitled: (b) => titleTo(b, "Retry window B"),
+          "asked anew": (b) => b.say("t-1", PERSON, "And refunds?"),
+          unlabelled: (b) => { b.issues.get("t-1").labels = []; b.record("t-1", PERSON, { changes: { labelIds: { from: ["l1"], to: [] } } }); },
+        };
+        for (const [what, f] of Object.entries(changes)) {
+          // The change lands as the seats are listed for the answer's hand-on.
+          let armed = false;
+          const listing = (b) => async (u, init) => { if (armed && /\/companies\/co-1\/agents$/.test(u)) { armed = false; f(b); } return b.fetch(u, init); };
+          const w = await worked({ extra: [T2()], answers: [() => { armed = true; return up("Need a call."); }, "Ruled."], opts: { escalateTo: parseEscalateTo("agent:Product Owner") }, fetch: listing });
+          assert.ok(!w.b.writes.some((x) => x.body.assigneeAgentId === "agent-po"), `${what}: handed on from reads made before the change`);
+        }
+      },
+      w10: async () => {
+        // The change lands just after the bot's last read before its write —
+        // replayed from a clean run's requests, so it is the last read whatever
+        // the order — on an ordinary card's return and an escalation's hand-on.
+        const ways = {
+          return: (fetch) => { const b = ordinary({ createdByAgentId: "agent-po" }); const f = fetch(b); return ask({ ...b, fetch: f }, [`Fix the path.\n${OUTCOME_MARK} return`], { fetch: f }).then(() => b); },
+          "hand-on": (fetch) => worked({ answers: [up("Need a call."), "Ruled."], opts: { escalateTo: parseEscalateTo("agent:Product Owner") }, fetch }).then((w) => w.b),
+        };
+        const AWAY_NOW = { "taken away": (b) => b.reassign("t-1", PERSON, {}), cycled: (b) => { b.reassign("t-1", PERSON, { agentId: "agent-tl" }); b.reassign("t-1", PERSON, { agentId: ME.id }); } };
+        for (const [way, go] of Object.entries(ways)) {
+          const gets = [];
+          let at = -1;
+          await go((b) => async (u, init) => { if (init?.method !== "PATCH") gets.push(u); else if (at < 0 && "assigneeAgentId" in JSON.parse(init.body)) at = gets.length - 1; return b.fetch(u, init); });
+          assert.ok(at > 0, `${way}: no hand-off to replay`);
+          for (const [what, f] of Object.entries(AWAY_NOW)) {
+            let n = 0;
+            const b = await go((x) => async (u, init) => { const r = await x.fetch(u, init); if (init?.method !== "PATCH" && n++ === at) f(x); return r; });
+            assert.ok(!b.writes.some((x) => x.body.assigneeAgentId === "agent-po"), `${way}, ${what}: handed over a change made after the last read (${gets[at]})`);
+            assert.ok(!b.writes.some((x) => x.body.status && x.body.status !== "blocked"), `${way}, ${what}: status written`);
+          }
+        }
+      },
+      w11: async () => {
+        // The Foreman's note longer than a snippet, word for word its step: read
+        // whole from the thread it is the note, not a hold, so the work runs.
+        const LONG = `Blocked at review: ${"the two specs disagree on the retry window, and ".repeat(4)}nobody has ruled.`;
+        assert.ok(LONG.length > 120);
+        const b = board([task("t-1", { description: "source: acme/app#12\nstage review", assigneeAgentId: "agent-foreman", runs: run("r1") })]);
+        b.setStatus("t-1", "blocked", SYNC, {}, { assigneeAgentId: { from: "agent-foreman", to: ME.id }, unblockDescriptor: { from: null, to: { owner: { agentId: ME.id }, action: LONG } } });
+        b.issues.get("t-1").assigneeAgentId = ME.id;
+        restate(b, SYNC, LONG);
+        b.issues.get("t-1").status = "in_progress";
+        const prompts = await ask(b, ["Ruled."], { externalWriter: /^source: \S+#\d+$/ });
+        assert.strictEqual(prompts.length, 1, "the Foreman's own long note was read as a hold");
+      },
+    };
+    sameIds("w", W);
+    for (const [id] of rowsOf("w")) {
+      try { await W[id](); } catch (e) { e.message = `${id}: ${e.message}`; throw e; }
     }
   });
 
