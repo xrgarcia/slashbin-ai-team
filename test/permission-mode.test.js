@@ -5,8 +5,8 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { runEnvironment, runEnvProblems, runEnvCredentials, HARNESS_POLICY_ENV, RUN_ENV_BASE, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, boardRunKind, withheldFromParityBoard } = require("../lib/permission-mode");
-const { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync } = require("fs");
+const { runEnvPolicy, runEnvProblems, credentialName, MIN_CREDENTIAL_CHARS, HARNESS_POLICY_ENV, RUN_ENV_BASE, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, boardRunKind, withheldFromParityBoard } = require("../lib/permission-mode");
+const { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync, rmSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
 const { spawnSync } = require("child_process");
@@ -581,7 +581,7 @@ check("a parity run withholds only the Discord credentials, and still sees no ot
   assert.match(src, /opts\.noBufferContext \? "" : buildContextPrompt/);
 });
 
-console.log("\nRun environment — BOT_RUN_ENV");
+console.log("\nRun environment — BOT_RUN_ENV, one policy for inheritance and shell exclusions");
 
 // Hank's policy settings beside a Doppler shell's credentials: the shape that
 // turned the mail and calendar gates off when a list dropped everything
@@ -596,42 +596,181 @@ const POLICY = {
 const CREDS = { EM_GITHUB_TOKEN: "ghp_em_token_value", PROD_STRIPE_SRE_KEY: "sk_live_value", PAPERCLIP_API_KEY: "pcp_value",
   DOPPLER_TOKEN: "dp.st.value", RAILWAY_API_TOKEN: "rw_value" };
 
-check("unset passes the whole environment on, as before", () => {
+/** The run's inherited environment, asserting the policy holds. */
+const inherited = (env, spec) => {
+  const p = runEnvPolicy(env, spec);
+  assert.deepStrictEqual(p.problems, [], "the policy was refused");
+  return p.inherit;
+};
+
+check("unset passes the whole environment on, as before, and withholds nothing extra from commands", () => {
   const env = { PATH: "/bin", EM_GITHUB_TOKEN: "x" };
-  assert.deepStrictEqual(runEnvironment(env, undefined), env);
-  assert.deepStrictEqual(runEnvironment(env, " "), env);
+  for (const spec of [undefined, "", " "]) {
+    assert.deepStrictEqual(runEnvPolicy(env, spec), { inherit: env, shellExclude: [], problems: [] });
+  }
 });
 
 check("named keeps the basics, the names and the harness policy, and no unlisted credential", () => {
-  const env = { PATH: "/bin", HOME: "/h", LC_ALL: "C", XDG_RUNTIME_DIR: "/r", NOVA_BEARER: "n", NOVA_OTHER: "o", ...POLICY, ...CREDS };
-  const run = runEnvironment(env, "NOVA_BEARER");
+  const env = { PATH: "/bin", HOME: "/h", LC_ALL: "C", XDG_RUNTIME_DIR: "/r", NOVA_BEARER: "nova-bearer-value", NOVA_OTHER: "o", ...POLICY, ...CREDS };
+  const run = inherited(env, "NOVA_BEARER");
   assert.deepStrictEqual(Object.keys(run).sort(), ["HOME", "LC_ALL", "NOVA_BEARER", "PATH", "XDG_RUNTIME_DIR", ...Object.keys(POLICY)].sort());
   for (const [k, v] of Object.entries(POLICY)) assert.strictEqual(run[k], v, `${k} changed`);
 });
 
-check("a trailing * keeps a prefix", () => {
-  const run = runEnvironment({ NOVA_A: "1", NOVA_B: "2", EM_A: "3" }, "NOVA_*");
-  assert.deepStrictEqual(Object.keys(run).sort(), ["NOVA_A", "NOVA_B"]);
+check("a trailing * expands against the variables actually set", () => {
+  const p = runEnvPolicy({ NOVA_A: "1", NOVA_B: "2", EM_A: "3" }, "NOVA_*");
+  assert.deepStrictEqual(Object.keys(p.inherit).sort(), ["NOVA_A", "NOVA_B"]);
+  assert.deepStrictEqual(p.shellExclude, []);
 });
 
-check("a harness setting is a policy, never a credential", () => {
-  // Named like a credential under a harness prefix, or holding a dropped
-  // credential's value: dropped. Listed by name: kept.
-  const env = { GIT_AUTHOR_TOKEN: "secretvalue1", BOT_LAND_PATHS: `notes/**,${CREDS.EM_GITHUB_TOKEN}`, ...CREDS, NOVA_BEARER: "n" };
-  const run = runEnvironment(env, "NOVA_BEARER");
-  assert.ok(!("GIT_AUTHOR_TOKEN" in run), "a credential-named harness variable reached the run");
-  assert.ok(!("BOT_LAND_PATHS" in run), "a harness setting holding a dropped credential reached the run");
-  assert.strictEqual(runEnvironment(env, "NOVA_BEARER,EM_GITHUB_TOKEN").BOT_LAND_PATHS, env.BOT_LAND_PATHS);
+// Every credential family the shared classification knows, each reached by an
+// exact name and by a prefix entry: inherited (its MCP server needs it) and
+// withheld from the commands (PR #91 review round 3: NOVA_* kept
+// NOVA_ROUTER_BEARER but excluded nothing; an exact NOVA_AUTH escaped).
+const FAMILIES = ["TOKEN", "TOKENS", "KEY", "KEYS", "SECRET", "PASS", "PASSWORD", "PASSPHRASE", "BEARER", "AUTH",
+  "CREDENTIAL", "CREDENTIALS", "COOKIE", "PAT", "PASSWD", "api_key"];
+
+check("every credential family is classified a credential, and look-alikes are not", () => {
+  for (const f of FAMILIES) {
+    for (const name of [`NOVA_${f}`, `NOVA_${f}_FILE`, `${f}_NOVA`]) assert.ok(credentialName(name), `${name} is not a credential`);
+  }
+  for (const name of ["DISCORDTOKEN", "PAPERCLIPKEY", "EM_DISCORD_TOKEN", "NOVA_ROUTER_BEARER", "NOVA_AUTH"]) assert.ok(credentialName(name), name);
+  for (const name of ["GIT_AUTHOR_NAME", "PATH", "KEYBOARD_LAYOUT", "AUTHOR", "PATTERN", "PASSAGE", "GH_CONFIG_DIR", "NOVA_URL"]) {
+    assert.ok(!credentialName(name), `${name} is called a credential`);
+  }
+});
+
+check("exact-name, prefix and credential-family combinations: every kept credential is inherited and withheld from commands", () => {
+  for (const f of FAMILIES) {
+    const cred = `NOVA_ROUTER_${f}`;
+    const env = { PATH: "/bin", [cred]: `value-of-${f}-credential`, NOVA_URL: "https://router.example", GH_CONFIG_DIR: "/gh", ...POLICY, ...CREDS };
+    for (const spec of [cred, "NOVA_*", `NOVA_ROUTER_*,GH_CONFIG_DIR`, `${cred},NOVA_URL,GH_CONFIG_DIR`]) {
+      const p = runEnvPolicy(env, spec);
+      assert.deepStrictEqual(p.problems, [], `${spec}: refused`);
+      assert.strictEqual(p.inherit[cred], env[cred], `${spec}: ${cred} did not reach the run's MCP servers`);
+      assert.ok(p.shellExclude.includes(cred), `${spec}: ${cred} reaches a Codex command`);
+      for (const k of ["NOVA_URL", "GH_CONFIG_DIR", "PATH", ...Object.keys(POLICY)]) assert.ok(!p.shellExclude.includes(k), `${spec}: ${k} withheld from commands`);
+      for (const k of Object.keys(CREDS)) assert.ok(!(k in p.inherit), `${spec}: unlisted ${k} reached the run`);
+    }
+  }
+});
+
+check("the named Nova cases: NOVA_ROUTER_BEARER by prefix and NOVA_AUTH by exact name", () => {
+  const env = { PATH: "/bin", NOVA_ROUTER_BEARER: "nova-bearer-value", NOVA_AUTH: "nova-auth-value", NOVA_URL: "https://r", ...POLICY };
+  assert.deepStrictEqual(runEnvPolicy(env, "NOVA_*").shellExclude.sort(), ["NOVA_AUTH", "NOVA_ROUTER_BEARER"]);
+  assert.deepStrictEqual(runEnvPolicy(env, "NOVA_AUTH").shellExclude, ["NOVA_AUTH"]);
+  assert.deepStrictEqual(runEnvPolicy(env, "NOVA_ROUTER_BEARER,NOVA_URL").shellExclude, ["NOVA_ROUTER_BEARER"]);
+});
+
+check("whatever is listed, every inherited credential is withheld from commands, and only inherited names are", () => {
+  const env = { PATH: "/bin", HOME: "/h", NOVA_ROUTER_BEARER: "nova-bearer-value", NOVA_AUTH: "nova-auth-value", NOVA_URL: "https://r",
+    DISCORDTOKEN: "discord-token-value", PAPERCLIPKEY: "paperclip-key-value", GIT_AUTHOR_TOKEN: "git-author-token", ...POLICY, ...CREDS };
+  const names = Object.keys(env);
+  const specs = ["NOVA_*", "NOVA_AUTH", "DISCORDTOKEN,PAPERCLIPKEY", "GIT_AUTHOR_TOKEN", "EM_*,PROD_*", names.join(","), "NOVA_URL"];
+  for (const spec of specs) {
+    const p = runEnvPolicy(env, spec);
+    const kept = Object.keys(p.inherit);
+    for (const k of kept) if (credentialName(k)) assert.ok(p.shellExclude.includes(k), `${spec}: ${k} reaches a Codex command`);
+    for (const k of p.shellExclude) assert.ok(kept.includes(k), `${spec}: ${k} is excluded but not inherited`);
+  }
+});
+
+check("a listed variable carrying a credential's value is withheld from commands too", () => {
+  const env = { PATH: "/bin", NOVA_ROUTER_BEARER: "nova-bearer-value", NOVA_URL: "https://r/?b=nova-bearer-value", EM_GITHUB_TOKEN: "ghp_em_token_value",
+    NOVA_REMOTE: "https://github.example/repo?access=ghp_em_token_value" };
+  const p = runEnvPolicy(env, "NOVA_*");
+  assert.deepStrictEqual(p.shellExclude.sort(), ["NOVA_REMOTE", "NOVA_ROUTER_BEARER", "NOVA_URL"]);
+  // The basics never are: a credential naming a folder on PATH must not take PATH from every command.
+  const q = runEnvPolicy({ PATH: "/usr/bin:/opt/keys/bin", SIGNING_KEY_DIR: "/opt/keys/bin" }, "SIGNING_KEY_DIR");
+  assert.deepStrictEqual(q.shellExclude, ["SIGNING_KEY_DIR"]);
+});
+
+check("a credential-named variable under a policy prefix is a credential, not a policy", () => {
+  const env = { GIT_AUTHOR_NAME: "bot", GIT_AUTHOR_TOKEN: "git-author-token", NOVA_BEARER: "nova-bearer-value" };
+  assert.ok(!("GIT_AUTHOR_TOKEN" in inherited(env, "NOVA_BEARER")), "an unlisted credential reached the run under a policy prefix");
+  const listed = runEnvPolicy(env, "NOVA_BEARER,GIT_AUTHOR_TOKEN");
+  assert.strictEqual(listed.inherit.GIT_AUTHOR_TOKEN, env.GIT_AUTHOR_TOKEN);
+  assert.ok(listed.shellExclude.includes("GIT_AUTHOR_TOKEN"));
+  assert.strictEqual(listed.inherit.GIT_AUTHOR_NAME, "bot");
+});
+
+// The policy settings a value overlap could erase: every HARNESS_POLICY_ENV
+// setting set in POLICY. A setting is never dropped for what it holds; the
+// configuration is refused (PR #91 review round 3, S1).
+check("a policy setting holding a credential's value, exactly or as a substring, refuses the configuration — never drops it", () => {
+  for (const policy of Object.keys(POLICY)) {
+    for (const [how, credValue, policyValue] of [
+      ["exact", "credential-value-123", "credential-value-123"],
+      ["substring", "credential-value-123", "prefix,credential-value-123,suffix"],
+    ]) {
+      for (const [where, spec] of [["dropped", "NOVA_BEARER"], ["listed", "NOVA_BEARER,SVC_TOKEN"], ["prefix", "NOVA_*,SVC_*"]]) {
+        const env = { PATH: "/bin", NOVA_BEARER: "nova-bearer-value", ...POLICY, [policy]: policyValue, SVC_TOKEN: credValue };
+        const p = runEnvPolicy(env, spec);
+        const label = `${policy} ${how}, credential ${where}`;
+        assert.strictEqual(p.problems.length, 1, `${label}: not refused`);
+        assert.strictEqual(p.inherit, null, `${label}: an environment was still built`);
+        assert.match(p.problems[0], new RegExp(`^${policy} holds the value of SVC_TOKEN`), label);
+        assert.ok(!p.problems[0].includes(credValue), `${label}: the refusal prints the credential`);
+      }
+    }
+  }
+});
+
+check("SMTP_AUTH_USER = BOT_MAIL_ALLOWED_RECIPIENTS refuses, and never drops the allowlist", () => {
+  const env = { PATH: "/bin", ...POLICY, NOVA_BEARER: "nova-bearer-value", SMTP_AUTH_USER: "owner@example.com" };
+  const p = runEnvPolicy(env, "NOVA_BEARER");
+  assert.strictEqual(p.inherit, null);
+  assert.strictEqual(p.problems.length, 1);
+  assert.match(p.problems[0], /^BOT_MAIL_ALLOWED_RECIPIENTS holds the value of SMTP_AUTH_USER/);
+  assert.ok(!p.problems[0].includes("owner@example.com"), "the refusal prints the value");
+  // Listing the username does not make the overlap safe: its value would reach every command through the allowlist.
+  assert.strictEqual(runEnvPolicy(env, "NOVA_BEARER,SMTP_AUTH_USER").problems.length, 1);
+  // Unset BOT_RUN_ENV inherits everything and drops nothing: nothing to refuse.
+  assert.deepStrictEqual(runEnvPolicy(env, undefined).inherit, env);
+});
+
+check("a short credential value is not matched inside a policy setting", () => {
+  // "3" and "true" are counters and flags a policy holds by coincidence.
+  const env = { ...POLICY, NOVA_BEARER: "nova-bearer-value", RETRY_AUTH: "3", FLAG_TOKEN: "true", ABCDE_KEY: "12345" };
+  assert.ok("12345".length < MIN_CREDENTIAL_CHARS);
+  const p = runEnvPolicy(env, "NOVA_BEARER");
+  assert.deepStrictEqual(p.problems, []);
+  assert.strictEqual(p.inherit.BOT_MAX_WAKE_ATTEMPTS, "3");
 });
 
 check("a list it would read differently from its operator is refused, at startup and at every run", () => {
   assert.deepStrictEqual(runEnvProblems("NOVA_BEARER, GH_CONFIG_DIR,NOVA_*"), []);
   for (const bad of ["*", "NOVA BEARER", "NOVA-BEARER", "NOVA_*_X", "$HOME"]) {
     assert.strictEqual(runEnvProblems(`NOVA_BEARER,${bad}`).length, 1, `${bad} was accepted`);
-    assert.throws(() => runEnvironment({}, bad), /BOT_RUN_ENV entry/);
+    const p = runEnvPolicy({}, bad);
+    assert.strictEqual(p.inherit, null);
+    assert.match(p.problems.join(), /BOT_RUN_ENV entry/);
   }
   const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.match(bot, /if \(runEnvProblems\(process\.env\.BOT_RUN_ENV\)\.length\) \{[\s\S]{0,200}process\.exit\(EXIT_CONFIG\)/);
+  assert.match(bot, /const RUN_ENV_PROBLEMS = runEnvPolicy\(process\.env, process\.env\.BOT_RUN_ENV\)\.problems;\nif \(RUN_ENV_PROBLEMS\.length\) \{[\s\S]{0,200}process\.exit\(EXIT_CONFIG\)/);
+  // A run never builds on a refused policy.
+  assert.match(bot, /function runEnv\(\) \{\n  const policy = runEnvPolicy\(process\.env, process\.env\.BOT_RUN_ENV\);\n  if \(policy\.problems\.length\) throw/);
+});
+
+check("the bot refuses an overlapping policy at startup, before any run, without printing the value", () => {
+  const dir = mkdtempSync(join(tmpdir(), "run-env-start-"));
+  for (const d of ["cwd", "state", "run"]) mkdirSync(join(dir, d));
+  const base = {};
+  for (const k of ["PATH", "HOME", "USER", "SHELL", "LANG"]) if (process.env[k]) base[k] = process.env[k];
+  const env = { ...base, BOT_NAME: "runenv-refuse", WS_PORT: String(19600 + (process.pid % 300)), CLAUDE_CWD: join(dir, "cwd"),
+    BOT_STATE_DIR: join(dir, "state"), BOT_HISTORY_DIR: join(dir, "history"), SUMMARIZE_INTERVAL_MS: "0",
+    DISCORD_TOKEN: "not-a-real-token", BOT_RUN_ENV: "NOVA_BEARER", NOVA_BEARER: "nova-bearer-value",
+    SMTP_AUTH_USER: "allow-me@example.com", BOT_MAIL_ALLOWED_RECIPIENTS: "allow-me@example.com" };
+  const r = spawnSync(process.execPath, [join(__dirname, "..", "bot.js")], { cwd: join(dir, "run"), env, encoding: "utf8", timeout: 20000 });
+  const out = r.stdout + r.stderr;
+  assert.strictEqual(r.status, 78, `exit ${r.status}\n${out}`);
+  assert.match(out, /BOT_RUN_ENV refused — BOT_MAIL_ALLOWED_RECIPIENTS holds the value of SMTP_AUTH_USER/);
+  assert.ok(!/Discord login failed|Bot online|Starting fresh/.test(out), "the bot went on past the refusal");
+  // The allowlist itself is the bot's own setting and may appear in its config log; the refusal names variables only.
+  const refusal = out.split("\n").find((l) => /BOT_RUN_ENV refused/.test(l));
+  assert.ok(!refusal.includes("allow-me@example.com"), "the refusal prints the credential's value");
+  for (const f of [".runenv-refuse.pid", ".runenv-refuse.ready", ".runenv-refuse.surfaces.json"]) rmSync(join(__dirname, "..", f), { force: true });
+  rmSync(dir, { recursive: true, force: true });
 });
 
 // Every setting a hook or skill-pack script reads, found by reading them.
@@ -651,13 +790,13 @@ check("every setting the skill pack reads is one a run keeps", () => {
   for (const name of hookReads) assert.ok(covered(name), `the skill pack reads ${name}: add it to HARNESS_POLICY_ENV`);
   // …and survives a list that names none of them.
   const env = Object.fromEntries([...hookReads].filter((k) => !SET_PER_RUN.includes(k)).map((k) => [k, `v-${k}`]));
-  const run = runEnvironment({ ...env, ...CREDS }, "NOVA_BEARER");
+  const run = inherited({ ...env, ...CREDS }, "NOVA_BEARER");
   for (const k of Object.keys(env)) assert.strictEqual(run[k], env[k], `${k} was dropped`);
 });
 
 // The gates and land.mjs, run with an environment built the way a run's is.
 const runEnv = (extra = {}) => {
-  const env = runEnvironment({ ...process.env, ...POLICY, ...CREDS, NOVA_BEARER: "n", ...extra }, "NOVA_BEARER");
+  const env = inherited({ ...process.env, ...POLICY, ...CREDS, NOVA_BEARER: "nova-bearer-value", ...extra }, "NOVA_BEARER");
   for (const k of Object.keys(CREDS)) assert.ok(!(k in env), `${k} reached the run`);
   return env;
 };
@@ -701,7 +840,8 @@ check("configured landing still lands inside its paths, and only there, through 
 
 check("the bot builds every run's environment through it", () => {
   const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.ok(/const cleanEnv = runEnvironment\(process\.env, process\.env\.BOT_RUN_ENV\)/.test(bot));
+  assert.ok(/const cleanEnv = \{ \.\.\.runEnv\(\)\.inherit \};/.test(bot));
+  assert.ok(/\.\.\.runEnv\(\)\.shellExclude\]/.test(bot), "the shell exclusions come from the same policy");
 });
 
 check("every configured board's key is scrubbed from a run, whatever BOT_SURFACES turns on (PR #91 review, round 3)", () => {
@@ -714,8 +854,8 @@ check("every configured board's key is scrubbed from a run, whatever BOT_SURFACE
   const scrubOf = (env) => {
     const boards = paperclipBoards(env).boards;          // the listeners that came on, as bot.js sets them
     const PAPERCLIP_BOARDS = botSurfaces(env, boards.length).paperclip ? boards : [];
-    return new Function("boardKeyEnvs", "runEnvCredentials", "RUN_AGENT_KEY_ENV", "PAPERCLIP_BOARDS", "process",
-      `${fn("connectorKeys")}\n${fn("shellWithheld")}\nreturn { connectorKeys, shellWithheld };`)(boardKeyEnvs, runEnvCredentials, "PAPERCLIP_RUN_AGENT_KEY", PAPERCLIP_BOARDS, { env });
+    return new Function("boardKeyEnvs", "runEnvPolicy", "RUN_AGENT_KEY_ENV", "PAPERCLIP_BOARDS", "process",
+      `${fn("connectorKeys")}\n${fn("runEnv")}\n${fn("shellWithheld")}\nreturn { connectorKeys, shellWithheld };`)(boardKeyEnvs, runEnvPolicy, "PAPERCLIP_RUN_AGENT_KEY", PAPERCLIP_BOARDS, { env });
   };
   const extra = JSON.stringify([
     { id: "acme", url: "https://acme.example.com", keyEnv: "ACME_BOARD_KEY" },
@@ -727,7 +867,7 @@ check("every configured board's key is scrubbed from a run, whatever BOT_SURFACE
     if (surfaces === "discord") assert.strictEqual(botSurfaces(env, 2).paperclip, false, "the Discord-only case no longer turns the boards off");
     const { connectorKeys, shellWithheld } = scrubOf(env);
     // The run's environment as bot.js builds it, BOT_RUN_ENV unset: everything, then the scrub.
-    const run = runEnvironment(env, undefined);
+    const run = inherited(env, undefined);
     for (const name of connectorKeys()) delete run[name];
     const values = Object.values(run).join("\n");
     for (const v of ["first-board-value", "acme-board-value", "other-board-value"]) assert.ok(!values.includes(v), `BOT_SURFACES=${surfaces}: a board key reached the run`);
@@ -737,15 +877,21 @@ check("every configured board's key is scrubbed from a run, whatever BOT_SURFACE
   assert.ok(!/function connectorKeys\(\) \{[^}]*PAPERCLIP_BOARDS/.test(bot), "the scrub reads the listeners that came on");
 });
 
-check("a credential the run environment names is withheld from a Codex run's commands", () => {
+check("every credential the run environment keeps is withheld from a Codex run's commands, through bot.js's own scrub", () => {
   // The harness's shell exclude list replaces the bot's own Codex config's,
   // so Nova's bearer reached her shell until the harness withheld it (2026-10-15).
-  assert.deepStrictEqual(runEnvCredentials("NOVA_SLASHBIN_MCP_ROUTER_BEARER,GH_CONFIG_DIR,DOPPLER_CONFIG_DIR"), ["NOVA_SLASHBIN_MCP_ROUTER_BEARER"]);
-  assert.deepStrictEqual(runEnvCredentials("A_TOKEN, B_api_key ,C_SECRET,D_PASSWORD,NOVA_*"), ["A_TOKEN", "B_api_key", "C_SECRET", "D_PASSWORD"]);
-  assert.deepStrictEqual(runEnvCredentials(undefined), []);
   const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  const fn = (name) => bot.match(new RegExp(`function ${name}\\(\\) \\{[\\s\\S]*?\\n\\}`))[0];
+  const withheld = (env) => new Function("boardKeyEnvs", "runEnvPolicy", "RUN_AGENT_KEY_ENV", "process",
+    `${fn("connectorKeys")}\n${fn("runEnv")}\n${fn("shellWithheld")}\nreturn shellWithheld();`)(() => [], runEnvPolicy, "RUN_AGENT_KEY", { env });
+  const env = { PATH: "/bin", NOVA_SLASHBIN_MCP_ROUTER_BEARER: "nova-bearer-value", NOVA_AUTH: "nova-auth-value", GH_CONFIG_DIR: "/gh", DOPPLER_CONFIG_DIR: "/dp" };
+  assert.deepStrictEqual(withheld({ ...env, BOT_RUN_ENV: "NOVA_SLASHBIN_MCP_ROUTER_BEARER,GH_CONFIG_DIR,DOPPLER_CONFIG_DIR" }), ["RUN_AGENT_KEY", "NOVA_SLASHBIN_MCP_ROUTER_BEARER"]);
+  assert.deepStrictEqual(withheld({ ...env, BOT_RUN_ENV: "NOVA_*" }).sort(), ["NOVA_AUTH", "NOVA_SLASHBIN_MCP_ROUTER_BEARER", "RUN_AGENT_KEY"]);
+  assert.deepStrictEqual(withheld({ ...env, BOT_RUN_ENV: "NOVA_AUTH" }), ["RUN_AGENT_KEY", "NOVA_AUTH"]);
+  assert.deepStrictEqual(withheld(env), ["RUN_AGENT_KEY"]);
+  assert.throws(() => withheld({ ...env, BOT_RUN_ENV: "*" }), /BOT_RUN_ENV entry/, "a refused policy built a run");
   assert.ok(/shellExclude: shellWithheld\(\)/.test(bot));
-  assert.ok(/runEnvCredentials\(process\.env\.BOT_RUN_ENV\)/.test(bot));
+  assert.ok(!/runEnvCredentials/.test(bot), "a second credential filter is back");
 });
 
 check("a Codex board run hands the escalate action its seat key and run, never to a command", () => {

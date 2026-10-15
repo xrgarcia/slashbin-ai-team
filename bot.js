@@ -9,13 +9,13 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { runEnvironment, runEnvProblems, runEnvCredentials, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, discordCarriers, paperclipCarriers, parityMcpEnv, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
+const { runEnvPolicy, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, discordCarriers, paperclipCarriers, parityMcpEnv, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
 const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector } = require("./lib/paperclip");
 const { createLiveEvents, eventsSetting, startBoard } = require("./lib/paperclip-events");
-const { botSurfaces, PAPERCLIP_PREREQUISITE } = require("./lib/surfaces");
+const { botSurfaces, discordOffReason, PAPERCLIP_PREREQUISITE } = require("./lib/surfaces");
 const { resolveRuntime } = require("./lib/runtime");
 const { LAYOUTS, repoLayout } = require("./lib/runtime/layout");
 const codexRuntime = require("./lib/runtime/codex");
@@ -246,10 +246,19 @@ function connectorKeys() {
 // the key (shellWithheld).
 const RUN_AGENT_KEY_ENV = "PAPERCLIP_RUN_AGENT_KEY";
 const RUN_ID_ENV = "PAPERCLIP_RUN_ID";
+// The run environment (BOT_RUN_ENV), resolved once per use by the one policy
+// that decides both what a run inherits and what its commands are kept from
+// (runEnvPolicy). Startup refuses a policy with problems; a run never builds
+// on one.
+function runEnv() {
+  const policy = runEnvPolicy(process.env, process.env.BOT_RUN_ENV);
+  if (policy.problems.length) throw new Error(policy.problems.join("; "));
+  return policy;
+}
 // What a Codex run's commands never see: the connector keys, the run's own
-// seat key, and every credential the bot's run environment names.
+// seat key, and every credential the run environment keeps (runEnvPolicy).
 function shellWithheld() {
-  return [...new Set([...connectorKeys(), RUN_AGENT_KEY_ENV, ...runEnvCredentials(process.env.BOT_RUN_ENV)])];
+  return [...new Set([...connectorKeys(), RUN_AGENT_KEY_ENV, ...runEnv().shellExclude])];
 }
 // What a board run's session is made with (boardAccessKey): one made under
 // other access is never resumed. Every permission input counts — a parity run
@@ -582,14 +591,15 @@ const MAX_OUTBOUND_BYTES = parseInt(process.env.MAX_OUTBOUND_BYTES, 10) || 8 * 1
 // restartable, because a network blip genuinely does deserve another go.
 const EXIT_CONFIG = 78;
 
-// Two peer surfaces: Discord and Paperclip boards, declared by BOT_SURFACES
-// (lib/surfaces.js). Unset, the bot is on Discord, with any board as an
-// addition. Paperclip-only is declared (BOT_SURFACES=paperclip), never inferred
-// from a missing DISCORD_TOKEN: a Discord bot that lost its token must refuse
-// to start, not come up deaf on Discord and report ready. With Discord off the
-// client is never built or logged in. Which boards are usable is settled in
-// full at the Paperclip block below (a board whose policy cannot be held is
-// off); here it is only whether any is configured at all.
+// Two peer surfaces: Discord and Paperclip boards (lib/surfaces.js, issue #89).
+// Unset BOT_SURFACES, the bot answers wherever it is configured: Discord with
+// a DISCORD_TOKEN, and every usable board; a board and no token is
+// Paperclip-only; neither is a refusal naming both. A declared BOT_SURFACES is
+// a prerequisite list, validated as written. With Discord off the client is
+// never built or logged in. Which boards are usable is settled in full at the
+// Paperclip block below (a board whose policy cannot be held is off, which is
+// fatal when the board is the bot's only surface); here it is only whether any
+// is configured at all.
 const { boards: CONFIGURED_BOARDS, problems: PAPERCLIP_PROBLEMS, warnings: PAPERCLIP_WARNINGS } = paperclipBoards(process.env);
 const SURFACES = botSurfaces(process.env, CONFIGURED_BOARDS.length);
 if (SURFACES.errors.length) {
@@ -602,7 +612,7 @@ const DISCORD_ON = SURFACES.discord;
 const PAPERCLIP_BOARDS = SURFACES.paperclip ? CONFIGURED_BOARDS : [];
 const PAPERCLIP_EVENTS = eventsSetting(process.env.PAPERCLIP_EVENTS);
 if (PAPERCLIP_BOARDS.length && PAPERCLIP_EVENTS.problem) log.warn(PAPERCLIP_EVENTS.problem);
-if (!DISCORD_ON) log.info("Discord off — Paperclip-only: BOT_SURFACES=paperclip, so this bot answers on its Paperclip board(s) alone");
+if (!DISCORD_ON) log.info(discordOffReason(SURFACES));
 
 // A bot pointed at a directory that does not exist used to start happily and then
 // fail on the first message with a spawn error naming neither the variable nor the
@@ -633,9 +643,11 @@ if (RUNTIME.problems.length) {
   process.exit(EXIT_CONFIG);
 }
 // Every run builds its environment from BOT_RUN_ENV, so a list the bot would
-// read differently from its operator refuses to start.
-if (runEnvProblems(process.env.BOT_RUN_ENV).length) {
-  for (const problem of runEnvProblems(process.env.BOT_RUN_ENV)) log.fatal(problem);
+// read differently from its operator, or one that could only be held by
+// dropping a policy setting, refuses to start (runEnvPolicy).
+const RUN_ENV_PROBLEMS = runEnvPolicy(process.env, process.env.BOT_RUN_ENV).problems;
+if (RUN_ENV_PROBLEMS.length) {
+  for (const problem of RUN_ENV_PROBLEMS) log.fatal(`BOT_RUN_ENV refused — ${problem}`);
   process.exit(EXIT_CONFIG);
 }
 log.info({ runtime: RUNTIME.name, source: RUNTIME.source, bin: RUNTIME.bin, model: RUNTIME.model, ...(CODEX ? { version: RUNTIME.version } : {}) },
@@ -2180,8 +2192,8 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 
     // Build a clean env without Claude nesting vars. A bot that names its run
     // environment (BOT_RUN_ENV) passes on only those credentials, with the
-    // basics and the harness's own policy settings (runEnvironment).
-    const cleanEnv = runEnvironment(process.env, process.env.BOT_RUN_ENV);
+    // basics and the harness's own policy settings (runEnvPolicy).
+    const cleanEnv = { ...runEnv().inherit };
 
     // Publish the RESOLVED paths. This is what stops harness-owned skills from
     // rotting: a skill that reads $BOT_BUFFER_FILE cannot go stale, while one
@@ -3233,10 +3245,13 @@ if (PAPERCLIP_BOARDS.length && PAPERCLIP_CWD_DENIED) {
 } else if (PAPERCLIP_BOARDS.length && BOARD_POLICY_PROBLEMS.length) {
   for (const problem of BOARD_POLICY_PROBLEMS) log.error(`Paperclip connector off — ${problem}`);
 }
-// A bot that declares Paperclip needs its connector on: off, it is not the bot
-// it says it is, and no restart changes that.
+// A bot that declares Paperclip, or has no other surface, needs its connector
+// on: off, it is not the bot it says it is (or answers nowhere), and no
+// restart changes that.
 if (SURFACES.paperclipRequired && (PAPERCLIP_CWD_DENIED || BOARD_POLICY_PROBLEMS.length)) {
-  log.fatal(`BOT_SURFACES includes paperclip, so ${PAPERCLIP_PREREQUISITE}. The connector is configured but off (see the error above).`);
+  log.fatal(SURFACES.declared
+    ? `BOT_SURFACES includes paperclip, so ${PAPERCLIP_PREREQUISITE}. The connector is configured but off (see the error above).`
+    : "No DISCORD_TOKEN, so this bot answers on its Paperclip board alone, and the connector is configured but off (see the error above) — fix it, or set DISCORD_TOKEN.");
   clearReady();
   process.exit(EXIT_CONFIG);
 }

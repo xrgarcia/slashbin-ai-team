@@ -555,12 +555,14 @@ export async function checkFleet(file, harnessDir, env = process.env) {
     const surfaces = botSurfaces({ BOT_SURFACES: b.surfaces ?? "", DISCORD_TOKEN: b.discordTokenAbsent ? "" : "set" }, onBoard ? 1 : 0);
     if (surfaces.errors.length) {
       out.push(bad(`${label}: BOT_SURFACES`, `the bot refuses to start: ${surfaces.errors.join("; ")}`,
-        surfaces.paperclipRequired
-          ? "Put this app on its board (PAPERCLIP_URL and PAPERCLIP_API_KEY) in ecosystem.config.js, or take paperclip out of BOT_SURFACES."
-          : "Give this app its DISCORD_TOKEN, or, for a bot on its Paperclip board alone, set BOT_SURFACES: 'paperclip'."));
+        !surfaces.declared
+          ? "Give this app its DISCORD_TOKEN, or put it on its Paperclip board (PAPERCLIP_URL and PAPERCLIP_API_KEY) in ecosystem.config.js."
+          : surfaces.paperclipRequired
+            ? "Put this app on its board (PAPERCLIP_URL and PAPERCLIP_API_KEY) in ecosystem.config.js, or take paperclip out of BOT_SURFACES."
+            : "Give this app its DISCORD_TOKEN, or take discord out of BOT_SURFACES."));
     }
     if (!surfaces.discord) {
-      if (!surfaces.errors.length) out.push(ok(`${label}: token`, "Discord off — Paperclip-only (BOT_SURFACES=paperclip)"));
+      if (!surfaces.errors.length) out.push(ok(`${label}: token`, `Discord off — Paperclip-only (${surfaces.declared ? "BOT_SURFACES=paperclip" : "no DISCORD_TOKEN, board configured"})`));
     } else if (b.discordTokenAbsent) {
       // Reported above as the start gate's refusal.
     } else if (!b.tokenVar) {
