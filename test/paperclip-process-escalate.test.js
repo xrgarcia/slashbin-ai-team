@@ -22,11 +22,11 @@ const SEATS = [{ id: "agent-em", name: "Engineering Manager", reportsTo: "agent-
 const marker = (record) => `${MARKER_PREFIX}${Buffer.from(JSON.stringify(record)).toString("base64url")} -->`;
 
 /** One task held by the EM seat, which reports to the PO seat, with a live run on it. */
-function board({ comments: prior = [] } = {}) {
-  const card = { id: "c-1", identifier: "SLA-1", title: "Publish the roadmap", status: "in_progress", assigneeAgentId: "agent-em",
-    assigneeUserId: null, labels: [], createdAt: "2026-01-01T00:00:00Z", createdByAgentId: "agent-po" };
+function board({ comments: prior = [], status = "in_progress", labels = [], activity = [] } = {}) {
+  const card = { id: "c-1", identifier: "SLA-1", title: "Publish the roadmap", status, assigneeAgentId: "agent-em",
+    assigneeUserId: null, labels, createdAt: "2026-01-01T00:00:00Z", createdByAgentId: "agent-po" };
   const comments = [{ id: "c0", authorAgentId: null, authorUserId: "user-avery", createdAt: "2026-01-01T00:00:01Z", body: "Please publish it." }, ...prior];
-  const activity = [], writes = [];
+  const writes = [];
   const runs = [{ id: "r1", agentId: "agent-em", status: "running" }];
   const ok = (v) => ({ ok: true, text: async () => JSON.stringify(v) });
   const fetch = async (url, init = {}) => {
@@ -103,6 +103,42 @@ const RETURNED = `Only the Product Owner can rule on scope.\n${OUTCOME_MARK} ret
     assert.match(body.comment, /- return: not_holder: the card is not with you/);
     assert.match(body.comment, /- hand_up: paperclip_unavailable: move: PATCH \/issues\/c-1 -> HTTP 403/);
     assert.strictEqual(b.card.assigneeAgentId, "agent-em");
+  });
+
+  // A card the developer seat handed up to the EM through the action: blocked, no label.
+  const handedUp = (extra = {}) => board({ status: "blocked", ...extra, comments: [{ id: "m1", authorAgentId: "agent-dev", createdAt: "2026-01-01T00:00:02Z",
+    body: marker({ card: "c-1", hops: [{ from: "agent-dev", to: "agent-em", operation: "hand_up" }] }) }] });
+
+  await check("a card handed up and answered `return` goes back down through the action, once across retries", async () => {
+    const b = handedUp(), a = action(), s = seat(b, async () => RETURNED, a.escalate);
+    await s.tick(); await s.tick();
+    assert.deepStrictEqual(a.calls.map((c) => c.args.operation), ["return"], JSON.stringify(a.calls));
+    assert.strictEqual(a.calls[0].args.resolution, "Only the Product Owner can rule on scope.");
+  });
+
+  await check("a label-only escalation answered `escalate` hands up through the action, not a direct reassignment", async () => {
+    const b = board({ status: "blocked", labels: [{ name: "Needs EM ruling" }] }), a = action();
+    await seat(b, async () => `Needs a product call.\n${OUTCOME_MARK} escalate`, a.escalate).tick();
+    assert.deepStrictEqual(a.calls.map((c) => c.args.operation), ["hand_up"]);
+    assert.ok(b.writes.every((w) => !("assigneeAgentId" in w.body)), JSON.stringify(b.writes));
+  });
+
+  await check("a refused resolve handed up instead carries the exact refusal on the card", async () => {
+    const b = handedUp(), a = action({ resolve: { ok: false, code: "paperclip_unavailable", message: "EXACT_BOARD_REFUSAL" } });
+    await seat(b, async () => "Scope approved; resume the work.", a.escalate).tick();
+    assert.deepStrictEqual(a.calls.map((c) => c.args.operation), ["resolve", "hand_up"]);
+    assert.match(a.calls[1].args.attempted, /process\.escalate resolve: paperclip_unavailable: EXACT_BOARD_REFUSAL/);
+    assert.strictEqual(a.calls[1].args.blocker, "Scope approved; resume the work.");
+  });
+
+  await check("a person's block on a handed-up card holds: no run, no hand-off", async () => {
+    const hold = { id: "h1", action: "issue.updated", actorType: "user", actorId: "user-avery", createdAt: "2026-01-01T00:00:03Z",
+      details: { changes: { status: { from: "blocked", to: "blocked" } } } };
+    let ran = 0;
+    const b = handedUp({ activity: [hold] }), a = action();
+    await seat(b, async () => { ran++; return "Scope approved."; }, a.escalate).tick();
+    assert.strictEqual(ran, 0, "the manager worked a card a person holds");
+    assert.strictEqual(a.calls.length, 0);
   });
 
   await check("`review` closes in review with the giver as reviewer, in one write", async () => {
