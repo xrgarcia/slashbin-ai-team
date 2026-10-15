@@ -22,7 +22,7 @@ builder without a row.
 ## What the board records (the facts the model stands on)
 
 These are read from the source, not inferred from behaviour. Paperclip is at
-f758a984b and the Foreman at 157392d.
+f758a984b and the Foreman at 45bd393.
 
 - **Every PATCH is one `issue.updated` entry.** Its `details` are the request
   fields, plus `changes` (from/to of every field that changed), and
@@ -46,61 +46,78 @@ f758a984b and the Foreman at 157392d.
 - **The log cannot tell a board API key from a browser session.** Nothing in
   the activity log does. The Foreman's sync writes with a board user's key, so
   the Foreman and Ray can be one identity.
-- **The Foreman hands a card on in a burst** (`src/paperclip/mirror.ts`):
-  - **`onBlocked`** (360-382) sets the card's unblock step to the note text,
-    calls `move()`, then calls `note()` with that same text.
-  - **`move()`** (930-958) is one PATCH: status, holder, unblock step
-    (`action` = the note text) and labels.
-  - **`note()`** (990-1012) is used on a blocked card. It sends
-    `{comment, status}`, which is a commented restatement. The comment is
-    `finishComment(text)`: trimmed, redacted, and capped at 3000 characters.
+- **The Foreman hands a card on with a move, then a note** (`src/paperclip/mirror.ts`):
+  - **`onBlocked`** sets the card's unblock step to the note text, calls
+    `move()`, then calls `note()` with that same text.
+  - **`move()`** is one uncommented PATCH: status, holder, unblock step
+    (`action` = the note text, unredacted) and labels. It is sent even when
+    nothing changes (a re-move).
+  - **`note()`** is used on a blocked card. It sends `{comment, status}`, which
+    is a commented restatement. The comment is `finishComment(text)`
+    (`comments.ts`): trimmed, redacted (`[REDACTED]`, `[REDACTED:NAME]`, some
+    patterns keep a prefix), then capped at 3000 characters, a cut one ending
+    `\n\n… (truncated)`.
   - **Under a session hold**, `move()` writes nothing and `note()` is deferred.
-    When the session ends (`onSession`, 766-777), the Foreman writes three
-    things: the real move, then a commented restatement carrying the session
-    summary (a different text), then the deferred note, whose text matches the
-    unblock step.
+    When the session ends (`onSession`), the Foreman writes the real move, then
+    a commented restatement carrying the session summary, whose text starts
+    with a bold header (`**Review finished** — PR #12`), then the deferred
+    note.
+- **How long a record is** (measured, GET only, 2026-10-15): on the slashbin
+  board's 1000 cards, activity entries p50 7, p99 131, max 301; comments p50
+  0, p99 54, max 141; one agent's updates on a card at most 14. The jerky
+  board's longest record is 16 entries.
 
 ## (a) Status decisions
 
-Read newest first. `decisionKind(record, i, botId)` classifies each entry, then
-`lastDecision` walks back past every entry that is not a decision.
-`personSince(record, mark, botId)` returns a person's write after `mark` whose
-kind is `decision` or `waits`.
+Read oldest first, once per record (`decisionKind(record, i, botId)` and
+`lastDecision` share one cached pass). `personSince(record, mark, botId)`
+returns someone else's write after `mark` whose kind is `decision` or `waits`:
+a person's or another agent's, never this bot's or Paperclip's.
 
-**The burst rule (the `note` kind).** This is how a Foreman note is told from a
-person's hold under the same identity. A commented restatement by identity X is
-a note only when all of these hold:
+**The expectation rule (the `note` kind).** This is how a Foreman note is told
+from a hold made under the same identity. It does not use time.
 
-1. Its own `issue.comment_added` is the next record after it.
-2. Walking back to X's latest move, X wrote nothing in between except other
-   commented restatements, each with its own comment. X's move is X's newest
-   write that changed the status, the waits or the holder.
-3. Each of those restatements came within 60 s of that move.
-4. One comment in the burst is exactly the unblock step in force at the move
-   (its first 120 characters). The unblock step is read from the move's request
-   fields, else from the descriptor history.
+1. **A move opens an expectation.** A move is an uncommented update by
+   identity X (not this bot, not Paperclip) whose request or changes touch the
+   status, the holder or the waits. It expects one note from X: the unblock
+   step in force once it landed. A move that clears the step expects nothing.
+   A newer move by X replaces the expectation.
+2. **A commented update is paired with its own comment.** The comment is the
+   first later `issue.comment_added` with the same actor and the same run that
+   is not paired yet. The search stops at X's next update under that run;
+   other identities' entries in between are passed over. The text is the
+   comment's whole body when the poller read it from the thread, else its
+   120-character snippet; a snippet that is cut is never matched.
+3. **A note is X's commented restatement whose comment is the step as the
+   Foreman posts it.** The comment, trimmed, must equal the step, trimmed,
+   with each redaction token standing for any text, and with a trailing
+   `… (truncated)` standing for the rest of the step. It must change nothing
+   but the status: no holder, no waits. A note consumes the expectation.
+4. **A bold summary waits for the note.** A non-matching restatement by X that
+   starts with a `**…**` header is held pending. If X's note follows, it was
+   the session summary, and it is a note too (a5b). If anything else ends the
+   expectation, or the record ends first, it is X's decision.
+5. **Anything else by X is X's own decision**, and so a hold: a bare
+   restatement (which is also a new move), a different comment, the step
+   repeated after the note was consumed. X's other writes that decide nothing
+   (a title or label edit) end the expectation.
 
-The burst runs forward too: it is X's move and every commented restatement X
-wrote after it within the 60 s, each with its own comment, up to X's first
-write of any other shape. So a session's summary, written before its note, is in
-the note's burst, and both are notes (a5b).
+A note that carries a real status change (the wake's checkout landed between
+the move and the note) is not a decision of its own: the status it sets is
+credited to the move it belongs to (a29).
 
-Anything else by X is X's own decision, and so a hold: a bare restatement, a
-rewrite of the waits, a different comment after the burst, or any restatement
-after 60 s. Other identities' writes inside a burst are their own decisions.
-
-| id | write | writer vs the previous decision | kind | status decision? | person's change since a mark? | grounding |
+| id | write | writer vs the previous decision | kind | status decision? | someone else's change since a mark? | grounding |
 |---|---|---|---|---|---|---|
 | a1 | status move | any | decision | yes | yes | `changes.status` |
 | a2 | status move that also hands the card on, one entry | any | decision | yes | yes | Foreman `move()`; read with `handedWith` |
 | a3 | bare restatement of blocked (statusVersion, no comment) | same identity | decision | yes | yes | services/issues.ts:10958; round 4 #1 |
 | a4 | bare restatement of blocked | different identity | decision | yes | yes | services/issues.ts:10958 |
-| a5 | commented restatement in the writer's burst, its comment the move's unblock step | same identity | note | no | no | mirror.ts `onBlocked` 360-382 |
-| a5b | session release: a summary restatement, then the matching note, both in the burst | same identity | note | no | no | mirror.ts `onSession` 766-777 |
-| a6 | commented restatement, other text, after the burst window | same identity | decision | yes | yes | the burst rule, condition 3 |
-| a7 | matching commented restatement after a bare restatement by the same writer | same identity | decision | yes | yes | the burst rule, condition 2 |
-| a8 | matching text, written by an identity that made no move | different identity | decision | yes | yes | the burst rule, condition 2 |
-| a9 | commented restatement with no comment record of its own | same identity | decision | yes | yes | the burst rule, condition 1 |
+| a5 | commented restatement whose comment is the move's unblock step | same identity | note | no | no | mirror.ts `onBlocked` |
+| a5b | session release: a bold summary restatement, then the matching note | same identity | note | no | no | mirror.ts `onSession` |
+| a6 | commented restatement, other text, after the writer's note | same identity | decision | yes | yes | rule 5: the note consumed the expectation |
+| a7 | bare restatement between the move and the note | same identity | decision | yes | yes | rule 5: a bare restatement is a decision |
+| a8 | matching text, written by an identity that made no move | different identity | decision | yes | yes | rule 1: nothing expected from it |
+| a9 | commented restatement with no comment record of its own | same identity | decision | yes | yes | rule 2: nothing to match |
 | a10 | waits or unblock-step rewrite on a blocked card | any | decision | yes | yes | services/issues.ts:10960 |
 | a11 | waits change on a card that is not blocked | any | waits | no | yes | no statusVersion bump |
 | a12 | hand-off alone (holder, statusVersion) | any | hand-off | no | no | services/issues.ts:10950; `heldElsewhere` reads the holder |
@@ -109,14 +126,36 @@ after 60 s. Other identities' writes inside a burst are their own decisions.
 | a15 | Paperclip settles a lost run over a stop no one chose | Paperclip | settle | yes | no | `issue.execution_recovery_settled` |
 | a16 | Paperclip settles a lost run over a person's stop | Paperclip | settle | no | no | the person's stop stands |
 | a17 | comment, title or description edit, label change | any | none | no | no | no statusVersion bump |
+| a18 | commented hold, other text, between the move and its deferred note | same identity | decision | yes | yes | rule 5; R2 |
+| a19 | another identity's comment between the note's update and its comment | same identity | note | no | no | rule 2: pairing passes over other identities; R27 |
+| a20 | another identity's edit between the note's update and its comment | same identity | note | no | no | rule 2; R28 |
+| a21 | Paperclip's recovery between the note's update and its comment | same identity | note | no | no | rule 2; R29 |
+| a22 | a matching comment from another run before the hold's own comment | same identity | decision | yes | yes | rule 2: pairing keeps to the run; R112 |
+| a23 | note whose step the Foreman redacted before posting | same identity | note | no | no | rule 3, `redactComment`; R24 |
+| a24 | note the Foreman capped, read whole from the thread | same identity | note | no | no | rule 3, `capComment`; R68 |
+| a25 | hold sharing the step's first 120 characters, snippet only | same identity | decision | yes | yes | rule 2: a cut snippet never matches; R21 |
+| a26 | note long after its move | same identity | note | no | no | no time window; R13, R67 |
+| a27 | the step repeated after the writer's newer move cleared it | same identity | decision | yes | yes | rule 1: nothing expected; R36 |
+| a28 | note after an unchanged re-move | same identity | note | no | no | rule 1: the re-move expects its note; R37 |
+| a29 | note that lands after the wake's checkout | same identity | note | no | no | the status is credited to the move; R69 |
+| a30 | restatement of blocked that also assigns the card to this bot | any | decision | yes | yes | an explicit block, not a plain hand-off; R40, R71 |
+| a31 | waits request on a blocked card that changes nothing but statusVersion | any | decision | yes | yes | services/issues.ts:10960; R44, R72, R94 |
+| a32 | several holds between the move and its note, the latest | same identity | decision | yes | yes | rule 5; R55 |
+| a33 | another agent's hold after its own move and note | same identity | decision | yes | yes | rule 5; an agent's hold counts; R18, R70 |
+| a34 | the step, after a bold summary and the writer's own title edit | same identity | decision | yes | yes | rule 5: the edit ended the expectation; R17 |
+| a35 | the step repeated after the writer's note | same identity | decision | yes | yes | rule 5; the Foreman never posts a note twice in a row; R20 |
+| a36 | another agent reasserts the block | different identity | decision | yes | yes | an agent's change counts; R97 |
+| a37 | a person's hold in the same millisecond as a mark saved as a time alone | different identity | decision | yes | yes | `after`: a legacy mark reads its own millisecond as after; R107 |
+| a38 | a bold summary the note never followed | same identity | decision | yes | yes | rule 4: fails closed |
 
 In the columns:
 
 - **"status decision?"** asks whether `lastDecision` returns this write. If it
-  says no, the earlier decision stands.
-- **"person's change since a mark?"** asks whether `personSince` counts this
-  write when a board user makes it after the bot's mark. A person's hand-off is
-  read from the holder instead (`heldElsewhere`).
+  says no, the earlier decision stands. A write it returns carries the status
+  the card is in.
+- **"someone else's change since a mark?"** asks whether `personSince` counts
+  this write when it is made after the bot's mark. A hand-off is read from the
+  holder instead (`heldElsewhere`).
 
 ## (b) The escalation lifecycle
 
@@ -166,15 +205,45 @@ insertion order:
 step back into its own state (`mirror.ts:874-879`). A link write that also
 rewrote the step would change what the Foreman thinks the card waits for.
 
+## (c) Wakes and hand-offs: what the card says now wins
+
+Every write the poller makes is decided from a read, and the card can change
+between that read and the write. These rows are the invariants that keep a
+newer decision on the board from being overwritten. Each reads the card's
+holder and its record again at the point named; nothing is fetched from the
+network between that read and the write it guards, except the write itself.
+
+| id | while | the card | what the bot does | invariant |
+|---|---|---|---|---|
+| w1 | the inbox listed the card, before the task is read | is handed to another agent, a person, or nobody | runs nothing; an owed answer is posted as a comment only; a live run ends with `HANDED_AWAY` | the holder is read with the task, and only this bot's card is worked (R40–R42) |
+| w2 | an answer is made | is unassigned | posts the answer as a comment only; status and holder stay | nobody holding a card is "away" too (`heldElsewhere`) (R2, R3, R5–R7) |
+| w3 | an answer is made | is handed away and back | posts the answer as a comment only | a change of holder after the mark is a newer decision (`decidedSince`) (R4, R10, R11) |
+| w4 | the tasks an answer linked finish one at a time, with trims and restarts between | — | resumes once, when the last is done | each done link is remembered in the state file (`linkDone`), not read from the card's trimmed waits (R1, R12, R14, R16, R18) |
+| w5 | a link write lands and its response is lost; the bot restarts | — | records the links from the card, and resumes when they are done | recovery reads the links back from the board (R24) |
+| w6 | an answered ask is revised A→B→A | — | works A again as new | an ask is answered only while it is the task's latest answered ask (`lastAnswered`) (R26–R33) |
+| w7 | an escalation is routed by a seat reference | names a seat whose id is another seat's name | hands it to the seat with that id | an exact id is matched before a name (R34–R36) |
+| w8 | a blocked answer goes on (r7) | is taken away | runs nothing more; the answer is posted | holder and record are re-read before the go-on runs (R37–R39) |
+| w9 | the seats are listed for a hand-on | is unassigned, cycled, moved, re-waited, retitled, asked anew, or unlabelled | sees the change and does not hand it on | the seats are read before the card is validated (R43–R49) |
+| w10 | right before the answer's own write | is taken away or cycled | posts the answer as a comment only | the record is read last, just before the write; a change inside the write itself is a residual (R50, R51) |
+| w11 | a comment's snippet is cut at 120 characters | — | reads the comment whole before matching it | `activityOf` fills each cut comment's body from the thread |
+
 ## Known limits
 
-Each of these errs toward reading a write as a hold, except the last.
+Each of these errs toward reading a write as a hold, except where it says
+otherwise. The ones marked *needs provenance* need the Foreman to write with
+its own key, or to mark its comments, before the record can separate it from
+Ray: a Foreman follow-up.
 
-- **A Foreman re-move of a card it has not changed** (same status, holder and
-  step) records nothing to anchor a burst, so its note reads as a hold.
-- **A note whose text the Foreman redacts or caps** before posting no longer
-  matches the unblock step, so it reads as a hold.
-- **Ray, under the Foreman's identity, typing a commented restatement within
-  60 s of a Foreman move** whose burst also carries the matching note reads as
-  a note. Nothing in the record separates the two; telling them apart needs a
-  separate key for the Foreman's sync.
+- **Another identity's edit between a summary and a note, or a hold that is
+  word for word the step and is the only comment after the move** reads as a
+  note when it comes from the Foreman's identity. *Needs provenance*; it errs
+  toward working the card.
+- **A same-identity hold that starts with a bold header, between the move and
+  its note**, reads as the session's summary. *Needs provenance*; it errs
+  toward working the card.
+- **A session release whose summary no note follows** reads the summary as a
+  hold until something else moves the card.
+- **A person who makes the Foreman's exact move** (blocked, handed to this
+  bot) on a mirrored card is read as a hand-off. *Needs provenance.*
+- **A write that lands inside the bot's own final write** (w10) is overwritten;
+  no Paperclip write can be made conditional. The window is one request.
