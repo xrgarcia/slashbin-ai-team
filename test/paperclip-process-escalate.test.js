@@ -19,6 +19,7 @@ async function check(label, fn) {
 }
 const silent = { info() {}, warn() {}, error() {}, child() { return silent; } };
 const SEATS = [{ id: "agent-em", name: "Engineering Manager", reportsTo: "agent-po" }, { id: "agent-po", name: "Product Owner" }];
+const clock = { t: 0 };
 const marker = (record) => `${MARKER_PREFIX}${Buffer.from(JSON.stringify(record)).toString("base64url")} -->`;
 
 /** One task held by the EM seat, which reports to the PO seat, with a live run on it. */
@@ -38,7 +39,7 @@ function board({ comments: prior = [], status = "in_progress", labels = [], acti
     if (!m || ![card.id, card.identifier].includes(decodeURIComponent(m[1]))) return { ok: false, status: 404, text: async () => "" };
     if (init.method === "PATCH") {
       const body = JSON.parse(init.body);
-      writes.push({ runId: init.headers["x-paperclip-run-id"], body });
+      writes.push({ runId: init.headers["x-paperclip-run-id"], body, at: ++clock.t });
       if (body.status) card.status = body.status;
       if (body.comment) runs[0].status = "succeeded";
       return ok({});
@@ -55,7 +56,7 @@ function board({ comments: prior = [], status = "in_progress", labels = [], acti
 function action(answers = {}) {
   const calls = [];
   const escalate = async (args, opts) => {
-    calls.push({ args, opts });
+    calls.push({ args, opts, at: ++clock.t });
     return answers[args.operation] ?? { ok: true, operation: args.operation, holder: { id: "agent-po" }, replayed: false, hops: [] };
   };
   return { calls, escalate };
@@ -94,12 +95,12 @@ const RETURNED = `Only the Product Owner can rule on scope.\n${OUTCOME_MARK} ret
       hand_up: { ok: false, code: "paperclip_unavailable", message: "move: PATCH /issues/c-1 -> HTTP 403" } });
     await seat(b, async () => RETURNED, a.escalate).tick();
     assert.deepStrictEqual(a.calls.map((c) => c.args.operation), ["return", "hand_up"]);
-    assert.strictEqual(b.writes.length, 1, JSON.stringify(b.writes));
-    const [{ body, runId }] = b.writes;
+    const { body, runId } = b.writes.at(-1);
     assert.strictEqual(runId, "r1");
     assert.strictEqual(body.status, "blocked");
     assert.deepStrictEqual(body.unblockDescriptor.owner, { agentId: "agent-em" });
     assert.match(body.unblockDescriptor.action, /process\.escalate return: not_holder: the card is not with you/);
+    assert.match(body.unblockDescriptor.action, /process\.escalate hand_up: paperclip_unavailable: move: PATCH \/issues\/c-1 -> HTTP 403/);
     assert.match(body.comment, /- return: not_holder: the card is not with you/);
     assert.match(body.comment, /- hand_up: paperclip_unavailable: move: PATCH \/issues\/c-1 -> HTTP 403/);
     assert.strictEqual(b.card.assigneeAgentId, "agent-em");
@@ -129,8 +130,10 @@ const RETURNED = `Only the Product Owner can rule on scope.\n${OUTCOME_MARK} ret
     assert.deepStrictEqual(a.calls.map((c) => c.args.operation), ["resolve", "hand_up"]);
     assert.match(a.calls[1].args.attempted, /process\.escalate resolve: paperclip_unavailable: EXACT_BOARD_REFUSAL/);
     assert.strictEqual(a.calls[1].args.blocker, "Scope approved; resume the work.");
+    // Written before the fallback moves the card: a hand-off ends the run, and a write after it is refused.
     const step = b.writes.find((w) => w.body.unblockDescriptor && !w.body.status);
     assert.ok(step, JSON.stringify(b.writes));
+    assert.ok(step.at < a.calls[1].at, "the unblock step was written after the hand-off ended the run");
     assert.deepStrictEqual(step.body.unblockDescriptor.owner, { agentId: "agent-em" });
     assert.match(step.body.unblockDescriptor.action, /process\.escalate resolve: paperclip_unavailable: EXACT_BOARD_REFUSAL/);
   });
