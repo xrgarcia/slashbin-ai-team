@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { runEnvOnly, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, discordCarriers, paperclipCarriers, parityMcpEnv, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
+const { runEnvOnly, runEnvCredentials, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, discordCarriers, paperclipCarriers, parityMcpEnv, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -239,6 +239,17 @@ function settingsArgs({ board = false, tmpDir = null } = {}) {
 // board names its own.
 function connectorKeys() {
   return [...new Set(["PAPERCLIP_API_KEY", ...PAPERCLIP_BOARDS.map((b) => b.keyEnv)])];
+}
+// What a board run hands Codex for the shared escalate action (process MCP,
+// `x-paperclip-agent-key` / `x-paperclip-run-id`): the seat's own key and the
+// run it acts in. A server names them in `env_http_headers`; no command sees
+// the key (shellWithheld).
+const RUN_AGENT_KEY_ENV = "PAPERCLIP_RUN_AGENT_KEY";
+const RUN_ID_ENV = "PAPERCLIP_RUN_ID";
+// What a Codex run's commands never see: the connector keys, the run's own
+// seat key, and every credential the bot's run environment names.
+function shellWithheld() {
+  return [...new Set([...connectorKeys(), RUN_AGENT_KEY_ENV, ...runEnvCredentials(process.env.BOT_RUN_ENV)])];
 }
 // What a board run's session is made with (boardAccessKey): one made under
 // other access is never resumed. Every permission input counts — a parity run
@@ -2150,7 +2161,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
         packs,
         mcp: CODEX_MCP?.servers,
         strictMcp: Boolean(CODEX_MCP?.strict),
-        shellExclude: connectorKeys(),
+        shellExclude: shellWithheld(),
       }));
       reqLog.info({ ...(resumeSessionId ? { sessionId: resumeSessionId } : {}), ...attachmentLog }, resumeSessionId ? "Resuming Codex session" : "Starting fresh Codex session");
     } else if (resumeSessionId) {
@@ -2209,6 +2220,15 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       // …except where a server names one: Codex hands it to that server and
       // keeps it out of every command (shellExclude).
       if (!narrowBoard && CODEX_MCP) Object.assign(cleanEnv, opts.noBufferContext ? parityMcpEnv(CODEX_MCP.env) : CODEX_MCP.env);
+      // A board run acts on its card as this seat, in this run, through the
+      // shared escalate action: set after every scrub above and withheld from
+      // commands (shellWithheld). Never on a narrow run, which has no shell
+      // policy to keep the key out.
+      const run = opts.paperclipRun;
+      if (run?.runId && !narrowBoard && PERMISSION_MODE === "bypass" && process.env[run.keyEnv]) {
+        cleanEnv[RUN_AGENT_KEY_ENV] = process.env[run.keyEnv];
+        cleanEnv[RUN_ID_ENV] = run.runId;
+      }
     }
 
     delete cleanEnv.CLAUDECODE;
@@ -3270,10 +3290,11 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       // The first poll that reaches the board makes it a ready surface.
       onPoll: () => { if (surfaces.boards[tag] !== "ready") { setSurface("board", "ready", tag); pLog.info("Paperclip board ready — first poll succeeded"); } },
       // One session per task, so a reply on the task continues its conversation.
-      answer: (prompt, issue) => {
+      answer: (prompt, issue, { runId } = {}) => {
         const reply = replyCollector();
         return runClaude(prompt, `${tag}-${issue.identifier}`, pLog.child({ paperclipTask: issue.identifier }),
-          reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true, finalTextOnly: true })
+          reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true, finalTextOnly: true,
+            paperclipRun: runId ? { runId, keyEnv: board.keyEnv } : null })
           .then(() => reply.text());
       },
     });

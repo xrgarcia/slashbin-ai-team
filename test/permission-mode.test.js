@@ -5,7 +5,7 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { runEnvOnly, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, boardRunKind, withheldFromParityBoard } = require("../lib/permission-mode");
+const { runEnvOnly, runEnvCredentials, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, boardRunKind, withheldFromParityBoard } = require("../lib/permission-mode");
 const { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
@@ -575,7 +575,8 @@ check("a parity run withholds only the Discord credentials, and still sees no ot
   const restored = src.indexOf("if (!narrowBoard && CODEX_MCP) Object.assign(cleanEnv,");
   assert.ok(removed > 0 && restored > removed, "a Codex MCP server loses the connector key its config names");
   assert.ok(!/delete cleanEnv\.PAPERCLIP_API_KEY|delete cleanEnv\[keyEnv\]/.test(src), "a connector key is removed after the MCP env is put back");
-  assert.match(src, /shellExclude: connectorKeys\(\),/, "a bypass Codex session's commands can read the connector keys");
+  assert.match(src, /shellExclude: shellWithheld\(\),/, "a bypass Codex session's commands can read the connector keys");
+  assert.match(src, /\[\.\.\.connectorKeys\(\), RUN_AGENT_KEY_ENV,/, "the withheld set starts with the connector keys");
   // Other channels' conversation stays out of the prompt in every board policy.
   assert.match(src, /opts\.noBufferContext \? "" : buildContextPrompt/);
 });
@@ -601,6 +602,26 @@ check("a trailing * keeps a prefix", () => {
 check("the bot builds every run's environment through it", () => {
   const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
   assert.ok(/const cleanEnv = runEnvOnly\(process\.env, process\.env\.BOT_RUN_ENV\)/.test(bot));
+});
+
+check("a credential the run environment names is withheld from a Codex run's commands", () => {
+  // The harness's shell exclude list replaces the bot's own Codex config's,
+  // so Nova's bearer reached her shell until the harness withheld it (2026-10-15).
+  assert.deepStrictEqual(runEnvCredentials("NOVA_SLASHBIN_MCP_ROUTER_BEARER,GH_CONFIG_DIR,DOPPLER_CONFIG_DIR"), ["NOVA_SLASHBIN_MCP_ROUTER_BEARER"]);
+  assert.deepStrictEqual(runEnvCredentials("A_TOKEN, B_api_key ,C_SECRET,D_PASSWORD,NOVA_*"), ["A_TOKEN", "B_api_key", "C_SECRET", "D_PASSWORD"]);
+  assert.deepStrictEqual(runEnvCredentials(undefined), []);
+  const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.ok(/shellExclude: shellWithheld\(\)/.test(bot));
+  assert.ok(/runEnvCredentials\(process\.env\.BOT_RUN_ENV\)/.test(bot));
+});
+
+check("a Codex board run hands the escalate action its seat key and run, never to a command", () => {
+  const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.ok(/connectorKeys\(\), RUN_AGENT_KEY_ENV,/.test(bot), "the run's seat key is withheld from commands");
+  assert.ok(/paperclipRun: runId \? \{ runId, keyEnv: board\.keyEnv \} : null/.test(bot), "the board answer passes its run");
+  assert.ok(/run\?\.runId && !narrowBoard && PERMISSION_MODE === "bypass"/.test(bot), "never on a narrow run");
+  const paperclip = readFileSync(join(__dirname, "..", "lib", "paperclip.js"), "utf8");
+  assert.ok(/issue, \{ runId: postRun \}\)\)\.trim\(\)/.test(paperclip), "the task's run reaches the answer");
 });
 
 console.log(`\n${passes} passed, ${failures} failed\n`);
