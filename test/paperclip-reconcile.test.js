@@ -7,7 +7,7 @@ const assert = require("assert");
 const { mkdtempSync, readFileSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, statusSetter, reconcilable, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus, ESCALATION_LABELS, parseEscalateTo, paperclipBoards, UNBLOCK_ACTION } = require("../lib/paperclip");
+const { createPaperclipPoller, statusSetter, reconcilable, handedBack, movable, wakeStep, ESCALATION_KEPT, CARD_CHANGED, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus, ESCALATION_LABELS, parseEscalateTo, paperclipBoards, UNBLOCK_ACTION } = require("../lib/paperclip");
 
 let pass = 0, fail = 0;
 async function check(label, fn) {
@@ -57,6 +57,14 @@ function board(tasks) {
     if (path === "/agents/me/inbox-lite") {
       return ok([...issues.values()].filter((i) => i.assigneeAgentId === ME.id && !["done", "cancelled"].includes(i.status))
         .map((i) => ({ id: i.id, status: i.status, unresolvedBlockerIssueIds: blockedBy(i).filter((b) => b.status !== "done").map((b) => b.id) })));
+    }
+    // A comment taken down: kept on the thread, marked deleted, as Paperclip lists it.
+    const del = init?.method === "DELETE" && path.match(/^\/issues\/([^/]+)\/comments\/([^/]+)$/);
+    if (del) {
+      const c = comments.get(byName(decodeURIComponent(del[1]))?.id)?.find((x) => x.id === del[2]);
+      if (!c) return { ok: false, status: 404, text: async () => "" };
+      c.deletedAt = now();
+      return ok({});
     }
     const m = path.match(/^\/issues\/([^/]+)(\/[a-z]+)?$/);
     if (m && state.down?.has(decodeURIComponent(m[1]))) return { ok: false, status: 503, text: async () => "unavailable" };
@@ -154,9 +162,16 @@ function board(tasks) {
     activity.get(id).unshift({ action: "issue.updated", createdAt: now(), ...actor, details: { changes: { blockedByIssueIds: { from: i.blockedByIssueIds ?? [], to: waits } } } });
     i.blockedByIssueIds = waits;
   };
+  // Someone hands the task to another holder, its status unchanged.
+  const reassign = (id, actor, { agentId = null, userId = null }, extra = {}) => {
+    const i = issues.get(id);
+    activity.get(id).unshift({ action: "issue.updated", createdAt: now(), ...actor, ...extra, details: { changes: {
+      assigneeAgentId: { from: i.assigneeAgentId ?? null, to: agentId }, assigneeUserId: { from: i.assigneeUserId ?? null, to: userId } } } });
+    i.assigneeAgentId = agentId; i.assigneeUserId = userId;
+  };
   // The newest entry recorded in the same millisecond as the one before it.
   const tie = (id) => { const [a, b] = activity.get(id); a.createdAt = b.createdAt; };
-  return { fetch, writes, tries, wakes, state, issues, runs, comments, setStatus, reassert, rehold, relink, tie, now,
+  return { fetch, writes, tries, wakes, state, issues, runs, comments, setStatus, reassert, rehold, relink, reassign, tie, now,
     // Paperclip lost the run: it has ended, and the task is blocked.
     recover: (id, runId) => {
       activity.get(id).unshift({ action: "issue.execution_recovery_settled", createdAt: now(), actorType: "system", actorId: "execution-recovery", runId, details: { outcome: "blocked" } });
@@ -1029,18 +1044,25 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(c.issues.get("t-1").status, "blocked");
   });
 
-  await check("escalation: a blocked card without the label is still refused, and its note is not repeated on a re-wake (SLA-1335)", async () => {
+  await check("escalation: a blocked card without the label is still refused; every re-wake's run ends on its own note, and the card shows one (SLA-1335)", async () => {
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const b = board([task("t-1", { labels: [{ name: "Something else" }], runs: run("r1") })]);
     b.setStatus("t-1", "blocked", PERSON);
     b.issues.get("t-1").status = "in_progress";
-    await escalating(b, async () => assert.fail("worked a blocked card with no escalation label"), { stateFile }).tick();
-    assert.deepStrictEqual(b.writes.map((w) => w.body), [{ comment: HELD_NOTE }]);
-    for (const id of ["r2", "r3"]) {
-      rewake(b, id);
-      await escalating(b, async () => assert.fail("worked a held card on a re-wake"), { stateFile }).tick();
-    }
-    assert.strictEqual(b.writes.filter((w) => w.body.comment === HELD_NOTE).length, 1, JSON.stringify(b.writes));
+    const never = async () => assert.fail("worked a held card");
+    // r1 and r2 in one poller; r3 and r4 after a restart, from its state file.
+    const first = escalating(b, never, { stateFile });
+    await first.tick();
+    rewake(b, "r2"); await first.tick();
+    const restarted = escalating(b, never, { stateFile });
+    rewake(b, "r3"); await restarted.tick();
+    rewake(b, "r4"); await restarted.tick();
+    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body]), ["r1", "r2", "r3", "r4"].map((r) => [r, { comment: HELD_NOTE }]));
+    // Every waiter ended (the fake ends a run on its comment), and the card says it once.
+    assert.strictEqual(b.runs.get("t-1")[0].status, "succeeded", "the last re-wake's run was left open");
+    assert.deepStrictEqual(b.comments.get("t-1").filter((c) => !c.deletedAt).map((c) => [c.createdByRunId, c.body]), [["r4", HELD_NOTE]]);
+    const activity = JSON.parse(await (await b.fetch("https://board.example.com/api/issues/t-1/activity", {})).text());
+    assert.strictEqual(decidedStatus(b.issues.get("t-1").status, activity, ME.id), "blocked", "the hold was lost");
     // No labels configured: nothing is an escalation.
     const c = escalationBoard();
     await escalating(c, async () => assert.fail("an empty label list still escalated"), { escalationLabels: [] }).tick();
@@ -1059,7 +1081,9 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       await escalating(b, answer, { stateFile }).tick();
     }
     assert.strictEqual(n, 1, "an unchanged escalation ran again");
-    assert.ok(b.writes.slice(after).every((w) => !w.body.comment), JSON.stringify(b.writes.slice(after)));
+    // Each re-wake's run ends on a note of its own; the card shows the last.
+    assert.deepStrictEqual(b.writes.slice(after).filter((w) => w.body.comment).map((w) => [w.runId, w.body.comment]), [["r2", ESCALATION_KEPT], ["r3", ESCALATION_KEPT]]);
+    assert.deepStrictEqual(b.comments.get("t-1").filter((c) => !c.deletedAt && c.body === ESCALATION_KEPT).map((c) => c.createdByRunId), ["r3"]);
     assert.strictEqual(b.issues.get("t-1").status, "blocked", "a re-wake's checkout was left in progress");
     // A person comments: a new ask.
     b.comments.get("t-1").push({ id: "h2", authorAgentId: null, authorUserId: "user-1", createdAt: b.now(), body: "Any update?" });
@@ -1161,6 +1185,127 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(three.returnTo, null, "a broken return is not made, and not inherited");
     assert.deepStrictEqual(paperclipBoards({ PAPERCLIP_URL: "https://one.example.com", PAPERCLIP_API_KEY: "k" }).boards[0].escalation.labels, ["Needs EM ruling"]);
     assert.deepStrictEqual(paperclipBoards({ PAPERCLIP_URL: "https://one.example.com", PAPERCLIP_API_KEY: "k", PAPERCLIP_ESCALATION_LABELS: "" }).boards[0].escalation.labels, []);
+  });
+
+  // ---- One transition model: what a wake does, and who may move a stop ----
+
+  await check("wake model: every combination of the board and saved state comes to one step, and a held task is never worked", () => {
+    const flags = ["live", "owes", "answered", "escalated", "resumes", "held"];
+    for (let n = 0; n < 1 << flags.length; n++) {
+      const f = Object.fromEntries(flags.map((k, i) => [k, Boolean(n & (1 << i))]));
+      const step = wakeStep(f);
+      const name = JSON.stringify(f);
+      if (!f.live && !f.owes) assert.strictEqual(step, "post-older", name);
+      else if (f.owes) assert.strictEqual(step, "retry", name);
+      else if (f.escalated && f.answered) assert.strictEqual(step, "settle", name);
+      else if (f.answered && !f.resumes) assert.strictEqual(step, "acknowledge", name);
+      else assert.strictEqual(step, f.held ? "hold" : "work", name);
+      // Work runs only on a live run, on an ask not answered or resuming, on a task no one else holds.
+      if (step === "work") assert.ok(f.live && !f.owes && !f.held && (!f.answered || f.resumes) && !(f.escalated && f.answered), name);
+    }
+  });
+
+  const AGENT = { actorType: "agent", actorId: "agent-po" };
+  const STOP_ROWS = [
+    { name: "an agent blocks it and hands it to the bot in one write (`return`)", works: true,
+      setup: (b) => b.setStatus("t-1", "blocked", AGENT, { runId: "po-1" }, { assigneeAgentId: { from: "agent-po", to: ME.id } }) },
+    { name: "an agent blocks it, then hands it to the bot, as two entries under its run", works: true,
+      setup: (b) => { b.setStatus("t-1", "blocked", AGENT, { runId: "po-1" }); b.reassign("t-1", AGENT, { agentId: ME.id }, { runId: "po-1" }); } },
+    { name: "an agent blocks it, and later hands it to the bot", works: true,
+      setup: (b) => { b.setStatus("t-1", "blocked", AGENT, { runId: "po-1" }); b.reassign("t-1", AGENT, { agentId: ME.id }, { runId: "po-2" }); } },
+    { name: "a person blocks it and hands it to the bot (SLA-1337)", works: false,
+      setup: (b) => b.setStatus("t-1", "blocked", PERSON, {}, { assigneeAgentId: { from: "agent-po", to: ME.id } }) },
+    { name: "a person hands it to the bot, then an agent blocks it", works: false,
+      setup: (b) => { b.reassign("t-1", PERSON, { agentId: ME.id }); b.setStatus("t-1", "blocked", AGENT, { runId: "po-1" }); } },
+    { name: "an agent hands it to the bot, then a different agent blocks it", works: false,
+      setup: (b) => { b.reassign("t-1", AGENT, { agentId: ME.id }); b.setStatus("t-1", "blocked", { actorType: "agent", actorId: "agent-tl" }); } },
+    { name: "an agent cancels it and hands it to the bot", works: false, status: "cancelled",
+      setup: (b) => b.setStatus("t-1", "cancelled", PERSON, {}, { assigneeAgentId: { from: "agent-po", to: ME.id } }) },
+  ];
+
+  await check("stop model: a block an agent hands the bot is its work; a person's, or one an agent left on someone else's hand-off, stands", async () => {
+    for (const row of STOP_ROWS) {
+      const b = board([task("t-1", { assigneeAgentId: "agent-po", runs: run("r1") })]);
+      row.setup(b);
+      b.issues.get("t-1").assigneeAgentId = ME.id;
+      const activity = JSON.parse(await (await b.fetch("https://board.example.com/api/issues/t-1/activity", {})).text());
+      const setter = statusSetter(activity, row.status ?? "blocked", ME.id);
+      assert.strictEqual(movable(setter, activity, ME.id), row.works && !row.status, `${row.name}: movable`);
+      assert.strictEqual(handedBack(setter, activity, ME.id), row.works && !row.status, `${row.name}: handedBack`);
+      // Through a poller: worked and closed (and left closed), or held with its note.
+      if (row.status === "cancelled") continue;          // a cancelled task leaves the inbox
+      b.comments.get("t-1").push({ id: "po-ask", authorAgentId: "agent-po", createdAt: b.now(), body: "Only you can fix the skill path. Please do." });
+      b.issues.get("t-1").status = "in_progress";       // the wake's checkout, unrecorded
+      let ran = 0;
+      await poller(b, async () => { ran++; return "Fixed the skill path."; }).tick();
+      assert.strictEqual(ran, row.works ? 1 : 0, `${row.name}: ran ${ran} times`);
+      assert.strictEqual(b.issues.get("t-1").status, row.works ? "done" : "in_progress", `${row.name}: card`);
+      assert.deepStrictEqual(b.writes.map((w) => w.body.comment), [row.works ? "Fixed the skill path." : HELD_NOTE], `${row.name}: comments`);
+      assert.strictEqual(b.runs.get("t-1")[0].status, "succeeded", `${row.name}: the run was left open`);
+    }
+  });
+
+  await check("escalation: unchanged re-wakes end every run, in one poller and after a restart, and nothing is worked or sent again", async () => {
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const b = escalationBoard();
+    let n = 0;
+    const pings = [];
+    const opts = { stateFile, escalateTo: parseEscalateTo("user:user-avery|Avery"), onEscalate: async (p) => pings.push(p) };
+    const answer = async () => `Note ${++n}.\n${OUTCOME_MARK} blocked`;
+    const first = escalating(b, answer, opts);
+    await first.tick();
+    const after = b.writes.length;
+    rewake(b, "r2"); await first.tick();
+    rewake(b, "r3"); await first.tick();
+    const restarted = escalating(b, answer, opts);
+    rewake(b, "r4"); await restarted.tick();
+    rewake(b, "r5"); await restarted.tick();
+    assert.strictEqual(n, 1, "an unchanged escalation was worked again");
+    assert.deepStrictEqual(pings, [], "a re-wake sent a notification");
+    assert.deepStrictEqual(b.writes.slice(after).filter((w) => w.body.comment).map((w) => w.runId), ["r2", "r3", "r4", "r5"], JSON.stringify(b.writes.slice(after)));
+    assert.ok(b.writes.slice(after).every((w) => !("assigneeAgentId" in w.body) && (!w.body.status || w.body.status === "blocked")), JSON.stringify(b.writes.slice(after)));
+    assert.strictEqual(b.runs.get("t-1")[0].status, "succeeded", "the last re-wake's run was left open");
+    assert.strictEqual(b.issues.get("t-1").status, "blocked");
+    assert.strictEqual(b.issues.get("t-1").assigneeAgentId, ME.id);
+    assert.deepStrictEqual(b.comments.get("t-1").filter((c) => !c.deletedAt).map((c) => c.body), ["Two specs disagree on the retry window; needs a ruling.", "Note 1.", ESCALATION_KEPT]);
+  });
+
+  await check("escalation: an answer never overwrites a move or a hand-off made while it ran", async () => {
+    const rows = [
+      { name: "handed to another seat, still blocked", change: (b) => b.reassign("t-1", PERSON, { agentId: "agent-po" }), status: "blocked", holder: "agent-po" },
+      { name: "handed to a person", change: (b) => b.reassign("t-1", PERSON, { userId: "user-avery" }), status: "blocked", holder: "user-avery" },
+      { name: "moved to todo by a person", change: (b) => b.setStatus("t-1", "todo", PERSON), status: "todo", holder: ME.id },
+      { name: "moved to todo and handed on", change: (b) => { b.setStatus("t-1", "todo", PERSON); b.reassign("t-1", PERSON, { agentId: "agent-po" }); }, status: "todo", holder: "agent-po" },
+    ];
+    for (const row of rows) for (const way of ["down", "up"]) {
+      const b = escalationBoard();
+      const pings = [];
+      const answer = async () => { row.change(b); return way === "up" ? `Need a call.\n${OUTCOME_MARK} escalate` : "Ruled: 30 s."; };
+      await escalating(b, answer, { escalateTo: parseEscalateTo("user:user-boss|Boss"), onEscalate: async (p) => pings.push(p) }).tick();
+      const t = b.issues.get("t-1");
+      const name = `${row.name}, answered ${way}`;
+      assert.strictEqual(t.assigneeAgentId ?? t.assigneeUserId, row.holder, `${name}: holder overwritten`);
+      assert.ok(b.writes.every((w) => !("assigneeAgentId" in w.body)), `${name}: ${JSON.stringify(b.writes)}`);
+      const activity = JSON.parse(await (await b.fetch("https://board.example.com/api/issues/t-1/activity", {})).text());
+      assert.strictEqual(decidedStatus(t.status, activity, ME.id), row.status, `${name}: status overwritten`);
+      assert.deepStrictEqual(pings, [], `${name}: a person was told of a hand-off that did not happen`);
+      const said = b.writes.filter((w) => w.body.comment);
+      assert.strictEqual(said.length, 1, `${name}: ${JSON.stringify(b.writes)}`);
+      assert.strictEqual(said[0].runId, "r1");
+      assert.ok(said[0].body.comment.endsWith(CARD_CHANGED), `${name}: ${said[0].body.comment}`);
+    }
+  });
+
+  await check("a task's answer never closes or hands back a task given to someone else while it ran", async () => {
+    for (const [name, reply] of [["done", "Finished."], ["return", `Only you can do this.\n${OUTCOME_MARK} return`]]) {
+      const b = board([task("t-1", { runs: run("r1"), createdByAgentId: "agent-po" })]);
+      await poller(b, async () => { b.reassign("t-1", PERSON, { userId: "user-avery" }); return reply; }).tick();
+      const t = b.issues.get("t-1");
+      assert.strictEqual(t.assigneeUserId, "user-avery", `${name}: holder overwritten`);
+      assert.strictEqual(t.status, "in_progress", `${name}: closed over the hand-off`);
+      assert.deepStrictEqual(b.writes.map((w) => Object.keys(w.body)), [["comment"]], `${name}: ${JSON.stringify(b.writes)}`);
+      assert.strictEqual(b.runs.get("t-1")[0].status, "succeeded", `${name}: the run was left open`);
+    }
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);
