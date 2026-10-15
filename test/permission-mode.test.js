@@ -5,7 +5,7 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, boardRunKind, withheldFromParityBoard } = require("../lib/permission-mode");
+const { runEnvOnly, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, boardRunKind, withheldFromParityBoard } = require("../lib/permission-mode");
 const { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
@@ -578,6 +578,29 @@ check("a parity run withholds only the Discord credentials, and still sees no ot
   assert.match(src, /shellExclude: connectorKeys\(\),/, "a bypass Codex session's commands can read the connector keys");
   // Other channels' conversation stays out of the prompt in every board policy.
   assert.match(src, /opts\.noBufferContext \? "" : buildContextPrompt/);
+});
+
+console.log("\nRun environment — BOT_RUN_ENV");
+
+check("unset passes the whole environment on, as before", () => {
+  const env = { PATH: "/bin", EM_GITHUB_TOKEN: "x" };
+  assert.deepStrictEqual(runEnvOnly(env, undefined), env);
+  assert.deepStrictEqual(runEnvOnly(env, " "), env);
+});
+
+check("named keeps the basics and the names, and nothing else", () => {
+  const env = { PATH: "/bin", HOME: "/h", LC_ALL: "C", XDG_RUNTIME_DIR: "/r", NOVA_BEARER: "n", NOVA_OTHER: "o",
+    EM_GITHUB_TOKEN: "g", PROD_STRIPE_SRE_KEY: "s", PAPERCLIP_API_KEY: "p", DOPPLER_TOKEN: "d" };
+  assert.deepStrictEqual(Object.keys(runEnvOnly(env, "NOVA_BEARER")).sort(), ["HOME", "LC_ALL", "NOVA_BEARER", "PATH", "XDG_RUNTIME_DIR"]);
+});
+
+check("a trailing * keeps a prefix", () => {
+  assert.deepStrictEqual(Object.keys(runEnvOnly({ NOVA_A: "1", NOVA_B: "2", EM_A: "3" }, "NOVA_*")).sort(), ["NOVA_A", "NOVA_B"]);
+});
+
+check("the bot builds every run's environment through it", () => {
+  const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.ok(/const cleanEnv = runEnvOnly\(process\.env, process\.env\.BOT_RUN_ENV\)/.test(bot));
 });
 
 console.log(`\n${passes} passed, ${failures} failed\n`);

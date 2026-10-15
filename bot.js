@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, discordCarriers, paperclipCarriers, parityMcpEnv, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
+const { runEnvOnly, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, discordCarriers, paperclipCarriers, parityMcpEnv, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -2161,8 +2161,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       reqLog.info(attachmentLog, "Starting fresh Claude session");
     }
 
-    // Build a clean env without Claude nesting vars
-    const cleanEnv = { ...process.env };
+    // Build a clean env without Claude nesting vars. A bot that names its run
+    // environment (BOT_RUN_ENV) passes on only that (runEnvOnly).
+    const cleanEnv = runEnvOnly(process.env, process.env.BOT_RUN_ENV);
 
     // Publish the RESOLVED paths. This is what stops harness-owned skills from
     // rotting: a skill that reads $BOT_BUFFER_FILE cannot go stale, while one
