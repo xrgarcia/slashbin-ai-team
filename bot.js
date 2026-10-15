@@ -2220,6 +2220,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     if (narrowBoard || PERMISSION_MODE === "restricted") cleanEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";
     // The Paperclip connector keys leave every run, Discord's included…
     for (const name of connectorKeys()) delete cleanEnv[name];
+    // …and so does the bridge's own bearer for the escalate action, on every
+    // runtime: only the bridge calls it, never a run (SLA-1493).
+    for (const name of escalateBearer()) delete cleanEnv[name];
     if (CODEX) {
       // Skills name their scripts under $CLAUDE_PLUGIN_ROOT, which Claude sets
       // for a plugin; Codex has no plugin folder, so the harness sets it.

@@ -167,6 +167,10 @@ const RETURNED = `Only the Product Owner can rule on scope.\n${OUTCOME_MARK} ret
   await check("the action's bearer never reaches a run, and only the first board uses it", () => {
     const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
     assert.match(bot, /function shellWithheld\(\)[\s\S]{0,200}\.\.\.escalateBearer\(\)/);
+    // Every runtime's environment loses it before the runtime branches, not only Codex's commands.
+    const scrub = bot.indexOf("for (const name of escalateBearer()) delete cleanEnv[name];");
+    assert.ok(scrub > 0 && scrub < bot.indexOf("if (CODEX) {", bot.indexOf("for (const name of connectorKeys()) delete cleanEnv[name];")),
+      "the bearer leaves every run's environment, Claude's included");
     assert.match(bot, /escalate: !board\.id && process\.env\.PAPERCLIP_ESCALATE_URL/);
   });
 
