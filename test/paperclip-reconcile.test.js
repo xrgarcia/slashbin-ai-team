@@ -7,7 +7,7 @@ const assert = require("assert");
 const { mkdtempSync, readFileSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, statusSetter, reconcilable, handedBack, movable, wakeStep, ESCALATION_KEPT, CARD_CHANGED, NEWER_ASK, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus, ESCALATION_LABELS, parseEscalateTo, paperclipBoards, UNBLOCK_ACTION } = require("../lib/paperclip");
+const { createPaperclipPoller, decisionKind, lastDecision, personSince, markAt, BURST_MS, statusSetter, reconcilable, handedBack, movable, wakeStep, ESCALATION_KEPT, CARD_CHANGED, NEWER_ASK, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus, ESCALATION_LABELS, parseEscalateTo, paperclipBoards, UNBLOCK_ACTION } = require("../lib/paperclip");
 
 let pass = 0, fail = 0;
 async function check(label, fn) {
@@ -118,7 +118,7 @@ function board(tasks) {
         const c = { id: `c${writes.length}`, authorAgentId: ME.id, createdAt: at, body: body.comment, createdByRunId: runId };
         comments.get(i.id).push(c);
         // Paperclip records each comment's posting too, in the record's order.
-        activity.get(i.id).unshift({ action: "issue.comment_added", createdAt: c.createdAt, actorType: "agent", actorId: ME.id, runId, details: { commentId: c.id } });
+        activity.get(i.id).unshift({ action: "issue.comment_added", createdAt: c.createdAt, actorType: "agent", actorId: ME.id, runId, details: { commentId: c.id, bodySnippet: c.body.slice(0, 120) } });
       }
       // Whatever lands just after this write, before the bot looks again.
       if (state.afterWrite && body.status) { const f = state.afterWrite; delete state.afterWrite; f(i); }
@@ -162,13 +162,16 @@ function board(tasks) {
     activity.get(id).unshift({ action: "issue.updated", createdAt: now(), ...actor, details: { changes: { blockedByIssueIds: { from: i.blockedByIssueIds ?? [], to: waits } } } });
     i.blockedByIssueIds = waits;
   };
-  // Someone hands the task to another holder, its status unchanged.
+  // Someone hands the task to another holder, its status unchanged. Paperclip
+  // bumps statusVersion on every change of holder (services/issues.ts:10950).
   const reassign = (id, actor, { agentId = null, userId = null }, extra = {}) => {
     const i = issues.get(id);
-    activity.get(id).unshift({ action: "issue.updated", createdAt: now(), ...actor, ...extra, details: { changes: {
+    activity.get(id).unshift({ action: "issue.updated", createdAt: now(), ...actor, ...extra, details: { changes: { statusVersion: { from: 1, to: 2 },
       assigneeAgentId: { from: i.assigneeAgentId ?? null, to: agentId }, assigneeUserId: { from: i.assigneeUserId ?? null, to: userId } } } });
     i.assigneeAgentId = agentId; i.assigneeUserId = userId;
   };
+  // Time passes on the board's clock: every record after this is `ms` later.
+  const skew = (ms) => { last = Math.max(Date.now(), last) + ms; };
   // The newest entry recorded in the same millisecond as the one before it.
   const tie = (id) => { const [a, b] = activity.get(id); a.createdAt = b.createdAt; };
   // Any write as Paperclip records it, given whole: `details` is { status?, source?, changes }.
@@ -184,10 +187,10 @@ function board(tasks) {
   const say = (id, actor, body) => {
     const c = { id: `u${++said}`, authorAgentId: actor.actorType === "agent" ? actor.actorId : null, authorUserId: actor.actorType === "user" ? actor.actorId : null, createdAt: now(), body };
     comments.get(id).push(c);
-    activity.get(id).unshift({ action: "issue.comment_added", createdAt: c.createdAt, ...actor, details: { commentId: c.id } });
+    activity.get(id).unshift({ action: "issue.comment_added", createdAt: c.createdAt, ...actor, details: { commentId: c.id, bodySnippet: body.slice(0, 120) } });
     return c;
   };
-  return { fetch, writes, tries, wakes, state, issues, runs, comments, setStatus, reassert, rehold, relink, reassign, tie, now, record, edit, say,
+  return { fetch, writes, tries, wakes, state, issues, runs, comments, activity, setStatus, reassert, rehold, relink, reassign, tie, skew, now, record, edit, say,
     // Paperclip lost the run: it has ended, and the task is blocked.
     recover: (id, runId) => {
       activity.get(id).unshift({ action: "issue.execution_recovery_settled", createdAt: now(), actorType: "system", actorId: "execution-recovery", runId, details: { outcome: "blocked" } });
@@ -646,20 +649,30 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     await poller(b, async () => assert.fail("worked a mirrored task over a person's stop"), { externalWriter: mirror }).tick();
   });
 
-  // The Foreman's mirror hands a card on in two writes (slashbin-ai-foreman
+  // The Foreman's mirror hands a card on in a burst (slashbin-ai-foreman
   // mirror.ts onBlocked): move() — blocked, the new holder, the unblock step
-  // and the stage label, one PATCH — then note(), which finds the card blocked
-  // and restates blocked with its comment. Both carry a board user's key.
+  // (its action is the note's text) and the stage label, one PATCH — then
+  // note(), which finds the card blocked and restates blocked with its comment.
+  // Released from a session hold (onSession), the move is followed by the
+  // session's summary, another commented restatement, then the deferred note.
+  // All carry a board user's key — one Ray's own writes may share.
   const SYNC = { actorType: "user", actorId: "user-sync" };
-  const STAGE_STEP = { owner: { agentId: ME.id }, action: "Rule on the retry window, then reply on this task." };
   const SYNC_NOTE = "Blocked at review: two specs disagree on the retry window.";
-  const syncHandsOn = (b, { was = "in_progress", split = false, sameStep = false, between = null } = {}) => {
+  const STAGE_STEP = { owner: { agentId: ME.id }, action: SYNC_NOTE };
+  const SUMMARY = "Session finished: review ran 4 min, 2 findings.";
+  // A commented restatement as Paperclip records it: the write, then its comment.
+  const restate = (b, actor, text) => {
+    b.record("t-1", actor, { status: "blocked", source: "comment", changes: { statusVersion: { from: 2, to: 3 } } });
+    b.say("t-1", actor, text);
+  };
+  const syncHandsOn = (b, { was = "in_progress", split = false, sameStep = false, session = false, between = null } = {}) => {
     const t = b.issues.get("t-1");
     if (was === "blocked") {
       // Blocked already, by the mirror, for another seat's stage.
-      b.setStatus("t-1", "blocked", SYNC, {}, { assigneeAgentId: { from: t.assigneeAgentId, to: "agent-tl" } });
+      const desc = sameStep ? STAGE_STEP : { owner: { agentId: "agent-tl" }, action: "Review it." };
+      b.setStatus("t-1", "blocked", SYNC, {}, { assigneeAgentId: { from: t.assigneeAgentId, to: "agent-tl" }, unblockDescriptor: { from: null, to: desc } });
       t.assigneeAgentId = "agent-tl";
-      t.unblockDescriptor = sameStep ? STAGE_STEP : { owner: { agentId: "agent-tl" }, action: "Review it." };
+      t.unblockDescriptor = desc;
     }
     const hand = { assigneeAgentId: { from: t.assigneeAgentId ?? null, to: ME.id } };
     const step = t.unblockDescriptor === STAGE_STEP ? {} : { unblockDescriptor: { from: t.unblockDescriptor ?? null, to: STAGE_STEP } };
@@ -672,25 +685,38 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     } else b.setStatus("t-1", "blocked", SYNC, {}, { ...hand, ...step, labelIds: { from: [], to: ["l-rule"] } });
     t.assigneeAgentId = ME.id; t.unblockDescriptor = STAGE_STEP;
     between?.(b);
+    // The session's summary first, when a session held the card.
+    if (session) restate(b, SYNC, SUMMARY);
     // note(): the row reads blocked, so its comment rides on a write restating blocked.
-    b.record("t-1", SYNC, { status: "blocked", source: "comment", changes: { statusVersion: { from: 2, to: 3 } } });
-    b.say("t-1", SYNC, SYNC_NOTE);
+    restate(b, SYNC, SYNC_NOTE);
     t.status = "in_progress";                          // the wake's checkout, unrecorded
   };
 
-  await check("the Foreman's hand-off — its move, then the note restating blocked — is worked once; a person's hold after it still stands", async () => {
+  await check("the Foreman's hand-off — its move, then the note restating blocked — is worked once; a hold after it stands, whoever's key made it", async () => {
     const mirror = /^source: \S+#\d+$/;
     const rows = [
       { name: "a card in progress, blocked and handed on", works: true },
       { name: "a card blocked already for another seat", works: true, opts: { was: "blocked" } },
       { name: "a card blocked already, its unblock step unchanged (the record carries the hand-off alone)", works: true, opts: { was: "blocked", sameStep: true } },
       { name: "status and holder recorded as two entries", works: true, opts: { split: true } },
+      { name: "released from a session hold: the move, the session's summary, then the note", works: true, opts: { session: true } },
+      { name: "released from a session hold, status and holder as two entries", works: true, opts: { session: true, split: true } },
       { name: "a person reasserts the block after it", works: false, after: (b) => b.reassert("t-1", PERSON) },
       { name: "a person restates blocked after it, changing nothing else", works: false,
         after: (b) => b.record("t-1", PERSON, { status: "blocked", changes: { statusVersion: { from: 3, to: 4 } } }) },
       { name: "a person blocks it between the move and the note", works: false, opts: { between: (b) => b.reassert("t-1", PERSON) } },
       { name: "a person holds it before the hand-off, which then hands it on", works: true,
         before: (b) => { b.setStatus("t-1", "blocked", PERSON); b.issues.get("t-1").status = "in_progress"; } },
+      // The same key as the hand-off's writer (round 4): a hold all the same.
+      { name: "the hand-off's own key restates blocked after it, changing nothing else", works: false,
+        after: (b) => b.record("t-1", SYNC, { status: "blocked", changes: { statusVersion: { from: 3, to: 4 } } }) },
+      { name: "the hand-off's own key reasserts the block, naming what unblocks it", works: false, after: (b) => b.reassert("t-1", SYNC) },
+      { name: "the hand-off's own key restates blocked with a comment of its own, after the burst", works: false,
+        after: (b) => { b.skew(BURST_MS + 1000); restate(b, SYNC, "Holding this until Monday."); } },
+      { name: "the hand-off's own key restates blocked between the move and the note", works: false,
+        opts: { between: (b) => b.record("t-1", SYNC, { status: "blocked", changes: { statusVersion: { from: 2, to: 3 } } }) } },
+      { name: "the hand-off's own key repeats the note's text, after the burst", works: false,
+        after: (b) => { b.skew(BURST_MS + 1000); restate(b, SYNC, SYNC_NOTE); } },
     ];
     for (const label of [false, true]) for (const row of rows) {
       const name = `${row.name}${label ? ", labelled an escalation" : ""}`;
@@ -1284,11 +1310,11 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       const name = JSON.stringify(f);
       if (!f.live && !f.owes) assert.strictEqual(step, "post-older", name);
       else if (f.owes) assert.strictEqual(step, "retry", name);
-      else if (f.escalated && f.answered) assert.strictEqual(step, "settle", name);
+      else if (f.escalated && f.answered && !f.resumes) assert.strictEqual(step, "settle", name);
       else if (f.answered && !f.resumes) assert.strictEqual(step, "acknowledge", name);
       else assert.strictEqual(step, f.held ? "hold" : "work", name);
       // Work runs only on a live run, on an ask not answered or resuming, on a task no one else holds.
-      if (step === "work") assert.ok(f.live && !f.owes && !f.held && (!f.answered || f.resumes) && !(f.escalated && f.answered), name);
+      if (step === "work") assert.ok(f.live && !f.owes && !f.held && (!f.answered || f.resumes) && !(f.escalated && f.answered && !f.resumes), name);
     }
   });
 
@@ -1534,10 +1560,260 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       assert.strictEqual(holderNow, holder, `${name}: not handed on`);
       assert.strictEqual(t.status, "blocked", `${name}: the card left blocked`);
       assert.strictEqual(pings.length, way === "up" ? 1 : 0, `${name}: pings ${JSON.stringify(pings)}`);
-      if (way === "up") assert.strictEqual(pings[0].ask, `Need a call 1.`, `${name}: ${JSON.stringify(pings)}`);
+      // The person is asked the latest attempt's question, not the first line of the post (round 4).
+      if (way === "up") assert.strictEqual(pings[0].ask, `Need a call ${runs}.`, `${name}: ${JSON.stringify(pings)}`);
       // Re-woken unchanged: settled, never worked or handed again.
       rewake(b, "r2");
       await escalating(b, async () => assert.fail(`${name}: worked again`), opts).tick();
+    }
+  });
+
+  // ---- docs/board-decisions.md: every row of its tables is a case here ----
+
+  // The rows of one table of the model (`| a1 |`, `| p1 |`, `| r1 |`), each as its cells.
+  const DOC = readFileSync(join(__dirname, "..", "docs", "board-decisions.md"), "utf8");
+  const rowsOf = (prefix) => DOC.split("\n").filter((l) => new RegExp(`^\\| ${prefix}\\d+b? \\|`).test(l))
+    .map((l) => l.split("|").slice(1, -1).map((c) => c.trim()));
+  // A table's builders and its rows must name the same cases: a row without a
+  // builder, or a builder without a row, fails here.
+  const sameIds = (prefix, builders) => assert.deepStrictEqual(Object.keys(builders).sort(), rowsOf(prefix).map((r) => r[0]).sort(), `docs/board-decisions.md table ${prefix} and its builders differ`);
+
+  await check("table (a): every write's kind, whether it is the status decision, and whether it is a person's change — as the doc's rows say", () => {
+    const BOT = { actorType: "agent", actorId: ME.id };
+    const OTHER = { actorType: "user", actorId: "user-2" };
+    const STEP = { owner: { agentId: ME.id }, action: SYNC_NOTE };
+    // The Foreman's move: blocked, handed to the bot, its unblock step the note's text.
+    const move = (b) => b.setStatus("t-1", "blocked", SYNC, {}, { assigneeAgentId: { from: "agent-foreman", to: ME.id }, unblockDescriptor: { from: null, to: STEP } });
+    const bare = (b, actor) => b.record("t-1", actor, { status: "blocked", changes: { statusVersion: { from: 2, to: 3 } } });
+    // Each builds the record and gives the index (newest first) of the write the row is about.
+    const A = {
+      a1: (b) => { b.setStatus("t-1", "blocked", PERSON); return 0; },
+      a2: (b) => { move(b); return 0; },
+      a3: (b) => { b.setStatus("t-1", "blocked", PERSON); bare(b, PERSON); return 0; },
+      a4: (b) => { move(b); bare(b, PERSON); return 0; },
+      a5: (b) => { move(b); restate(b, SYNC, SYNC_NOTE); return 1; },
+      a5b: (b) => { move(b); restate(b, SYNC, SUMMARY); restate(b, SYNC, SYNC_NOTE); return 3; },
+      a6: (b) => { move(b); restate(b, SYNC, SYNC_NOTE); b.skew(BURST_MS + 1000); restate(b, SYNC, "Holding this until Monday."); return 1; },
+      a7: (b) => { move(b); bare(b, SYNC); restate(b, SYNC, SYNC_NOTE); return 1; },
+      a8: (b) => { move(b); restate(b, PERSON, SYNC_NOTE); return 1; },
+      a9: (b) => { move(b); b.record("t-1", SYNC, { status: "blocked", source: "comment", changes: { statusVersion: { from: 2, to: 3 } } }); return 0; },
+      a10: (b) => { move(b); b.rehold("t-1", PERSON, ["t-2"], { owner: { userId: PERSON.actorId }, action: "Wait on T-2." }); return 0; },
+      a11: (b) => { b.setStatus("t-1", "todo", SYNC); b.relink("t-1", PERSON, ["t-2"]); return 0; },
+      a12: (b) => { move(b); b.reassign("t-1", PERSON, { agentId: "agent-po" }); return 0; },
+      a13: (b) => { move(b); b.reassign("t-1", PERSON, { agentId: "agent-po" }); b.reassign("t-1", OTHER, { agentId: ME.id }); return 1; },
+      a14: (b) => { b.setStatus("t-1", "blocked", PERSON); bare(b, BOT); return 0; },
+      a15: (b) => { b.setStatus("t-1", "in_progress", BOT); b.recover("t-1", "r1"); return 0; },
+      a16: (b) => { b.setStatus("t-1", "blocked", PERSON); b.recover("t-1", "r1"); return 0; },
+      a17: (b) => { move(b); b.edit("t-1", PERSON, "title", "Retry window, revised"); return 0; },
+    };
+    sameIds("a", A);
+    for (const [id, , writer, kind, decides, persons] of rowsOf("a")) {
+      const b = board([task("t-1", { assigneeAgentId: "agent-foreman", runs: run("r1") }), task("t-2", { status: "todo" })]);
+      const i = A[id](b);
+      const all = b.activity.get("t-1");
+      const name = `${id} (${writer})`;
+      assert.strictEqual(decisionKind(all, i, ME.id), kind, `${name}: kind`);
+      assert.strictEqual(lastDecision(all, ME.id)?.w === all[i] ? "yes" : "no", decides, `${name}: status decision`);
+      assert.strictEqual(personSince(all, markAt(all, i + 1), ME.id) ? "yes" : "no", persons, `${name}: a person's change since the mark`);
+    }
+  });
+
+  // An escalation worked through the lifecycle: `answers` are the model's
+  // replies in turn (a function gets the prompt and the board), `opts` the poller's.
+  const T2 = () => task("t-2", { status: "todo", assigneeAgentId: "agent-po" });
+  const worked = async ({ answers, opts = {}, extra = [], fetch } = {}) => {
+    const b = escalationBoard();
+    for (const t of extra) { b.issues.set(t.id, { createdAt: "2026-01-01T00:00:00Z", title: t.id, description: "", ...t }); b.activity.set(t.id, []); b.comments.set(t.id, []); b.runs.set(t.id, []); }
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const prompts = [], pings = [];
+    const answer = async (p) => { prompts.push(p); const a = answers[prompts.length - 1]; return typeof a === "function" ? a(b, p) : a; };
+    const o = { stateFile, escalateTo: parseEscalateTo("user:user-boss|Boss"), onEscalate: async (p) => pings.push(p), ...opts };
+    await escalating(fetch ? { ...b, fetch: fetch(b) } : b, answer, fetch ? { ...o, fetch: fetch(b) } : o).tick();
+    const t = b.issues.get("t-1");
+    const said = b.writes.filter((w) => w.body.comment);
+    return { b, prompts, pings, stateFile, answer, o, t, said, holder: t.assigneeAgentId ?? t.assigneeUserId };
+  };
+  const up = (s) => `${s}\n${OUTCOME_MARK} escalate`;
+  // A→B→A: the title edited while the first attempt runs, and edited back while the second does.
+  const titleTo = (b, title) => b.edit("t-1", PERSON, "title", title);
+  const aba = (first, second, third) => [(b) => { titleTo(b, "Retry window B"); return first; }, (b) => { titleTo(b, "t-1"); return second; }, third];
+
+  await check("table r: the latest attempt's outcome decides the write, the holder after, and who is told — as the doc's rows say", async () => {
+    const R = {
+      r1: async () => {
+        const w = await worked({ answers: ["Ruled: 30 s."] });
+        assert.strictEqual(w.holder, "agent-foreman");
+        assert.deepStrictEqual(w.pings, []);
+      },
+      r2: async () => {
+        // The post carries the earlier attempt's answer first; the person is asked the latest's question.
+        const w = await worked({ answers: [(b) => { b.say("t-1", PERSON, "Refunds too?"); return up("Old question 1."); }, up("Need a call on refunds.")] });
+        assert.strictEqual(w.holder, "user-boss");
+        assert.match(w.said[0].body.comment, /^Old question 1\./);
+        assert.deepStrictEqual(w.pings.map((p) => p.ask), ["Need a call on refunds."]);
+      },
+      r3: async () => {
+        const w = await worked({ answers: [up("Need a call.")], opts: { escalateTo: parseEscalateTo("agent:Product Owner") } });
+        assert.strictEqual(w.holder, "agent-po");
+        assert.deepStrictEqual(w.pings, []);
+      },
+      r4: async () => {
+        const w = await worked({ answers: [up("Need a call.")], opts: { escalateTo: null } });
+        assert.strictEqual(w.holder, ME.id);
+        assert.deepStrictEqual(w.said.map((x) => Object.keys(x.body)), [["comment"]]);
+      },
+      r5: async () => {
+        const w = await worked({ answers: [`Cannot rule.\n${OUTCOME_MARK} blocked`] });
+        assert.strictEqual(w.holder, ME.id);
+        assert.strictEqual(w.t.status, "blocked");
+        assert.deepStrictEqual(w.said.map((x) => Object.keys(x.body)), [["comment"]]);
+      },
+      r6: async () => {
+        const w = await worked({ answers: [`Need T-2 first.\n${OUTCOME_MARK} blocked on T-2`], extra: [T2()] });
+        assert.deepStrictEqual(w.said.map((x) => x.body), [{ comment: "Need T-2 first.", blockedByIssueIds: ["t-2"] }], "linked in the one write, the unblock step untouched");
+        assert.strictEqual(w.holder, ME.id);
+        assert.strictEqual(w.t.status, "blocked");
+        // An unchanged re-wake while T-2 is open settles; T-2 done, the next wake resumes it.
+        rewake(w.b, "r2");
+        await escalating(w.b, w.answer, w.o).tick();
+        assert.strictEqual(w.prompts.length, 1, "worked again before T-2 was done");
+        w.b.issues.get("t-2").status = "done";
+        rewake(w.b, "r3");
+        w.b.writes.length = 0;
+        await escalating(w.b, async (p) => { w.prompts.push(p); return "Ruled: 30 s."; }, w.o).tick();
+        assert.strictEqual(w.prompts.length, 2, "not resumed when T-2 was done");
+        assert.match(w.prompts[1], /This card waited on T-2; it is now done/);
+        assert.deepStrictEqual(w.b.issues.get("t-1").blockedByIssueIds, [], "the done link was not cleared");
+        assert.strictEqual(w.b.issues.get("t-1").assigneeAgentId, "agent-foreman", "the resumed answer did not route");
+        assert.match(w.b.writes.find((x) => x.body.comment).body.comment, /^Resuming: T-2, which this card waited on, is done\.\n\nRuled/);
+        // Resumed once: a later wake settles.
+        rewake(w.b, "r4");
+        w.b.issues.get("t-1").assigneeAgentId = ME.id;
+        await escalating(w.b, async () => assert.fail("resumed twice"), w.o).tick();
+      },
+      r7: async () => {
+        // Done at posting: T-2 finishes while the answer that waits on it is made.
+        const w = await worked({ extra: [T2()], answers: [(b) => { b.issues.get("t-2").status = "done"; return `Need T-2 first.\n${OUTCOME_MARK} blocked on T-2`; }, "Ruled now that T-2 is in: 30 s."] });
+        assert.strictEqual(w.prompts.length, 2, "did not go on");
+        assert.match(w.prompts[1], /already done/);
+        assert.strictEqual(w.holder, "agent-foreman", "the go-on's outcome did not route");
+        assert.deepStrictEqual(w.said.map((x) => x.runId), ["r1"]);
+        assert.match(w.said[0].body.comment, /Need T-2 first\.\n\nResuming: T-2, which this card waited on, is already done\.\n\nRuled now/);
+        // Once per attempt: a go-on that is blocked on done tasks again is posted, not run a third time.
+        const v = await worked({ extra: [T2({})], answers: [(b) => { b.issues.get("t-2").status = "done"; return `Need T-2.\n${OUTCOME_MARK} blocked on T-2`; }, `Still need T-2.\n${OUTCOME_MARK} blocked on T-2`] });
+        assert.strictEqual(v.prompts.length, 2);
+        assert.strictEqual(v.holder, ME.id);
+      },
+      r8: async () => {
+        const w = await worked({ answers: [`Need NOPE-1.\n${OUTCOME_MARK} blocked on NOPE-1`] });
+        assert.deepStrictEqual(w.said.map((x) => x.body), [{ comment: "Need NOPE-1." }]);
+        assert.strictEqual(w.holder, ME.id);
+      },
+    };
+    sameIds("r", R);
+    for (const [id] of rowsOf("r")) {
+      try { await R[id](); } catch (e) { e.message = `${id}: ${e.message}`; throw e; }
+    }
+  });
+
+  await check("table p: every phase of the lifecycle keeps its guarantee — as the doc's rows say", async () => {
+    const P = {
+      p1: async () => {
+        const statuses = [];
+        const w = await worked({ answers: [(b) => { statuses.push(b.issues.get("t-1").status); return "Ruled."; }] });
+        assert.deepStrictEqual(w.b.writes[0].body, KEEP_BLOCKED);
+        assert.deepStrictEqual(statuses, ["blocked"]);
+      },
+      p2: async () => {
+        // work, then settle on an unchanged re-wake; retry posts an owed answer without running it again.
+        const w = await worked({ answers: [`Cannot rule.\n${OUTCOME_MARK} blocked`] });
+        rewake(w.b, "r2");
+        await escalating(w.b, async () => assert.fail("worked a settled card"), w.o).tick();
+        assert.strictEqual(w.b.writes.filter((x) => x.body.comment).at(-1).body.comment, ESCALATION_KEPT);
+        let fails = 1;
+        const flaky = (b) => async (u, init) => (init?.method === "PATCH" && JSON.parse(init.body).comment && fails-- > 0 ? { ok: false, status: 502, text: async () => "bad gateway" } : b.fetch(u, init));
+        const v = await worked({ answers: ["Ruled once."], fetch: flaky });
+        assert.strictEqual(v.holder, ME.id, "handed on though the write failed");
+        await escalating(v.b, async () => assert.fail("ran again to retry a post"), v.o).tick();
+        assert.strictEqual(v.b.issues.get("t-1").assigneeAgentId, "agent-foreman");
+      },
+      p3: async () => {
+        // Each attempt is numbered above every earlier one, an ask asked again (A→B→A) included:
+        // the saved sequence, read as each attempt runs.
+        const b = escalationBoard();
+        const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+        const ans = aba("Ruled 1.", "Ruled 2.", "Ruled 3."), seen = [];
+        await escalating(b, async (p) => {
+          const st = JSON.parse(readFileSync(stateFile, "utf8"));
+          seen.push(Math.max(...Object.values(st.attemptSeq)));
+          const a = ans[seen.length - 1];
+          return typeof a === "function" ? a(b, p) : a;
+        }, { stateFile }).tick();
+        assert.deepStrictEqual(seen, [1, 2, 3]);
+      },
+      p4: async () => {
+        // Decided anew by a person: theirs, the answer posted with CARD_CHANGED.
+        const w = await worked({ answers: [(b) => { b.setStatus("t-1", "todo", PERSON); return "Ruled."; }] });
+        assert.strictEqual(w.holder, ME.id);
+        assert.ok(w.said[0].body.comment.endsWith(CARD_CHANGED));
+        // Under the Foreman's own key (round 4): a bare restatement during the run is a hold too.
+        const v = await worked({ answers: [(b) => { b.record("t-1", FOREMAN, { status: "blocked", changes: { statusVersion: { from: 3, to: 4 } } }); return "Ruled."; }] });
+        assert.strictEqual(v.holder, ME.id, "a same-identity hold was handed over");
+        assert.ok(v.said[0].body.comment.endsWith(CARD_CHANGED));
+        // Asked something newer: a new attempt under the same run.
+        const x = await worked({ answers: [(b) => { titleTo(b, "Retry window B"); return "Ruled 1."; }, "Ruled 2."] });
+        assert.strictEqual(x.prompts.length, 2);
+        assert.match(x.prompts[1], /The card changed while you worked on it/);
+      },
+      p5: async () => {
+        // A→B→A, mixed outcomes: A first escalates, B rules, A asked again stays blocked.
+        // The latest attempt (A's third) routes; A's first answer is replaced, B's goes above.
+        const w = await worked({ answers: aba(up("Need a call 1."), "Ruled 2.", `Blocked 3.\n${OUTCOME_MARK} blocked`) });
+        assert.strictEqual(w.prompts.length, 3);
+        assert.doesNotMatch(w.prompts[2], /Need a call 1/, "the re-asked attempt was told its own replaced answer");
+        assert.match(w.prompts[2], /Ruled 2/);
+        assert.deepStrictEqual(w.said.map((x) => x.body), [{ comment: "Ruled 2.\n\n---\n\nBlocked 3." }]);
+        assert.strictEqual(w.holder, ME.id, "a stale outcome routed");
+        assert.deepStrictEqual(w.pings, []);
+        // The other way round: B escalates, A asked again resolves — handed down, nobody pinged.
+        const v = await worked({ answers: aba("Ruled 1.", up("Need a call 2."), "Ruled 3.") });
+        assert.strictEqual(v.holder, "agent-foreman");
+        assert.deepStrictEqual(v.pings, []);
+        // And A asked again escalates: the person is asked A's latest question.
+        const x = await worked({ answers: aba(up("Need a call 1."), "Ruled 2.", up("Need a call 3.")) });
+        assert.strictEqual(x.holder, "user-boss");
+        assert.deepStrictEqual(x.pings.map((p) => p.ask), ["Need a call 3."]);
+      },
+      p6: async () => {
+        // Restart: A→B→A answered, its hand-off refused with a 5xx; a new poller
+        // on the same state routes the same way, the latest attempt deciding.
+        let fails = 1;
+        const flaky = (b) => async (u, init) => (init?.method === "PATCH" && "assigneeUserId" in JSON.parse(init.body) && fails-- > 0 ? { ok: false, status: 503, text: async () => "unavailable" } : b.fetch(u, init));
+        const w = await worked({ answers: aba(up("Need a call 1."), "Ruled 2.", up("Need a call 3.")), fetch: flaky });
+        assert.strictEqual(w.holder, ME.id, "handed on though the write failed");
+        const saved = JSON.parse(readFileSync(w.stateFile, "utf8"));
+        assert.strictEqual(Object.keys(saved.pendingReplies).length, 2);
+        await escalating(w.b, async () => assert.fail("ran again on restart"), { ...w.o }).tick();
+        assert.strictEqual(w.b.issues.get("t-1").assigneeUserId, "user-boss", "the restart routed a stale outcome");
+        assert.deepStrictEqual(w.pings.map((p) => p.ask), ["Need a call 3."]);
+        assert.match(w.b.writes.filter((x) => x.body.comment).at(-1).body.comment, /^Ruled 2\.\n\n---\n\nNeed a call 3\.$/);
+      },
+      p7: async () => {
+        // A dependency done later resumes the card once, and clears its done link (r6 runs it whole).
+        const w = await worked({ answers: [`Need T-2 first.\n${OUTCOME_MARK} blocked on T-2`], extra: [T2()] });
+        const saved = JSON.parse(readFileSync(w.stateFile, "utf8"));
+        assert.deepStrictEqual(Object.values(saved.linked), [["t-2"]], "the link was not recorded for a restart");
+        w.b.issues.get("t-2").status = "done";
+        rewake(w.b, "r2");
+        // A restart in between: the link is read back from the state file.
+        await escalating(w.b, async (p) => { w.prompts.push(p); return "Ruled."; }, w.o).tick();
+        assert.strictEqual(w.prompts.length, 2);
+        assert.deepStrictEqual(w.b.issues.get("t-1").blockedByIssueIds, []);
+      },
+    };
+    sameIds("p", P);
+    for (const [id] of rowsOf("p")) {
+      try { await P[id](); } catch (e) { e.message = `${id}: ${e.message}`; throw e; }
     }
   });
 
