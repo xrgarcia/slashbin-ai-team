@@ -106,7 +106,7 @@ const leaked = [
 {
   const r = run(false, leaked, { finalTextOnly: true });
   assert.strictEqual(r.turnText, "Alex, there are 11 items in flight.");
-  assert.ok(/noBufferContext: true, finalTextOnly: true \}/.test(SRC), "the Paperclip answer must ask for final text only");
+  assert.ok(/noBufferContext: true, finalTextOnly: true[,\s}]/.test(SRC), "the Paperclip answer must ask for final text only");
 }
 
 // 6. The flag reads "true" only — an unset or other value leaves it off.
