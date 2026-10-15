@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { runEnvOnly, runEnvCredentials, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, discordCarriers, paperclipCarriers, parityMcpEnv, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
+const { runEnvironment, runEnvProblems, runEnvCredentials, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, discordCarriers, paperclipCarriers, parityMcpEnv, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -630,6 +630,12 @@ if (!VALID_MODES.includes(PERMISSION_MODE)) {
 // rather than run without it.
 if (RUNTIME.problems.length) {
   for (const problem of RUNTIME.problems) log.fatal(problem);
+  process.exit(EXIT_CONFIG);
+}
+// Every run builds its environment from BOT_RUN_ENV, so a list the bot would
+// read differently from its operator refuses to start.
+if (runEnvProblems(process.env.BOT_RUN_ENV).length) {
+  for (const problem of runEnvProblems(process.env.BOT_RUN_ENV)) log.fatal(problem);
   process.exit(EXIT_CONFIG);
 }
 log.info({ runtime: RUNTIME.name, source: RUNTIME.source, bin: RUNTIME.bin, model: RUNTIME.model, ...(CODEX ? { version: RUNTIME.version } : {}) },
@@ -2173,8 +2179,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     }
 
     // Build a clean env without Claude nesting vars. A bot that names its run
-    // environment (BOT_RUN_ENV) passes on only that (runEnvOnly).
-    const cleanEnv = runEnvOnly(process.env, process.env.BOT_RUN_ENV);
+    // environment (BOT_RUN_ENV) passes on only those credentials, with the
+    // basics and the harness's own policy settings (runEnvironment).
+    const cleanEnv = runEnvironment(process.env, process.env.BOT_RUN_ENV);
 
     // Publish the RESOLVED paths. This is what stops harness-owned skills from
     // rotting: a skill that reads $BOT_BUFFER_FILE cannot go stale, while one

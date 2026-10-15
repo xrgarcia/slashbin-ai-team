@@ -5,7 +5,7 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { runEnvOnly, runEnvCredentials, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, boardRunKind, withheldFromParityBoard } = require("../lib/permission-mode");
+const { runEnvironment, runEnvProblems, runEnvCredentials, HARNESS_POLICY_ENV, RUN_ENV_BASE, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, boardRunKind, withheldFromParityBoard } = require("../lib/permission-mode");
 const { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
@@ -583,25 +583,125 @@ check("a parity run withholds only the Discord credentials, and still sees no ot
 
 console.log("\nRun environment — BOT_RUN_ENV");
 
+// Hank's policy settings beside a Doppler shell's credentials: the shape that
+// turned the mail and calendar gates off when a list dropped everything
+// unlisted (PR #91 review, S1).
+const POLICY = {
+  BOT_MAIL_ALLOWED_RECIPIENTS: "owner@example.com", BOT_MAIL_SUBJECT_PREFIX: "Bot:",
+  BOT_CALENDAR_NO_ATTENDEES: "true", BOT_CALENDAR_OWN_EVENTS: "true", BOT_CALENDAR_TITLE_PREFIX: "Bot:",
+  BOT_LAND_PATHS: "notes/**", BOT_NAME: "hank", BOT_TIMEZONE: "UTC", BOT_MAX_WAKE_ATTEMPTS: "3", BOT_MAX_SCHEDULED_JOBS: "5",
+  WS_PORT: "9899", RECENT_CONTEXT_MAX_CHARS: "1000",
+  GIT_AUTHOR_NAME: "bot", GIT_AUTHOR_EMAIL: "bot@example.com", GIT_COMMITTER_NAME: "bot", GIT_COMMITTER_EMAIL: "bot@example.com",
+};
+const CREDS = { EM_GITHUB_TOKEN: "ghp_em_token_value", PROD_STRIPE_SRE_KEY: "sk_live_value", PAPERCLIP_API_KEY: "pcp_value",
+  DOPPLER_TOKEN: "dp.st.value", RAILWAY_API_TOKEN: "rw_value" };
+
 check("unset passes the whole environment on, as before", () => {
   const env = { PATH: "/bin", EM_GITHUB_TOKEN: "x" };
-  assert.deepStrictEqual(runEnvOnly(env, undefined), env);
-  assert.deepStrictEqual(runEnvOnly(env, " "), env);
+  assert.deepStrictEqual(runEnvironment(env, undefined), env);
+  assert.deepStrictEqual(runEnvironment(env, " "), env);
 });
 
-check("named keeps the basics and the names, and nothing else", () => {
-  const env = { PATH: "/bin", HOME: "/h", LC_ALL: "C", XDG_RUNTIME_DIR: "/r", NOVA_BEARER: "n", NOVA_OTHER: "o",
-    EM_GITHUB_TOKEN: "g", PROD_STRIPE_SRE_KEY: "s", PAPERCLIP_API_KEY: "p", DOPPLER_TOKEN: "d" };
-  assert.deepStrictEqual(Object.keys(runEnvOnly(env, "NOVA_BEARER")).sort(), ["HOME", "LC_ALL", "NOVA_BEARER", "PATH", "XDG_RUNTIME_DIR"]);
+check("named keeps the basics, the names and the harness policy, and no unlisted credential", () => {
+  const env = { PATH: "/bin", HOME: "/h", LC_ALL: "C", XDG_RUNTIME_DIR: "/r", NOVA_BEARER: "n", NOVA_OTHER: "o", ...POLICY, ...CREDS };
+  const run = runEnvironment(env, "NOVA_BEARER");
+  assert.deepStrictEqual(Object.keys(run).sort(), ["HOME", "LC_ALL", "NOVA_BEARER", "PATH", "XDG_RUNTIME_DIR", ...Object.keys(POLICY)].sort());
+  for (const [k, v] of Object.entries(POLICY)) assert.strictEqual(run[k], v, `${k} changed`);
 });
 
 check("a trailing * keeps a prefix", () => {
-  assert.deepStrictEqual(Object.keys(runEnvOnly({ NOVA_A: "1", NOVA_B: "2", EM_A: "3" }, "NOVA_*")).sort(), ["NOVA_A", "NOVA_B"]);
+  const run = runEnvironment({ NOVA_A: "1", NOVA_B: "2", EM_A: "3" }, "NOVA_*");
+  assert.deepStrictEqual(Object.keys(run).sort(), ["NOVA_A", "NOVA_B"]);
+});
+
+check("a harness setting is a policy, never a credential", () => {
+  // Named like a credential under a harness prefix, or holding a dropped
+  // credential's value: dropped. Listed by name: kept.
+  const env = { GIT_AUTHOR_TOKEN: "secretvalue1", BOT_LAND_PATHS: `notes/**,${CREDS.EM_GITHUB_TOKEN}`, ...CREDS, NOVA_BEARER: "n" };
+  const run = runEnvironment(env, "NOVA_BEARER");
+  assert.ok(!("GIT_AUTHOR_TOKEN" in run), "a credential-named harness variable reached the run");
+  assert.ok(!("BOT_LAND_PATHS" in run), "a harness setting holding a dropped credential reached the run");
+  assert.strictEqual(runEnvironment(env, "NOVA_BEARER,EM_GITHUB_TOKEN").BOT_LAND_PATHS, env.BOT_LAND_PATHS);
+});
+
+check("a list it would read differently from its operator is refused, at startup and at every run", () => {
+  assert.deepStrictEqual(runEnvProblems("NOVA_BEARER, GH_CONFIG_DIR,NOVA_*"), []);
+  for (const bad of ["*", "NOVA BEARER", "NOVA-BEARER", "NOVA_*_X", "$HOME"]) {
+    assert.strictEqual(runEnvProblems(`NOVA_BEARER,${bad}`).length, 1, `${bad} was accepted`);
+    assert.throws(() => runEnvironment({}, bad), /BOT_RUN_ENV entry/);
+  }
+  const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  assert.match(bot, /if \(runEnvProblems\(process\.env\.BOT_RUN_ENV\)\.length\) \{[\s\S]{0,200}process\.exit\(EXIT_CONFIG\)/);
+});
+
+// Every setting a hook or skill-pack script reads, found by reading them.
+const walkPack = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walkPack(join(d, e.name)) : [join(d, e.name)]);
+const PACK = join(__dirname, "..", "skill-pack");
+const hookReads = new Set(walkPack(PACK).flatMap((f) => {
+  const src = readFileSync(f, "utf8");
+  return [...src.matchAll(/os\.environ(?:\.get\(|\[)\s*["']([A-Z_][A-Z0-9_]*)["']|process\.env\.([A-Z_][A-Z0-9_]*)|process\.env\[["']([A-Z_][A-Z0-9_]*)["']\]/g)]
+    .map((m) => m[1] || m[2] || m[3]);
+}));
+// Set for each run by the runtime (Claude for a plugin) or the harness (Codex), never inherited.
+const SET_PER_RUN = ["CLAUDE_PLUGIN_ROOT"];
+
+check("every setting the skill pack reads is one a run keeps", () => {
+  assert.ok(hookReads.has("BOT_MAIL_ALLOWED_RECIPIENTS") && hookReads.has("BOT_LAND_PATHS"), "the scan found no hook reads");
+  const covered = (k) => SET_PER_RUN.includes(k) || [...HARNESS_POLICY_ENV, ...RUN_ENV_BASE].some((p) => (p.endsWith("*") ? k.startsWith(p.slice(0, -1)) : k === p));
+  for (const name of hookReads) assert.ok(covered(name), `the skill pack reads ${name}: add it to HARNESS_POLICY_ENV`);
+  // …and survives a list that names none of them.
+  const env = Object.fromEntries([...hookReads].filter((k) => !SET_PER_RUN.includes(k)).map((k) => [k, `v-${k}`]));
+  const run = runEnvironment({ ...env, ...CREDS }, "NOVA_BEARER");
+  for (const k of Object.keys(env)) assert.strictEqual(run[k], env[k], `${k} was dropped`);
+});
+
+// The gates and land.mjs, run with an environment built the way a run's is.
+const runEnv = (extra = {}) => {
+  const env = runEnvironment({ ...process.env, ...POLICY, ...CREDS, NOVA_BEARER: "n", ...extra }, "NOVA_BEARER");
+  for (const k of Object.keys(CREDS)) assert.ok(!(k in env), `${k} reached the run`);
+  return env;
+};
+const hook = (name, tool, input, env) =>
+  spawnSync("python3", [join(PACK, "hooks", name)], { input: JSON.stringify({ tool_name: tool, tool_input: input }), env, encoding: "utf8" });
+
+check("an outside-recipient email is still refused through the run environment", () => {
+  const send = (to) => hook("bot_mail_gate.py", "mcp__claude_ai_Gmail__send_message", { to: [to], subject: "Bot: hi", body: "b" }, runEnv());
+  assert.strictEqual(send("someone@example.invalid").status, 2, "an outside recipient was allowed");
+  assert.strictEqual(send("owner@example.com").status, 0, send("owner@example.com").stderr);
+});
+
+check("an event inviting an attendee is still refused through the run environment", () => {
+  const ev = (extra) => ({ summary: "Bot: x", startTime: "2026-10-20", endTime: "2026-10-21", allDay: true, ...extra });
+  const tmp = mkdtempSync(join(tmpdir(), "run-env-cal-"));
+  const env = runEnv({ BOT_STATE_DIR: tmp });
+  const cal = (input) => hook("bot_calendar_gate.py", "mcp__claude_ai_Google_Calendar__create_event", input, env);
+  assert.strictEqual(cal(ev({ attendees: [{ email: "someone@example.invalid" }] })).status, 2, "an attendee was allowed");
+  assert.strictEqual(cal(ev()).status, 0, cal(ev()).stderr);
+});
+
+check("configured landing still lands inside its paths, and only there, through the run environment", () => {
+  const dir = mkdtempSync(join(tmpdir(), "run-env-land-"));
+  const origin = join(dir, "origin.git"), repo = join(dir, "repo");
+  const git = (cwd, ...a) => { const r = spawnSync("git", a, { cwd, env: { ...process.env, ...POLICY }, encoding: "utf8" }); assert.strictEqual(r.status, 0, r.stderr); return r.stdout.trim(); };
+  git(dir, "init", "--quiet", "--bare", "-b", "main", origin);
+  git(dir, "clone", "--quiet", origin, repo);
+  mkdirSync(join(repo, "notes"));
+  writeFileSync(join(repo, "notes", "a.md"), "v1\n"); writeFileSync(join(repo, "RULES.md"), "r\n");
+  git(repo, "add", "."); git(repo, "commit", "--quiet", "-m", "init"); git(repo, "push", "--quiet", "-u", "origin", "main");
+  writeFileSync(join(repo, "notes", "a.md"), "v2\n"); writeFileSync(join(repo, "RULES.md"), "r2\n");
+  const env = runEnv({ CLAUDE_CWD: repo });
+  delete env.GIT_DIR;
+  const land = (...paths) => spawnSync("node", [join(PACK, "bin", "land.mjs"), "-m", "x", ...paths], { cwd: repo, env, encoding: "utf8" });
+  const outside = land("RULES.md");
+  assert.strictEqual(outside.status, 1, "a file outside BOT_LAND_PATHS landed");
+  const inside = land("notes/a.md");
+  assert.strictEqual(inside.status, 0, inside.stderr);
+  assert.strictEqual(git(repo, "ls-remote", origin, "refs/heads/main").split("\t")[0], git(repo, "rev-parse", "HEAD"));
 });
 
 check("the bot builds every run's environment through it", () => {
   const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.ok(/const cleanEnv = runEnvOnly\(process\.env, process\.env\.BOT_RUN_ENV\)/.test(bot));
+  assert.ok(/const cleanEnv = runEnvironment\(process\.env, process\.env\.BOT_RUN_ENV\)/.test(bot));
 });
 
 check("a credential the run environment names is withheld from a Codex run's commands", () => {
