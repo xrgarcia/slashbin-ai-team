@@ -897,8 +897,8 @@ const poller = (b, answer) => createPaperclipPoller({
     const { boards, problems } = paperclipBoards(env);
     assert.deepStrictEqual(problems, []);
     assert.deepStrictEqual(boards.map(({ escalation, ...b }) => b), [
-      { id: null, url: "https://one.example.com", apiKey: "k1", keyEnv: "PAPERCLIP_API_KEY", promptChannel: "123456789012345678" },
-      { id: "two", url: "https://two.example.com", apiKey: "k2", keyEnv: "TWO_KEY", promptChannel: "chan-2" },
+      { id: null, url: "https://one.example.com", apiKey: "k1", keyEnv: "PAPERCLIP_API_KEY", promptChannel: "123456789012345678", contract: null },
+      { id: "two", url: "https://two.example.com", apiKey: "k2", keyEnv: "TWO_KEY", promptChannel: "chan-2", contract: null },
     ]);
   });
 

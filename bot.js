@@ -14,6 +14,7 @@ const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
 const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector } = require("./lib/paperclip");
+const { parseContract, toolLine } = require("./lib/handoff-contract");
 const { createLiveEvents, eventsSetting, startBoard } = require("./lib/paperclip-events");
 const { botSurfaces, discordOffReason, PAPERCLIP_PREREQUISITE } = require("./lib/surfaces");
 const { resolveRuntime } = require("./lib/runtime");
@@ -617,6 +618,13 @@ const EXIT_CONFIG = 78;
 // fatal when the board is the bot's only surface); here it is only whether any
 // is configured at all.
 const { boards: CONFIGURED_BOARDS, problems: PAPERCLIP_PROBLEMS, warnings: PAPERCLIP_WARNINGS } = paperclipBoards(process.env);
+// The bot-wide handoff contract setting; a broken one is refused at startup
+// with the board problems, so no run starts on a contract it cannot name.
+const { setting: HANDOFF_CONTRACT, problem: HANDOFF_CONTRACT_PROBLEM } = parseContract(process.env.HANDOFF_CONTRACT, "HANDOFF_CONTRACT");
+if (HANDOFF_CONTRACT_PROBLEM) {
+  log.fatal(HANDOFF_CONTRACT_PROBLEM);
+  process.exit(EXIT_CONFIG);
+}
 const SURFACES = botSurfaces(process.env, CONFIGURED_BOARDS.length);
 if (SURFACES.errors.length) {
   if (SURFACES.paperclipRequired) for (const problem of PAPERCLIP_PROBLEMS) log.error(`Paperclip board off — ${problem}`);
@@ -2124,6 +2132,10 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "A scheduled or background wake-up does NOT owe a reply. When a check finds nothing, send nothing at all — not a status line, not a heartbeat, not a parenthetical explaining the silence. A sentence whose only content is that there is nothing to say IS the noise. Send a message only on a real event: an answer to something asked, a result, a change in state, or a failure.",
       "Never promise to check back with a sleep or a timer — those die with the session. Book the follow-up with the scheduler in the SAME reply that promises it, and say the concrete fire time.",
       "--- End speaking unprompted ---",
+      // The operator's shared handoff contract, when this bot's own tools carry
+      // it (HANDOFF_CONTRACT=tool:…). A reader setting applies to board tasks
+      // only: their prompt is built per task (lib/handoff-contract.js).
+      ...(HANDOFF_CONTRACT?.kind === "tool" && !opts.taskCarriesContract ? ["", "--- Handoff contract ---", toolLine(HANDOFF_CONTRACT), "--- End handoff contract ---"] : []),
     ].join("\n");
 
     // Head of the prompt, in precedence order: repo overrides, then anything
@@ -3268,6 +3280,7 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       escalateTo: escalation.escalateTo,
       escalationReturnTo: escalation.returnTo,
       escalationAuthority: escalation.authority,
+      contract: board.contract,
       onEscalate: async ({ task, link, to, ask }) => {
         const channelId = escalation.channel ?? promptChannel;
         const channel = await resolveBridgeChannel(channelId, { paperclipTask: task, escalation: true });
@@ -3284,7 +3297,7 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       answer: (prompt, issue, { runId } = {}) => {
         const reply = replyCollector();
         return runClaude(prompt, `${tag}-${issue.identifier}`, pLog.child({ paperclipTask: issue.identifier }),
-          reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true, finalTextOnly: true,
+          reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true, finalTextOnly: true, taskCarriesContract: Boolean(board.contract),
             paperclipRun: runId ? { runId, keyEnv: board.keyEnv } : null })
           .then(() => reply.text());
       },
