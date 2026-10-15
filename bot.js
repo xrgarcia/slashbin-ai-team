@@ -14,6 +14,7 @@ const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
 const { createPaperclipPoller, paperclipBoards, replyCollector } = require("./lib/paperclip");
+const { processEscalateClient } = require("./lib/process-escalate");
 const { createLiveEvents, eventsSetting, startBoard } = require("./lib/paperclip-events");
 const { botSurfaces, PAPERCLIP_PREREQUISITE } = require("./lib/surfaces");
 const { resolveRuntime } = require("./lib/runtime");
@@ -249,7 +250,15 @@ const RUN_ID_ENV = "PAPERCLIP_RUN_ID";
 // What a Codex run's commands never see: the connector keys, the run's own
 // seat key, and every credential the bot's run environment names.
 function shellWithheld() {
-  return [...new Set([...connectorKeys(), RUN_AGENT_KEY_ENV, ...runEnvCredentials(process.env.BOT_RUN_ENV)])];
+  return [...new Set([...connectorKeys(), RUN_AGENT_KEY_ENV, ...escalateBearer(), ...runEnvCredentials(process.env.BOT_RUN_ENV)])];
+}
+// The bridge's own hand-offs go through the shared escalate action when both
+// are set (SLA-1493): the process MCP's URL, and the name of the variable that
+// holds this bot's bearer for it. The seat's key and run ride as headers from
+// the bridge itself; nothing reaches a run. Unset, hand-offs stay direct writes.
+function escalateBearer() {
+  const name = process.env.PAPERCLIP_ESCALATE_BEARER_ENV;
+  return name ? [name] : [];
 }
 // What a board run's session is made with (boardAccessKey): one made under
 // other access is never resumed. Every permission input counts — a parity run
@@ -2211,6 +2220,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     if (narrowBoard || PERMISSION_MODE === "restricted") cleanEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";
     // The Paperclip connector keys leave every run, Discord's included…
     for (const name of connectorKeys()) delete cleanEnv[name];
+    // …and so does the bridge's own bearer for the escalate action, on every
+    // runtime: only the bridge calls it, never a run (SLA-1493).
+    for (const name of escalateBearer()) delete cleanEnv[name];
     if (CODEX) {
       // Skills name their scripts under $CLAUDE_PLUGIN_ROOT, which Claude sets
       // for a plugin; Codex has no plugin folder, so the harness sets it.
@@ -3277,6 +3289,10 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       escalateTo: escalation.escalateTo,
       escalationReturnTo: escalation.returnTo,
       escalationAuthority: escalation.authority,
+      // The action serves the Slashbin board, which is the first board only.
+      escalate: !board.id && process.env.PAPERCLIP_ESCALATE_URL && process.env[process.env.PAPERCLIP_ESCALATE_BEARER_ENV ?? ""]
+        ? processEscalateClient({ url: process.env.PAPERCLIP_ESCALATE_URL, bearer: process.env[process.env.PAPERCLIP_ESCALATE_BEARER_ENV], agentKey: board.apiKey })
+        : null,
       onEscalate: async ({ task, link, to, ask }) => {
         const channelId = escalation.channel ?? promptChannel;
         const channel = await resolveBridgeChannel(channelId, { paperclipTask: task, escalation: true });
