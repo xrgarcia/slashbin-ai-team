@@ -49,7 +49,7 @@ function board({ comments: prior = [], status = "in_progress", labels = [], acti
     if (m[2] === "/runs") return ok(runs);
     return { ok: false, status: 404, text: async () => "" };
   };
-  return { card, writes, fetch };
+  return { card, writes, fetch, runs, activity };
 }
 /** A stand-in for the action: records each call, answers from `answers` by operation. */
 function action(answers = {}) {
@@ -60,8 +60,8 @@ function action(answers = {}) {
   };
   return { calls, escalate };
 }
-const seat = (b, answer, escalate) => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k",
-  stateFile: join(mkdtempSync(join(tmpdir(), "pc-")), "s.json"), log: silent, fetch: b.fetch, answer, escalate });
+const seat = (b, answer, escalate, stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json")) => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k",
+  stateFile, log: silent, fetch: b.fetch, answer, escalate });
 const RETURNED = `Only the Product Owner can rule on scope.\n${OUTCOME_MARK} return`;
 
 (async () => {
@@ -129,6 +129,35 @@ const RETURNED = `Only the Product Owner can rule on scope.\n${OUTCOME_MARK} ret
     assert.deepStrictEqual(a.calls.map((c) => c.args.operation), ["resolve", "hand_up"]);
     assert.match(a.calls[1].args.attempted, /process\.escalate resolve: paperclip_unavailable: EXACT_BOARD_REFUSAL/);
     assert.strictEqual(a.calls[1].args.blocker, "Scope approved; resume the work.");
+    const step = b.writes.find((w) => w.body.unblockDescriptor && !w.body.status);
+    assert.ok(step, JSON.stringify(b.writes));
+    assert.deepStrictEqual(step.body.unblockDescriptor.owner, { agentId: "agent-em" });
+    assert.match(step.body.unblockDescriptor.action, /process\.escalate resolve: paperclip_unavailable: EXACT_BOARD_REFUSAL/);
+  });
+
+  await check("a person who blocks a handed-up card while it is being answered keeps it: the answer is said, nothing handed on", async () => {
+    const b = handedUp(), a = action();
+    await seat(b, async () => {
+      b.activity.unshift({ id: "h1", action: "issue.updated", actorType: "user", actorId: "user-avery", createdAt: "2026-01-01T00:00:03Z",
+        details: { changes: { status: { from: "blocked", to: "blocked" } } } });
+      return "Scope approved; resume the work.";
+    }, a.escalate).tick();
+    assert.strictEqual(a.calls.length, 0, JSON.stringify(a.calls));
+    assert.ok(b.writes.some((w) => w.body.comment === "Scope approved; resume the work."), JSON.stringify(b.writes));
+  });
+
+  await check("a `review` answer stays in review across a restart and a fresh wake on the same ask", async () => {
+    const b = board(), file = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let ran = 0;
+    const answer = async () => { ran++; return `Done; please check the copy.\n${OUTCOME_MARK} review`; };
+    await seat(b, answer, action().escalate, file).tick();
+    assert.strictEqual(b.card.status, "in_review");
+    b.runs.push({ id: "r2", agentId: "agent-em", status: "running" });
+    const before = b.writes.length;
+    await seat(b, answer, action().escalate, file).tick();
+    assert.strictEqual(ran, 1, "the answer ran again");
+    assert.strictEqual(b.card.status, "in_review", JSON.stringify(b.writes.slice(before)));
+    assert.ok(b.writes.slice(before).every((w) => !w.body.status), JSON.stringify(b.writes.slice(before)));
   });
 
   await check("a person's block on a handed-up card holds: no run, no hand-off", async () => {
