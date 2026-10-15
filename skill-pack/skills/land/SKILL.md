@@ -28,7 +28,9 @@ you name. It refuses, and pushes nothing, when:
 
 - a file is outside the paths you may land: your instructions are not yours to change
 - a file has no change
-- the checkout holds someone else's commit that is not pushed yet
+- the checkout holds someone else's unpushed commit that changed one of your
+  files, or the upstream changed one of your files since that commit (their
+  commit is otherwise left alone and never published: your files still land)
 - the push is rejected: nothing was committed and your edit stays on disk
 
 A refusal says why. Do not try another way to commit; tell whoever asked that

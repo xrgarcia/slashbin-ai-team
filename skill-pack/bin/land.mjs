@@ -16,8 +16,13 @@
  *   - a folder or pattern that would carry ANY file failing that check: every
  *     concrete file git would commit is checked, not just the string given
  *   - a path with no change to land
- *   - a checkout with commits not yet on its upstream (landing would publish them)
  *   - a checkout behind its upstream that cannot fast-forward
+ * A checkout holding commits not yet on its upstream (another session's) still
+ * lands: the commit is built from the upstream tip, so theirs cannot ride along,
+ * and HEAD is left on their commit for them to rebase. Refused then, per path:
+ *   - a path one of those local commits changed (its content would publish them)
+ *   - a path the upstream changed since they branched, unless that change is this
+ *     checkout's own earlier landing (else the edit would undo someone's push)
  * Other files, staged or not, are left exactly as they were. The commit is built
  * outside the checkout and pushed by its id, so a commit another session makes
  * meanwhile is never published or undone by it, a rejected push leaves nothing
@@ -37,6 +42,9 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { isAbsolute, join, relative, resolve, sep } from "path";
 import { pathToFileURL } from "url";
+
+/** The last commit landed while this checkout held unpushed commits. */
+const LANDED_REF = "refs/land/beside-local";
 
 function fail(msg) {
   process.stderr.write(`[land] REFUSED: ${msg}. Nothing was pushed.\n`);
@@ -145,9 +153,24 @@ function main() {
   if (!fetched.ok) fail(`could not fetch ${upstream.out}: ${fetched.out}`);
 
   const ahead = Number(git(root, ["rev-list", "--count", "@{u}..HEAD"]));
-  if (ahead > 0) fail(`this checkout has ${ahead} commit(s) not on ${upstream.out}; landing would publish them too`);
   const behind = Number(git(root, ["rev-list", "--count", "HEAD..@{u}"]));
-  if (behind > 0) {
+  if (ahead > 0) {
+    // Someone else's commits sit here unpushed. The commit is built from the
+    // upstream tip either way; what remains is that the working copy of a path is
+    // only the edit being landed if neither side moved that path since the fork.
+    const fork = git(root, ["merge-base", "HEAD", "@{u}"]);
+    const blob = (rev, rel) => tryGit(root, ["rev-parse", "--verify", "--quiet", `${rev}:${rel}`]).out || "";
+    const prior = tryGit(root, ["rev-parse", "--verify", "--quiet", `${LANDED_REF}^{commit}`]);
+    const priorOnUpstream = prior.ok && tryGit(root, ["merge-base", "--is-ancestor", prior.out, "@{u}"]).ok;
+    for (const rel of rels) {
+      const atFork = blob(fork, rel);
+      if (blob("HEAD", rel) !== atFork) fail(`${rel} is changed by a commit in this checkout that is not on ${upstream.out}; landing it would publish that commit's content`);
+      const atUpstream = blob("@{u}", rel);
+      if (atUpstream !== atFork && !(priorOnUpstream && blob(prior.out, rel) === atUpstream)) {
+        fail(`${upstream.out} changed ${rel} since this checkout's local commit(s) branched from it; they must be rebased onto ${upstream.out} first`);
+      }
+    }
+  } else if (behind > 0) {
     const ff = tryGit(root, ["merge", "--ff-only", "--quiet", "@{u}"]);
     if (!ff.ok) fail(`could not catch up with ${upstream.out}: ${ff.out}`);
   }
@@ -180,9 +203,21 @@ function main() {
   const inCommit = git(root, ["diff", "--name-only", "--no-renames", "-z", base, sha]).split("\0").filter(Boolean);
   const extra = inCommit.filter((f) => !rels.includes(f));
   if (extra.length) fail(`the commit would also carry ${extra.join(", ")}, which this bot was not asked to land`);
+  if (!inCommit.length) fail(`${rels.join(", ")} already match ${upstream.out}: no change to land`);
 
   const pushed = tryGit(root, ["push", "--quiet", remote, `${sha}:refs/heads/${branch}`]);
   if (!pushed.ok) fail(`the push was rejected, and every edit is still in the working tree: ${pushed.out}`);
+
+  if (ahead > 0) {
+    // HEAD stays on the other session's commit; the landed files stay edited in
+    // the working tree. The ref lets the next landing know that upstream's copy
+    // of those files is this checkout's own.
+    tryGit(root, ["update-ref", "-m", "land: landed beside unpushed commits", LANDED_REF, sha]);
+    process.stderr.write(`[land] this checkout has ${ahead} commit(s) not on ${upstream.out}. They were not published, and the checkout was left on them; whoever made them must rebase onto ${upstream.out}.\n`);
+    process.stdout.write(`landed ${short} on ${upstream.out}: ${rels.join(", ")}\n`);
+    return;
+  }
+  tryGit(root, ["update-ref", "-d", LANDED_REF]);
 
   // A compare-and-swap: the checkout moves to the landed commit only if no one
   // has committed in it since the check.
