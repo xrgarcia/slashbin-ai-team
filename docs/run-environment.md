@@ -69,6 +69,12 @@ even when `DISCORD_TOKEN` itself was never inherited.
 | Connector | a configured board's key variable, and the seat key |
 | Other | any other credential name |
 
+A credential identity's name is never an **operating basic** or a **harness
+policy setting**, whatever its prefix: `XDG_DISCORD_TOKEN` is a Discord
+credential and `LC_API_KEY` a credential, not a locale, and a board's key
+variable is a connector whatever it is called. The basics and the policy
+settings below are the names left over once those are taken out.
+
 ## Outcomes
 
 | Outcome | Meaning |
@@ -86,7 +92,8 @@ Evaluated over the final environment, for each variable:
    prefix), not an operating basic (`PATH`, `HOME`, locale, `TMPDIR`, `XDG_*`,
    `CODEX_HOME`…) and not a harness policy setting (the mail, calendar and
    landing gates, the BOT_* paths, commit identity…) is **withheld**. Unset,
-   everything is inherited, as before.
+   everything is inherited, as before. A credential under a basic's prefix
+   (`XDG_API_KEY`) is not a basic, so it is withheld unless listed.
 2. A **Discord** identity is **withheld** from every board and parity run,
    whoever writes it — the server channel included.
 3. A **Paperclip** identity is **withheld** from every board and parity run,
@@ -123,6 +130,12 @@ Evaluated over the final environment, for each variable:
     into Codex's own arguments, and a process's arguments are readable by every
     process on the host (`ps`) — no exclusion keeps a command from them. A
     server takes a credential through its `env`.
+12. A board's key variable (the connector key, a `keyEnv` in
+    `PAPERCLIP_EXTRA_BOARDS`) named as a harness policy setting, a path or
+    flag the harness publishes, or an operating basic **refuses** the
+    configuration. Rule 4 withholds the key from every run and the setting
+    must be kept, so no outcome holds both: withheld, the gate or path is
+    gone; kept, every command reads the key.
 
 `shellExclude` is every hidden name, plus the connector key names and the seat
 key name whether present or not.
@@ -217,6 +230,16 @@ command line rather than an env entry (rule 11).
 | D20 | codex | bypass | session | `NOVA_BEARER` | `RETRY_AUTH=3; BOT_MAX_WAKE_ATTEMPTS=3` | — | — | `BOT_MAX_WAKE_ATTEMPTS` | kept | a value under 6 characters is not matched |
 | D21 | codex | bypass | session | `*` | — | — | — | `BOT_RUN_ENV` | refused | a bare `*` would keep everything |
 | D22 | claude | bypass | parity | — | `DISCORD_TOKEN={D}; BOT_MAIL_SUBJECT_PREFIX={D}` | — | — | `BOT_MAIL_SUBJECT_PREFIX` | refused | rule 8 under unset: a policy setting holding a Discord token |
+| D23 | codex | bypass | parity | — | `XDG_DISCORD_TOKEN={D}` | — | — | `XDG_DISCORD_TOKEN` | withheld | round 5 R42: a Discord credential under a basic's prefix is not a basic (rule 2) |
+| D24 | claude | bypass | parity | — | `XDG_PAPERCLIP_KEY={Q}` | — | — | `XDG_PAPERCLIP_KEY` | withheld | round 5 R43: a Paperclip credential under a basic's prefix (rule 3) |
+| D25 | claude | bypass | session | — | `PAPERCLIP_EXTRA_BOARDS=[{"id":"two","url":"https://two.example.com","keyEnv":"XDG_BOARD"}]; XDG_BOARD={A}` | — | — | `XDG_BOARD` | refused | round 5 R44: rule 12, a board's key named as a basic |
+| D26 | claude | bypass | session | — | `PAPERCLIP_EXTRA_BOARDS=[{"id":"two","url":"https://two.example.com","keyEnv":"BOT_MAIL_ALLOWED_RECIPIENTS"}]; BOT_MAIL_ALLOWED_RECIPIENTS={A}` | — | — | `BOT_MAIL_ALLOWED_RECIPIENTS` | refused | round 5 R45: rule 12, a board's key named as a policy setting |
+| D27 | claude | bypass | session | — | `PAPERCLIP_EXTRA_BOARDS=[{"id":"two","url":"https://two.example.com","keyEnv":"BOT_STATE_DIR"}]; BOT_STATE_DIR=/srv/private-state` | — | — | `BOT_STATE_DIR` | refused | round 5 R46: rule 12, a board's key named as a published path |
+| D28 | codex | bypass | parity | — | `XDG_DISCORD_TOKEN={D}; XDG_CACHE_HOME=/srv/cache` | — | — | `XDG_CACHE_HOME` | kept | a basic that holds no credential is still a basic |
+| D29 | codex | bypass | session | `XDG_API_KEY` | `XDG_API_KEY={K}` | — | — | `XDG_API_KEY` | hidden | round 5 R41: rule 7, a listed credential under a basic's prefix |
+| D30 | codex | bypass | session | `LC_*` | `LC_API_KEY={K}` | — | — | `LC_API_KEY` | hidden | round 5 R127: rule 7, under the locale prefix |
+| D31 | codex | bypass | session | `NOVA_BEARER` | `XDG_API_KEY={K}` | — | — | `XDG_API_KEY` | withheld | rule 1: a credential under a basic's prefix is withheld unless listed |
+| D32 | claude | bypass | session | — | `PAPERCLIP_EXTRA_BOARDS=[{"id":"two","url":"https://two.example.com","keyEnv":"BOARD_TWO"}]; BOARD_TWO={A}; BOT_MAIL_ALLOWED_RECIPIENTS=owner@example.com` | — | — | `BOT_MAIL_ALLOWED_RECIPIENTS` | kept | rule 12 refuses a collision only |
 | E1 | codex | bypass | session | `ROUTER_BEARER` | `ROUTER_BEARER={R}` | `ROUTER_BEARER={X}` | — | `ROUTER_BEARER` | hidden | round 4 S1: an inline server value over a listed name |
 | E2 | codex | bypass | session | `ROUTER_*` | — | `ROUTER_BEARER={X}` | — | `ROUTER_BEARER` | hidden | round 4 S1: inline, under a prefix, never inherited |
 | E3 | codex | bypass | session | `ROUTER_BEARER` | `NOVA_BEARER={N}` | `ROUTER_BEARER={N}` | — | `ROUTER_BEARER` | hidden | round 4 S1: `ROUTER_BEARER=${NOVA_BEARER}` |
@@ -236,6 +259,8 @@ command line rather than an env entry (rule 11).
 | E17 | codex | bypass | session | — | `PATH=/usr/bin` | `PATH=/opt/node/bin:/usr/bin` | — | `PATH` | kept | rule 9: a basic is never hidden |
 | E18 | codex | restricted | session | — | — | `ROUTER_BEARER={X}` | — | `ROUTER_BEARER` | withheld | no server channel outside bypass |
 | E19 | codex | bypass | board | — | — | `ROUTER_BEARER={X}` | — | `ROUTER_BEARER` | withheld | no server channel on a narrow board |
+| E20 | codex | bypass | session | `XDG_*` | `XDG_API_KEY={T}` | `XDG_API_KEY={S}` | — | `XDG_API_KEY` | hidden | round 5 R48: a server's credential under a basic's prefix is not a basic (rule 6) |
+| E21 | codex | bypass | session | — | — | `XDG_API_KEY={S}` | — | `XDG_API_KEY` | hidden | round 5 R47: rule 6 |
 | F1 | claude | bypass | board | — | — | — | — | `BOT_SUMMARIES_DIR` | withheld | rule 5: private Discord memory |
 | F2 | claude | bypass | parity | — | — | — | — | `BOT_SUMMARIES_DIR` | kept | a parity run is the Discord session |
 | F3 | claude | bypass | board | — | — | — | — | `BOT_STATE_DIR` | kept | a board setting |
