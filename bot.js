@@ -13,7 +13,7 @@ const { runEnvironment, runEnvProblems, runEnvCredentials, resolvePermissionMode
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
-const { createPaperclipPoller, paperclipBoards, replyCollector } = require("./lib/paperclip");
+const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector } = require("./lib/paperclip");
 const { createLiveEvents, eventsSetting, startBoard } = require("./lib/paperclip-events");
 const { botSurfaces, PAPERCLIP_PREREQUISITE } = require("./lib/surfaces");
 const { resolveRuntime } = require("./lib/runtime");
@@ -235,10 +235,10 @@ function settingsArgs({ board = false, tmpDir = null } = {}) {
   // top of the bot's own settings.
   return ["--settings", JSON.stringify(boardSettings(botSettings(), boardReadDeniedPaths(), CLAUDE_CWD, { ...BOARD_POLICY, tmpDir }))];
 }
-// The Paperclip connector keys: every board's, not only the first — an extra
-// board names its own.
+// The Paperclip connector keys: every configured board's, not only the first —
+// an extra board names its own — and whether or not its listener is on.
 function connectorKeys() {
-  return [...new Set(["PAPERCLIP_API_KEY", ...PAPERCLIP_BOARDS.map((b) => b.keyEnv)])];
+  return boardKeyEnvs(process.env);
 }
 // What a board run hands Codex for the shared escalate action (process MCP,
 // `x-paperclip-agent-key` / `x-paperclip-run-id`): the seat's own key and the

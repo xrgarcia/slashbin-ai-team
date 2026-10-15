@@ -570,7 +570,7 @@ check("a parity run withholds only the Discord credentials, and still sees no ot
   // The Paperclip connector keys are removed from every run, Discord's included,
   // before a Codex MCP server's env goes back in for the servers that name them;
   // the model's commands are kept from them (shellExclude).
-  assert.match(src, /\["PAPERCLIP_API_KEY", \.\.\.PAPERCLIP_BOARDS\.map\(\(b\) => b\.keyEnv\)\]/);
+  assert.match(src, /function connectorKeys\(\) \{\n  return boardKeyEnvs\(process\.env\);/);
   const removed = src.indexOf("for (const name of connectorKeys()) delete cleanEnv[name];");
   const restored = src.indexOf("if (!narrowBoard && CODEX_MCP) Object.assign(cleanEnv,");
   assert.ok(removed > 0 && restored > removed, "a Codex MCP server loses the connector key its config names");
@@ -702,6 +702,39 @@ check("configured landing still lands inside its paths, and only there, through 
 check("the bot builds every run's environment through it", () => {
   const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
   assert.ok(/const cleanEnv = runEnvironment\(process\.env, process\.env\.BOT_RUN_ENV\)/.test(bot));
+});
+
+check("every configured board's key is scrubbed from a run, whatever BOT_SURFACES turns on (PR #91 review, round 3)", () => {
+  const { boardKeyEnvs } = require("../lib/paperclip");
+  const { botSurfaces } = require("../lib/surfaces");
+  const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
+  // bot.js's own scrub lists, run as written against the environment given.
+  const fn = (name) => bot.match(new RegExp(`function ${name}\\(\\) \\{[\\s\\S]*?\\n\\}`))[0];
+  const { paperclipBoards } = require("../lib/paperclip");
+  const scrubOf = (env) => {
+    const boards = paperclipBoards(env).boards;          // the listeners that came on, as bot.js sets them
+    const PAPERCLIP_BOARDS = botSurfaces(env, boards.length).paperclip ? boards : [];
+    return new Function("boardKeyEnvs", "runEnvCredentials", "RUN_AGENT_KEY_ENV", "PAPERCLIP_BOARDS", "process",
+      `${fn("connectorKeys")}\n${fn("shellWithheld")}\nreturn { connectorKeys, shellWithheld };`)(boardKeyEnvs, runEnvCredentials, "PAPERCLIP_RUN_AGENT_KEY", PAPERCLIP_BOARDS, { env });
+  };
+  const extra = JSON.stringify([
+    { id: "acme", url: "https://acme.example.com", keyEnv: "ACME_BOARD_KEY" },
+    { id: "Broken Id", url: "https://other.example.com", keyEnv: "OTHER_BOARD_KEY" },   // off: a broken entry
+  ]);
+  for (const surfaces of ["discord", "", "discord,paperclip", "paperclip"]) {
+    const env = { PATH: "/bin", DISCORD_TOKEN: "d", BOT_SURFACES: surfaces, PAPERCLIP_URL: "https://board.example.com",
+      PAPERCLIP_API_KEY: "first-board-value", PAPERCLIP_EXTRA_BOARDS: extra, ACME_BOARD_KEY: "acme-board-value", OTHER_BOARD_KEY: "other-board-value" };
+    if (surfaces === "discord") assert.strictEqual(botSurfaces(env, 2).paperclip, false, "the Discord-only case no longer turns the boards off");
+    const { connectorKeys, shellWithheld } = scrubOf(env);
+    // The run's environment as bot.js builds it, BOT_RUN_ENV unset: everything, then the scrub.
+    const run = runEnvironment(env, undefined);
+    for (const name of connectorKeys()) delete run[name];
+    const values = Object.values(run).join("\n");
+    for (const v of ["first-board-value", "acme-board-value", "other-board-value"]) assert.ok(!values.includes(v), `BOT_SURFACES=${surfaces}: a board key reached the run`);
+    for (const k of ["PAPERCLIP_API_KEY", "ACME_BOARD_KEY", "OTHER_BOARD_KEY"]) assert.ok(shellWithheld().includes(k), `BOT_SURFACES=${surfaces}: ${k} reaches a Codex command`);
+  }
+  assert.deepStrictEqual(boardKeyEnvs({ PAPERCLIP_EXTRA_BOARDS: "not json" }), ["PAPERCLIP_API_KEY"]);
+  assert.ok(!/function connectorKeys\(\) \{[^}]*PAPERCLIP_BOARDS/.test(bot), "the scrub reads the listeners that came on");
 });
 
 check("a credential the run environment names is withheld from a Codex run's commands", () => {
