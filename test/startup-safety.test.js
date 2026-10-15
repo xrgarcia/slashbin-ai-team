@@ -109,7 +109,7 @@ check("legacy state is migrated, never silently discarded", () => {
 
 check("resolved paths are published to skills, so nothing has to hardcode one", () => {
   for (const v of ["BOT_STATE_DIR", "BOT_SUMMARIES_DIR", "BOT_BUFFER_FILE", "BOT_SESSIONS_FILE", "BOT_OUTBOX_DIR"]) {
-    assert.ok(new RegExp(`cleanEnv\\.${v} =`).test(bot), `${v} is not exported to the child`);
+    assert.ok(new RegExp(`\\b${v}: `).test(bot), `${v} is not exported to the child`);
   }
 });
 
@@ -160,7 +160,7 @@ check("a job may pin its own timezone", () => {
 });
 
 check("the schedules path is published so a skill can create jobs", () => {
-  assert.ok(/cleanEnv\.BOT_SCHEDULES_FILE = SCHEDULES_FILE/.test(bot),
+  assert.ok(/BOT_SCHEDULES_FILE: SCHEDULES_FILE,/.test(bot),
     "without this a scheduling skill would have to hardcode the path");
 });
 

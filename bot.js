@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { runEnvPolicy, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, discordCarriers, paperclipCarriers, parityMcpEnv, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
+const { buildRunEnv, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
@@ -235,30 +235,44 @@ function settingsArgs({ board = false, tmpDir = null } = {}) {
   // top of the bot's own settings.
   return ["--settings", JSON.stringify(boardSettings(botSettings(), boardReadDeniedPaths(), CLAUDE_CWD, { ...BOARD_POLICY, tmpDir }))];
 }
-// The Paperclip connector keys: every configured board's, not only the first —
-// an extra board names its own — and whether or not its listener is on.
-function connectorKeys() {
-  return boardKeyEnvs(process.env);
-}
-// What a board run hands Codex for the shared escalate action (process MCP,
-// `x-paperclip-agent-key` / `x-paperclip-run-id`): the seat's own key and the
-// run it acts in. A server names them in `env_http_headers`; no command sees
-// the key (shellWithheld).
-const RUN_AGENT_KEY_ENV = "PAPERCLIP_RUN_AGENT_KEY";
-const RUN_ID_ENV = "PAPERCLIP_RUN_ID";
-// The run environment (BOT_RUN_ENV), resolved once per use by the one policy
-// that decides both what a run inherits and what its commands are kept from
-// (runEnvPolicy). Startup refuses a policy with problems; a run never builds
-// on one.
-function runEnv() {
-  const policy = runEnvPolicy(process.env, process.env.BOT_RUN_ENV);
-  if (policy.problems.length) throw new Error(policy.problems.join("; "));
-  return policy;
-}
-// What a Codex run's commands never see: the connector keys, the run's own
-// seat key, and every credential the run environment keeps (runEnvPolicy).
-function shellWithheld() {
-  return [...new Set([...connectorKeys(), RUN_AGENT_KEY_ENV, ...runEnv().shellExclude])];
+// A run's environment, from the one builder that sees every writer — the
+// bot's environment under BOT_RUN_ENV, the harness's paths, the MCP servers'
+// env and a board task's seat — and decides each variable over the result:
+// whether the run has it, and whether its commands can read it (buildRunEnv,
+// docs/run-environment.md). `run` is "session", "parity" or "board".
+function runEnvFor(run, { channelId = "", runOutbox = OUTBOX_DIR, tmpDir = null, seat = null } = {}) {
+  return buildRunEnv({
+    env: process.env,
+    spec: process.env.BOT_RUN_ENV,
+    runtime: RUNTIME.name,
+    mode: PERMISSION_MODE,
+    run,
+    // Every configured board's key, not only the first, listener on or not.
+    connectorKeys: boardKeyEnvs(process.env),
+    mcpEnv: CODEX_MCP?.env ?? null,
+    mcpArgv: CODEX_MCP ? Object.fromEntries(Object.entries(CODEX_MCP.servers).map(([n, s]) => [n, [s.command, ...(s.args || []), s.cwd || ""]])) : null,
+    seat,
+    tmpDir,
+    // Publish the RESOLVED paths. This is what stops harness-owned skills from
+    // rotting: a skill that reads $BOT_BUFFER_FILE cannot go stale, while one
+    // that names `.po-bot-conversation-buffer.txt` breaks the moment a bot is
+    // renamed — which is exactly what happened to the shipped /remember, whose
+    // three hardcoded paths were ALL dead by the time anyone checked.
+    published: {
+      BOT_STATE_DIR: STATE_DIR,
+      BOT_SUMMARIES_DIR: HISTORY_DIR,
+      BOT_ATTACHMENTS_DIR: ATTACHMENTS_DIR,
+      BOT_OUTBOX_DIR: runOutbox,
+      BOT_BUFFER_FILE: BUFFER_FILE,
+      BOT_SESSIONS_FILE: SESSION_FILE,
+      BOT_JOB_HISTORY_FILE: JOB_HISTORY_FILE,
+      BOT_SCHEDULES_FILE: SCHEDULES_FILE,
+      BOT_CHANNEL_ID: String(channelId),
+      // Skills name their scripts under $CLAUDE_PLUGIN_ROOT, which Claude sets
+      // for a plugin; Codex has no plugin folder, so the harness sets it.
+      ...(CODEX && skillPacks().includes(SKILL_PACK) ? { CLAUDE_PLUGIN_ROOT: SKILL_PACK } : {}),
+    },
+  });
 }
 // What a board run's session is made with (boardAccessKey): one made under
 // other access is never resumed. Every permission input counts — a parity run
@@ -296,7 +310,8 @@ function mcpArgs() {
  * The same servers for a Codex bypass session: MCP_CONFIG, MCP_CONFIG_EXTRA and
  * the repo's .mcp.json, read once at startup. Codex runs local (stdio) servers
  * only, so any other kind is skipped and named in the log; their env values go
- * to the child process, never onto the command line. Without MCP_CONFIG_STRICT
+ * to the child process, never onto the command line (a server's command, args
+ * and cwd do go there, so runEnvFor refuses a credential in them). Without MCP_CONFIG_STRICT
  * the operator's own Codex config adds its servers, as the host's do on Claude.
  */
 function codexMcp() {
@@ -555,6 +570,7 @@ const BUFFER_FILE = join(STATE_DIR, "buffer.txt");
 // the file is a temporal-dead-zone error waiting for the first message.
 const SCHEDULES_FILE = join(STATE_DIR, "schedules.json");
 const JOB_HISTORY_FILE = join(STATE_DIR, "job-history.jsonl");
+const SESSION_FILE = join(STATE_DIR, "sessions.json");
 
 // Files that used to live in the install directory, keyed by BOT_NAME. Moved on
 // first start rather than abandoned — a bot that silently forgets every session
@@ -642,14 +658,6 @@ if (RUNTIME.problems.length) {
   for (const problem of RUNTIME.problems) log.fatal(problem);
   process.exit(EXIT_CONFIG);
 }
-// Every run builds its environment from BOT_RUN_ENV, so a list the bot would
-// read differently from its operator, or one that could only be held by
-// dropping a policy setting, refuses to start (runEnvPolicy).
-const RUN_ENV_PROBLEMS = runEnvPolicy(process.env, process.env.BOT_RUN_ENV).problems;
-if (RUN_ENV_PROBLEMS.length) {
-  for (const problem of RUN_ENV_PROBLEMS) log.fatal(`BOT_RUN_ENV refused — ${problem}`);
-  process.exit(EXIT_CONFIG);
-}
 log.info({ runtime: RUNTIME.name, source: RUNTIME.source, bin: RUNTIME.bin, model: RUNTIME.model, ...(CODEX ? { version: RUNTIME.version } : {}) },
   `Runtime: ${RUNTIME.name} — every run of this bot uses it`);
 // The role file this runtime loads from CLAUDE_CWD. Absent, every run starts
@@ -663,6 +671,18 @@ const CODEX_MCP = CODEX && PERMISSION_MODE === "bypass" ? codexMcp() : null;
 // Not passed by the harness; the session still loads the Codex config, so a
 // server defined there (the repo's .codex/config.toml, ~/.codex) is available.
 for (const { name, reason } of CODEX_MCP?.skipped ?? []) log.warn({ server: name, reason }, "MCP server not passed to Codex — skipped; define it in the Codex config if the bot needs it");
+// Every run builds its environment the same way (runEnvFor), so a
+// configuration the builder refuses — a BOT_RUN_ENV the bot would read
+// differently from its operator, a policy setting or server env that could
+// only be held by handing a credential to commands — refuses to start, for
+// each kind of run this bot will make. A seat is added per task and only ever
+// as a hidden variable, so it cannot turn a startup pass into a refusal.
+for (const run of ["session", ...(PAPERCLIP_BOARDS.length ? [BOARD_KIND === "board" ? "board" : "parity"] : [])]) {
+  const { problems } = runEnvFor(run);
+  if (!problems.length) continue;
+  for (const problem of problems) log.fatal(`Run environment refused (${run} run) — ${problem}`);
+  process.exit(EXIT_CONFIG);
+}
 // A malformed inline BOT_SETTINGS would fail every session, one message at a time.
 if (SESSION_SETTINGS.startsWith("{")) {
   try {
@@ -1295,7 +1315,7 @@ const MAX_CONCURRENT_CLAUDE = parseInt(process.env.MAX_CONCURRENT_CLAUDE, 10) ||
 const botExchanges = new Map();
 
 // --- Session continuity: track Claude session IDs per channel for --resume ---
-const SESSION_FILE = join(STATE_DIR, "sessions.json");
+// (SESSION_FILE is declared with the other state paths above.)
 // Where each PRIVATE_MEMORY_ENV variable points, in the same order: Discord
 // memory a board run is denied by path as well as by variable.
 function privateMemoryPaths() {
@@ -2159,6 +2179,20 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       ? `${attachmentLines.join("\n")}\n\n${prompt}`
       : prompt;
 
+    // The run's environment, built once over every writer (runEnvFor) and
+    // final here: Codex's shell exclusions come from the same decision, so no
+    // variable is kept from commands by a list computed before it was written.
+    const seatRun = opts.paperclipRun;
+    const built = runEnvFor(!opts.noBufferContext ? "session" : (narrowBoard ? "board" : "parity"), {
+      channelId, runOutbox, tmpDir: boardTmp,
+      seat: seatRun?.runId ? { value: process.env[seatRun.keyEnv], runId: seatRun.runId } : null,
+    });
+    if (built.problems.length) {
+      if (boardTmp) rmSync(boardTmp, { recursive: true, force: true });
+      throw new Error(`Run environment refused — ${built.problems.join("; ")}`);
+    }
+    const cleanEnv = built.env;
+
     const attachmentLog = { attachments: fileRefs.length, failedAttachments: attachmentFailures.length };
     if (CODEX) {
       // The same run, as Codex expresses it (lib/runtime/codex.js): the board
@@ -2179,7 +2213,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
         packs,
         mcp: CODEX_MCP?.servers,
         strictMcp: Boolean(CODEX_MCP?.strict),
-        shellExclude: shellWithheld(),
+        shellExclude: built.shellExclude,
       }));
       reqLog.info({ ...(resumeSessionId ? { sessionId: resumeSessionId } : {}), ...attachmentLog }, resumeSessionId ? "Resuming Codex session" : "Starting fresh Codex session");
     } else if (resumeSessionId) {
@@ -2189,71 +2223,6 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       args.push("-p", "--", finalPrompt);
       reqLog.info(attachmentLog, "Starting fresh Claude session");
     }
-
-    // Build a clean env without Claude nesting vars. A bot that names its run
-    // environment (BOT_RUN_ENV) passes on only those credentials, with the
-    // basics and the harness's own policy settings (runEnvPolicy).
-    const cleanEnv = { ...runEnv().inherit };
-
-    // Publish the RESOLVED paths. This is what stops harness-owned skills from
-    // rotting: a skill that reads $BOT_BUFFER_FILE cannot go stale, while one
-    // that names `.po-bot-conversation-buffer.txt` breaks the moment a bot is
-    // renamed — which is exactly what happened to the shipped /remember, whose
-    // three hardcoded paths were ALL dead by the time anyone checked.
-    cleanEnv.BOT_STATE_DIR = STATE_DIR;
-    cleanEnv.BOT_SUMMARIES_DIR = HISTORY_DIR;
-    cleanEnv.BOT_ATTACHMENTS_DIR = ATTACHMENTS_DIR;
-    cleanEnv.BOT_OUTBOX_DIR = runOutbox;
-    cleanEnv.BOT_BUFFER_FILE = BUFFER_FILE;
-    cleanEnv.BOT_SESSIONS_FILE = SESSION_FILE;
-    cleanEnv.BOT_JOB_HISTORY_FILE = JOB_HISTORY_FILE;
-    cleanEnv.BOT_SCHEDULES_FILE = SCHEDULES_FILE;
-    cleanEnv.BOT_CHANNEL_ID = String(channelId);
-    // Every board run loses the Discord and bridge credentials under any name,
-    // and any variable carrying one's value (discordCarriers).
-    if (opts.noBufferContext) for (const name of discordCarriers(cleanEnv)) delete cleanEnv[name];
-    if (opts.noBufferContext && !narrowBoard) {
-      for (const name of Object.keys(cleanEnv)) if (withheldFromParityBoard(name)) delete cleanEnv[name];
-      // Every Paperclip key under any name too — a narrow run's scrub already
-      // takes them (withheldFromBoard).
-      for (const name of paperclipCarriers(cleanEnv)) delete cleanEnv[name];
-    } else if (opts.noBufferContext) {
-      for (const name of Object.keys(cleanEnv)) if (withheldFromBoard(name)) delete cleanEnv[name];
-      // Claude Code's project auto-memory is shared with the Discord sessions in
-      // the same CLAUDE_CWD and loads at startup, before any tool runs. Off here
-      // and in boardSettings; the CLI reads this variable first.
-      cleanEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
-      if (boardTmp) cleanEnv.TMPDIR = boardTmp;
-    }
-    // A board or restricted run reads no settings file (permissionArgs); its
-    // CLAUDE.md comes in through --add-dir, which loads one only with this set.
-    if (narrowBoard || PERMISSION_MODE === "restricted") cleanEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";
-    // The Paperclip connector keys leave every run, Discord's included…
-    for (const name of connectorKeys()) delete cleanEnv[name];
-    if (CODEX) {
-      // Skills name their scripts under $CLAUDE_PLUGIN_ROOT, which Claude sets
-      // for a plugin; Codex has no plugin folder, so the harness sets it.
-      if (skillPacks().includes(SKILL_PACK)) cleanEnv.CLAUDE_PLUGIN_ROOT = SKILL_PACK;
-      // A bypass session's MCP servers read their keys from here (codexMcp).
-      // A parity board run's: never one that puts back a withheld credential.
-      // …except where a server names one: Codex hands it to that server and
-      // keeps it out of every command (shellExclude).
-      if (!narrowBoard && CODEX_MCP) Object.assign(cleanEnv, opts.noBufferContext ? parityMcpEnv(CODEX_MCP.env) : CODEX_MCP.env);
-      // A board run acts on its card as this seat, in this run, through the
-      // shared escalate action: set after every scrub above and withheld from
-      // commands (shellWithheld). Never on a narrow run, which has no shell
-      // policy to keep the key out.
-      const run = opts.paperclipRun;
-      if (run?.runId && !narrowBoard && PERMISSION_MODE === "bypass" && process.env[run.keyEnv]) {
-        cleanEnv[RUN_AGENT_KEY_ENV] = process.env[run.keyEnv];
-        cleanEnv[RUN_ID_ENV] = run.runId;
-      }
-    }
-
-    delete cleanEnv.CLAUDECODE;
-    delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
-    delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
-    delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
 
     // The spawn boundary. The context budget above is the policy; this is the
     // guarantee — an oversized argument gets cut here rather than becoming a

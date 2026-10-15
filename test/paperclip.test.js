@@ -871,8 +871,8 @@ const poller = (b, answer) => createPaperclipPoller({
   await check("bot.js: board runs never see the buffer, and the key never reaches Claude", () => {
     assert.match(bot, /noBufferContext: true/);
     assert.match(bot, /opts\.noBufferContext \? "" : buildContextPrompt/);
-    assert.match(bot, /function connectorKeys\(\) \{\n  return boardKeyEnvs\(process\.env\);/);
-    assert.match(bot, /for \(const name of connectorKeys\(\)\) delete cleanEnv\[name\];/);
+    // Every board's key, withheld from every run by the one builder (buildRunEnv).
+    assert.match(bot, /connectorKeys: boardKeyEnvs\(process\.env\),/);
   });
 
   await check("a file the run made is named as not delivered, never left to read as attached", () => {
@@ -937,7 +937,7 @@ const poller = (b, answer) => createPaperclipPoller({
   });
 
   await check("bot.js: every board's key is kept from Claude, and an extra board has its own state and sessions", () => {
-    assert.match(bot, /function connectorKeys\(\) \{\n  return boardKeyEnvs\(process\.env\);/);
+    assert.match(bot, /connectorKeys: boardKeyEnvs\(process\.env\),/);
     assert.match(bot, /const tag = board\.id \? `paperclip-\$\{board\.id\}` : "paperclip";/);
     assert.match(bot, /stateFile: join\(STATE_DIR, `\$\{tag\}\.json`\)/);
     assert.match(bot, /runClaude\(prompt, `\$\{tag\}-\$\{issue\.identifier\}`/);

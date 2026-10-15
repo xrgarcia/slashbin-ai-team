@@ -5,7 +5,7 @@
 // mode". It cannot tell you that the precedence actually works. This runs it.
 
 const assert = require("assert");
-const { runEnvPolicy, runEnvProblems, credentialName, MIN_CREDENTIAL_CHARS, HARNESS_POLICY_ENV, RUN_ENV_BASE, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, boardRunKind, withheldFromParityBoard } = require("../lib/permission-mode");
+const { buildRunEnv, runEnvProblems, credentialName, MIN_CREDENTIAL_CHARS, HARNESS_POLICY_ENV, RUN_ENV_BASE, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, DISCORD_CREDENTIAL_ENV, BOARD_BOT_ENV, withheldFromBoard, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, SYSTEM_READ, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, boardRunKind } = require("../lib/permission-mode");
 const { readFileSync, writeFileSync, mkdtempSync, mkdirSync, readdirSync, rmSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
@@ -22,6 +22,10 @@ function check(name, fn) {
     console.log(`  FAIL ${name}\n       ${err.message}`);
   }
 }
+
+// A run's environment from the one builder (docs/run-environment.md); a Claude
+// bypass Discord session unless the case says otherwise.
+const build = (o) => buildRunEnv({ env: {}, runtime: "claude", mode: "bypass", run: "session", ...o });
 
 console.log("\nPermission mode — precedence");
 
@@ -96,7 +100,9 @@ check("restricted sessions read no settings file, so only the bot's list approve
   const bypass = fn.slice(fn.indexOf('if (PERMISSION_MODE === "bypass")'), fn.indexOf('"--tools", ALLOWED_TOOLS'));
   assert.ok(!bypass.includes("--setting-sources"), "bypass argv must stay the historical one");
   // --add-dir loads that folder's CLAUDE.md only with this set.
-  assert.match(bot, /if \(narrowBoard \|\| PERMISSION_MODE === "restricted"\) cleanEnv\.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";/);
+  assert.strictEqual(build({ mode: "restricted" }).env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD, "1");
+  assert.strictEqual(build({ run: "board" }).env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD, "1");
+  assert.ok(!("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD" in build({}).env), "a bypass session's env must stay the historical one");
 });
 
 check("a board run gets none of the bot's own configuration, but keeps what the hooks read", () => {
@@ -256,11 +262,14 @@ check("a board run drops every memory variable and denies the path each one name
   // so a new store published to Discord runs cannot be left open to board runs.
   const paths = src.match(/function privateMemoryPaths\(\) \{\s*return \[([^\]]+)\]/)[1].split(",").map((x) => x.trim());
   assert.deepStrictEqual(paths, PRIVATE_MEMORY_ENV.map((name) => {
-    const m = src.match(new RegExp(`cleanEnv\\.${name} = (\\w+);`));
+    const m = src.match(new RegExp(`\\b${name}: (\\w+),`));
     assert.ok(m, `${name} is no longer published — update PRIVATE_MEMORY_ENV`);
     return m[1];
   }));
-  assert.match(src, /if \(opts\.noBufferContext\) \{\s*for \(const name of Object\.keys\(cleanEnv\)\) if \(withheldFromBoard\(name\)\) delete cleanEnv\[name\];/);
+  // Published by the harness, and still withheld from a board run by the builder.
+  const published = Object.fromEntries(PRIVATE_MEMORY_ENV.map((name) => [name, `/state/${name}`]));
+  const board = build({ run: "board", published }).env;
+  for (const name of PRIVATE_MEMORY_ENV) assert.ok(!(name in board), `${name} reaches a board run`);
   for (const name of PRIVATE_MEMORY_ENV) assert.ok(withheldFromBoard(name), `${name} reaches a board run`);
   // Second-pass review of 2.7.0: a bypass board run could print the bot's
   // Discord token into its reply. Every credential the bot itself reads that
@@ -269,10 +278,9 @@ check("a board run drops every memory variable and denies the path each one name
     assert.ok(DISCORD_CREDENTIAL_ENV.includes(name) && withheldFromBoard(name), `${name} reaches a board run`);
     assert.ok(src.includes(`process.env.${name}`), `${name} is no longer read by the bot — revisit this list`);
   }
-  // The withholding runs after every variable is set and before the spawn.
-  const at = (re) => src.search(re);
-  assert.ok(at(/cleanEnv\.BOT_CHANNEL_ID = /) < at(/withheldFromBoard\(name\)\) delete/) && at(/withheldFromBoard\(name\)\) delete/) < at(/spawn\(RUNTIME\.bin, safeArgs/),
-    "the credentials are removed before they are set, or after the spawn");
+  // The builder decides over every writer at once: a published name is withheld like an inherited one.
+  const both = build({ run: "board", env: { DISCORD_TOKEN: "discord-token-value", BRIDGE_TOKEN: "bridge-token-value" }, published: { BOT_CHANNEL_ID: "1" } }).env;
+  assert.ok(!("DISCORD_TOKEN" in both) && !("BRIDGE_TOKEN" in both), "a board run keeps a Discord credential");
   assert.match(src, /deny: \[PERMISSION_DENY, \.\.\.privateMemoryDeny\(boardReadDeniedPaths\(\), BOARD_ENGINEERING \? \["Read", "Edit"\] : \["Read"\]\)\]/, "the board run no longer denies the memory paths");
   // Second pass on e4411f4: files already sent to Discord sit in the outbox,
   // which can be moved anywhere, including inside CLAUDE_CWD.
@@ -305,7 +313,7 @@ check("a board run is least privilege in every mode — never bypass", () => {
   // repo's, the user's — was honored by dontAsk. None is read; CLAUDE.md still is.
   assert.deepStrictEqual(boardArgs({ tools: "Read", cwd: "/repo" }).slice(4), ["--setting-sources", "", "--add-dir", "/repo"]);
   assert.match(src, /boardArgs\(\{ tools: BOARD_POLICY\.tools, allow: \[BOARD_POLICY\.allow, \.\.\.boardEngineeringRules\(CLAUDE_CWD, BOARD_POLICY\)\], cwd: CLAUDE_CWD,/);
-  assert.match(src, /cleanEnv\.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";/, "a board run loses the repo's CLAUDE.md");
+  assert.strictEqual(build({ run: "board" }).env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD, "1", "a board run loses the repo's CLAUDE.md");
   assert.ok(!args.some((a) => /dangerously/.test(a)), "a board run must never skip permissions");
   assert.deepStrictEqual(boardArgs({ tools: "Read", allow: "mcp__db" }).slice(6), ["--allowedTools", "mcp__db"]);
 });
@@ -322,7 +330,8 @@ check("a board run's shell is sandboxed to the working directory, on top of the 
   // Second pass on 09bb6cd: the CLI loads project auto-memory, shared with the
   // Discord sessions, at startup, before any sandbox or deny rule applies.
   assert.strictEqual(boardSettings({ autoMemoryEnabled: true }, [], "/repo").autoMemoryEnabled, false, "a board run loads Discord sessions' auto-memory");
-  assert.match(readFileSync(join(__dirname, "..", "bot.js"), "utf8"), /if \(opts\.noBufferContext\) \{[^}]*cleanEnv\.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";[^}]*\}/, "the board run's env leaves auto-memory on");
+  assert.strictEqual(build({ run: "board" }).env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1", "the board run's env leaves auto-memory on");
+  assert.ok(!("CLAUDE_CODE_DISABLE_AUTO_MEMORY" in build({ run: "parity" }).env), "a parity run is the Discord session");
   assert.strictEqual(s.sandbox.failIfUnavailable, true, "a host without the sandbox would run the board task open");
   assert.strictEqual(s.sandbox.allowUnsandboxedCommands, false, "a command could step outside the sandbox");
   assert.deepStrictEqual(s.sandbox.filesystem.denyRead, ["/etc/secret", "/", "/repo/bot-history", "/state/buffer.txt"]);
@@ -421,7 +430,9 @@ check("engineering: a policy that would open what a board run must not reach is 
 check("bot.js: an engineering run gets a private temp folder, removed when the run ends", () => {
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
   assert.match(src, /mkdtempSync\(join\(require\("os"\)\.tmpdir\(\), `\$\{BOT_NAME\}-board-`\)\)|mkdtempSync\(join\(os\.tmpdir\(\), `\$\{BOT_NAME\}-board-`\)\)/);
-  assert.match(src, /if \(boardTmp\) cleanEnv\.TMPDIR = boardTmp;/);
+  assert.match(src, /channelId, runOutbox, tmpDir: boardTmp,/);
+  assert.strictEqual(build({ run: "board", env: { TMPDIR: "/tmp" }, tmpDir: "/tmp/b-1" }).env.TMPDIR, "/tmp/b-1");
+  assert.strictEqual(build({ env: { TMPDIR: "/tmp" }, tmpDir: "/tmp/b-1" }).env.TMPDIR, "/tmp", "a session took a board run's temp folder");
   assert.ok((src.match(/rmSync\(boardTmp, \{ recursive: true, force: true \}\)/g) || []).length >= 1, "the private temp folder is never removed");
 });
 
@@ -479,7 +490,8 @@ check("parity runs a Paperclip task as the bot's Discord session", () => {
   assert.match(src, /const narrowBoard = runKind === "board";/);
   assert.match(src, /kind: runKind,/, "the Codex run ignores the board policy");
   assert.match(src, /filesystem: narrowBoard \? codexRuntime\.boardFilesystem\(/);
-  assert.match(src, /if \(!narrowBoard && CODEX_MCP\) Object\.assign\(cleanEnv, opts\.noBufferContext \? parityMcpEnv\(CODEX_MCP\.env\) : CODEX_MCP\.env\);/, "a parity Codex run lost its MCP keys, or gets them unscrubbed");
+  assert.match(src, /runEnvFor\(!opts\.noBufferContext \? "session" : \(narrowBoard \? "board" : "parity"\),/, "a parity run is not built as one");
+  assert.match(src, /mcpEnv: CODEX_MCP\?\.env \?\? null,/, "a parity Codex run lost its MCP keys");
   assert.match(src, /CODEX && !BOARD_POLICY\.parity \? codexRuntime\.codexBoardProblems/);
 });
 
@@ -516,15 +528,16 @@ check("credential files under the folders the bot's settings open to reading are
 });
 
 check("a parity run's MCP env never puts back a withheld credential, by name or by value", () => {
-  const { parityMcpEnv } = require("../lib/permission-mode");
-  const env = { DISCORD_TOKEN: "tok-123", OTHER: "fine" };
-  const out = parityMcpEnv({ DISCORD_TOKEN: "tok-123", TOKEN: "tok-123", AUTH: "Bot tok-123", API_KEY: "k-1", EMPTY: "" }, env);
-  assert.deepStrictEqual(out, { API_KEY: "k-1", EMPTY: "" });
-  for (const name of DISCORD_CREDENTIAL_ENV) assert.ok(!(name in parityMcpEnv({ [name]: "x" }, {})), `${name} restored by name`);
+  const b = build({ runtime: "codex", run: "parity", env: { DISCORD_TOKEN: "tok-123456", OTHER: "fine" },
+    mcpEnv: { DISCORD_TOKEN: "tok-123456", TOKEN: "tok-123456", AUTH: "Bot tok-123456", API_KEY: "k-1", EMPTY: "" } });
+  assert.deepStrictEqual(Object.keys(b.env).sort(), ["API_KEY", "EMPTY", "OTHER"]);
+  assert.ok(b.shellExclude.includes("API_KEY"), "a server's key reaches a command");
+  for (const name of DISCORD_CREDENTIAL_ENV) {
+    assert.ok(!(name in build({ runtime: "codex", run: "parity", mcpEnv: { [name]: "x" } }).env), `${name} restored by name`);
+  }
 });
 
 check("no board run keeps a Discord or bridge credential, under any name or any variable carrying its value", () => {
-  const { discordCarriers, parityMcpEnv } = require("../lib/permission-mode");
   // The fleet's shared environment: each bot holds every bot's token under its
   // own name, beside the DISCORD_TOKEN it runs as.
   const env = {
@@ -533,50 +546,53 @@ check("no board run keeps a Discord or bridge credential, under any name or any 
     SESSION_HEADER: "Bot fixture-discord-po", RELAY_AUTH: "fixture-discord-em",
     GITHUB_TOKEN: "fixture-github", DOPPLER_CONFIG: "prd", DISCORD_CHANNEL_ID: "123", FLAG: "1",
   };
-  const kept = Object.keys(env).filter((k) => !discordCarriers(env).includes(k));
-  assert.deepStrictEqual(kept, ["GITHUB_TOKEN", "DOPPLER_CONFIG", "DISCORD_CHANNEL_ID", "FLAG"]);
-  for (const name of ["EM_DISCORD_TOKEN", "PO_DISCORD_TOKEN", "OPS_DISCORD_TOKEN", "DISCORD_BOT_KEY"]) {
-    assert.ok(withheldFromParityBoard(name) && withheldFromBoard(name), `${name} reaches a board run`);
+  for (const run of ["parity", "board"]) {
+    for (const spec of [undefined, "RELAY_AUTH,SESSION_HEADER,GITHUB_TOKEN,DOPPLER_CONFIG,DISCORD_CHANNEL_ID,FLAG"]) {
+      const b = build({ run, env: { ...env, BOT_RUN_ENV: spec }, spec });
+      assert.deepStrictEqual(Object.keys(b.env).filter((k) => k in env).sort(), ["DISCORD_CHANNEL_ID", "DOPPLER_CONFIG", "FLAG", "GITHUB_TOKEN"], `${run}, BOT_RUN_ENV=${spec}`);
+    }
   }
-  assert.deepStrictEqual(parityMcpEnv({ PO_TOKEN: "fixture-discord-po", API_KEY: "k-1" }, env), { API_KEY: "k-1" });
-  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.match(src, /if \(opts\.noBufferContext\) for \(const name of discordCarriers\(cleanEnv\)\) delete cleanEnv\[name\];/, "a board run keeps a credential carried under another name");
+  const parity = build({ runtime: "codex", run: "parity", env, mcpEnv: { PO_TOKEN: "fixture-discord-po", API_KEY: "k-1" } }).env;
+  assert.ok(!("PO_TOKEN" in parity) && parity.API_KEY === "k-1");
+  // The Discord session runs as the bot.
+  assert.strictEqual(build({ env }).env.DISCORD_TOKEN, env.DISCORD_TOKEN);
 });
 
 check("a parity run's commands get no Paperclip key, under any name or any variable carrying its value", () => {
-  const { paperclipCarriers } = require("../lib/permission-mode");
   // The shared environment: this bot's own board key under a second name, and other bots' keys.
   const env = {
     PAPERCLIP_API_KEY: "fixture-board-own", EM_PAPERCLIP_API_KEY: "fixture-board-own", PO_PAPERCLIP_API_KEY: "fixture-board-po",
     OPS_EXTRA_PAPERCLIP_API_KEY: "fixture-board-ops", BOARD_AUTH: "Bearer fixture-board-po",
     PAPERCLIP_URL: "https://board.example", PAPERCLIP_PROMPT_CHANNEL: "123", GITHUB_TOKEN: "fixture-github",
   };
-  const kept = Object.keys(env).filter((k) => !paperclipCarriers(env).includes(k));
-  assert.deepStrictEqual(kept, ["PAPERCLIP_URL", "PAPERCLIP_PROMPT_CHANNEL", "GITHUB_TOKEN"]);
-  const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.match(src, /if \(opts\.noBufferContext && !narrowBoard\) \{[^}]*for \(const name of paperclipCarriers\(cleanEnv\)\) delete cleanEnv\[name\];/,
-    "a parity run's commands keep a Paperclip key held under another name");
+  for (const runtime of ["claude", "codex"]) {
+    const kept = Object.keys(build({ runtime, run: "parity", env, connectorKeys: ["PAPERCLIP_API_KEY"] }).env);
+    assert.deepStrictEqual(kept.sort(), ["GITHUB_TOKEN", "PAPERCLIP_PROMPT_CHANNEL", "PAPERCLIP_URL"], runtime);
+  }
+  // A Discord session keeps other boards' keys, never this bot's connector key under any name.
+  const session = Object.keys(build({ env, connectorKeys: ["PAPERCLIP_API_KEY"] }).env);
+  assert.ok(!session.includes("PAPERCLIP_API_KEY") && !session.includes("EM_PAPERCLIP_API_KEY"));
+  assert.ok(session.includes("PO_PAPERCLIP_API_KEY"));
 });
 
-check("a parity run withholds only the Discord credentials, and still sees no other channel", () => {
-  // The two named exceptions. Everything else a Discord session has — Doppler,
+check("a parity run withholds only the Discord and Paperclip credentials, and still sees no other channel", () => {
+  // The named exceptions. Everything else a Discord session has — Doppler,
   // MCP config, the BOT_* paths — a parity run has too.
-  for (const name of DISCORD_CREDENTIAL_ENV) assert.ok(withheldFromParityBoard(name), `${name} reaches a parity run`);
-  for (const name of ["MCP_CONFIG", "MCP_CONFIG_EXTRA", "BOT_STATE_DIR", "BOT_SCHEDULES_FILE", "DOPPLER_PROJECT", "DOPPLER_CONFIG", "GITHUB_TOKEN"]) {
-    assert.ok(!withheldFromParityBoard(name), `${name} is silently withheld from a parity run`);
-  }
+  const env = Object.fromEntries(DISCORD_CREDENTIAL_ENV.map((name, i) => [name, `discord-credential-${i}`]));
+  const open = ["MCP_CONFIG", "MCP_CONFIG_EXTRA", "DOPPLER_PROJECT", "DOPPLER_CONFIG", "GITHUB_TOKEN"];
+  for (const name of open) env[name] = `value-of-${name}`;
+  const b = build({ run: "parity", env, published: { BOT_STATE_DIR: "/state", BOT_SCHEDULES_FILE: "/state/schedules.json" } });
+  for (const name of DISCORD_CREDENTIAL_ENV) assert.ok(!(name in b.env), `${name} reaches a parity run`);
+  for (const name of [...open, "BOT_STATE_DIR", "BOT_SCHEDULES_FILE"]) assert.ok(name in b.env, `${name} is silently withheld from a parity run`);
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.match(src, /if \(opts\.noBufferContext && !narrowBoard\) \{\s*for \(const name of Object\.keys\(cleanEnv\)\) if \(withheldFromParityBoard\(name\)\) delete cleanEnv\[name\];/);
-  // The Paperclip connector keys are removed from every run, Discord's included,
-  // before a Codex MCP server's env goes back in for the servers that name them;
-  // the model's commands are kept from them (shellExclude).
-  assert.match(src, /function connectorKeys\(\) \{\n  return boardKeyEnvs\(process\.env\);/);
-  const removed = src.indexOf("for (const name of connectorKeys()) delete cleanEnv[name];");
-  const restored = src.indexOf("if (!narrowBoard && CODEX_MCP) Object.assign(cleanEnv,");
-  assert.ok(removed > 0 && restored > removed, "a Codex MCP server loses the connector key its config names");
-  assert.ok(!/delete cleanEnv\.PAPERCLIP_API_KEY|delete cleanEnv\[keyEnv\]/.test(src), "a connector key is removed after the MCP env is put back");
-  assert.match(src, /shellExclude: shellWithheld\(\),/, "a bypass Codex session's commands can read the connector keys");
-  assert.match(src, /\[\.\.\.connectorKeys\(\), RUN_AGENT_KEY_ENV,/, "the withheld set starts with the connector keys");
+  // The Paperclip connector keys are withheld from every run, Discord's
+  // included; a Codex MCP server that names one gets it back, and the model's
+  // commands are kept from it (shellExclude) — all in the one builder.
+  assert.match(src, /connectorKeys: boardKeyEnvs\(process\.env\),/);
+  const served = build({ runtime: "codex", env: { PAPERCLIP_API_KEY: "connector-key" }, mcpEnv: { PAPERCLIP_API_KEY: "connector-key" }, connectorKeys: ["PAPERCLIP_API_KEY"] });
+  assert.strictEqual(served.env.PAPERCLIP_API_KEY, "connector-key", "a Codex MCP server loses the connector key its config names");
+  assert.ok(served.shellExclude.includes("PAPERCLIP_API_KEY"), "a bypass Codex session's commands can read the connector key");
+  assert.match(src, /shellExclude: built\.shellExclude,/);
   // Other channels' conversation stays out of the prompt in every board policy.
   assert.match(src, /opts\.noBufferContext \? "" : buildContextPrompt/);
 });
@@ -596,9 +612,19 @@ const POLICY = {
 const CREDS = { EM_GITHUB_TOKEN: "ghp_em_token_value", PROD_STRIPE_SRE_KEY: "sk_live_value", PAPERCLIP_API_KEY: "pcp_value",
   DOPPLER_TOKEN: "dp.st.value", RAILWAY_API_TOKEN: "rw_value" };
 
+/**
+ * The builder as BOT_RUN_ENV alone shapes it: a Codex bypass session with no
+ * MCP servers, connector keys or harness paths. `shellExclude` is what the
+ * run environment keeps from commands (the builder adds the seat key).
+ */
+const underList = (env, spec) => {
+  const b = buildRunEnv({ env, spec, runtime: "codex", mode: "bypass", run: "session" });
+  return { inherit: b.env, shellExclude: b.hidden, problems: b.problems };
+};
+
 /** The run's inherited environment, asserting the policy holds. */
 const inherited = (env, spec) => {
-  const p = runEnvPolicy(env, spec);
+  const p = underList(env, spec);
   assert.deepStrictEqual(p.problems, [], "the policy was refused");
   return p.inherit;
 };
@@ -606,7 +632,7 @@ const inherited = (env, spec) => {
 check("unset passes the whole environment on, as before, and withholds nothing extra from commands", () => {
   const env = { PATH: "/bin", EM_GITHUB_TOKEN: "x" };
   for (const spec of [undefined, "", " "]) {
-    assert.deepStrictEqual(runEnvPolicy(env, spec), { inherit: env, shellExclude: [], problems: [] });
+    assert.deepStrictEqual(underList(env, spec), { inherit: env, shellExclude: [], problems: [] });
   }
 });
 
@@ -618,7 +644,7 @@ check("named keeps the basics, the names and the harness policy, and no unlisted
 });
 
 check("a trailing * expands against the variables actually set", () => {
-  const p = runEnvPolicy({ NOVA_A: "1", NOVA_B: "2", EM_A: "3" }, "NOVA_*");
+  const p = underList({ NOVA_A: "1", NOVA_B: "2", EM_A: "3" }, "NOVA_*");
   assert.deepStrictEqual(Object.keys(p.inherit).sort(), ["NOVA_A", "NOVA_B"]);
   assert.deepStrictEqual(p.shellExclude, []);
 });
@@ -645,7 +671,7 @@ check("exact-name, prefix and credential-family combinations: every kept credent
     const cred = `NOVA_ROUTER_${f}`;
     const env = { PATH: "/bin", [cred]: `value-of-${f}-credential`, NOVA_URL: "https://router.example", GH_CONFIG_DIR: "/gh", ...POLICY, ...CREDS };
     for (const spec of [cred, "NOVA_*", `NOVA_ROUTER_*,GH_CONFIG_DIR`, `${cred},NOVA_URL,GH_CONFIG_DIR`]) {
-      const p = runEnvPolicy(env, spec);
+      const p = underList(env, spec);
       assert.deepStrictEqual(p.problems, [], `${spec}: refused`);
       assert.strictEqual(p.inherit[cred], env[cred], `${spec}: ${cred} did not reach the run's MCP servers`);
       assert.ok(p.shellExclude.includes(cred), `${spec}: ${cred} reaches a Codex command`);
@@ -657,9 +683,9 @@ check("exact-name, prefix and credential-family combinations: every kept credent
 
 check("the named Nova cases: NOVA_ROUTER_BEARER by prefix and NOVA_AUTH by exact name", () => {
   const env = { PATH: "/bin", NOVA_ROUTER_BEARER: "nova-bearer-value", NOVA_AUTH: "nova-auth-value", NOVA_URL: "https://r", ...POLICY };
-  assert.deepStrictEqual(runEnvPolicy(env, "NOVA_*").shellExclude.sort(), ["NOVA_AUTH", "NOVA_ROUTER_BEARER"]);
-  assert.deepStrictEqual(runEnvPolicy(env, "NOVA_AUTH").shellExclude, ["NOVA_AUTH"]);
-  assert.deepStrictEqual(runEnvPolicy(env, "NOVA_ROUTER_BEARER,NOVA_URL").shellExclude, ["NOVA_ROUTER_BEARER"]);
+  assert.deepStrictEqual(underList(env, "NOVA_*").shellExclude.sort(), ["NOVA_AUTH", "NOVA_ROUTER_BEARER"]);
+  assert.deepStrictEqual(underList(env, "NOVA_AUTH").shellExclude, ["NOVA_AUTH"]);
+  assert.deepStrictEqual(underList(env, "NOVA_ROUTER_BEARER,NOVA_URL").shellExclude, ["NOVA_ROUTER_BEARER"]);
 });
 
 check("whatever is listed, every inherited credential is withheld from commands, and only inherited names are", () => {
@@ -668,7 +694,7 @@ check("whatever is listed, every inherited credential is withheld from commands,
   const names = Object.keys(env);
   const specs = ["NOVA_*", "NOVA_AUTH", "DISCORDTOKEN,PAPERCLIPKEY", "GIT_AUTHOR_TOKEN", "EM_*,PROD_*", names.join(","), "NOVA_URL"];
   for (const spec of specs) {
-    const p = runEnvPolicy(env, spec);
+    const p = underList(env, spec);
     const kept = Object.keys(p.inherit);
     for (const k of kept) if (credentialName(k)) assert.ok(p.shellExclude.includes(k), `${spec}: ${k} reaches a Codex command`);
     for (const k of p.shellExclude) assert.ok(kept.includes(k), `${spec}: ${k} is excluded but not inherited`);
@@ -678,17 +704,17 @@ check("whatever is listed, every inherited credential is withheld from commands,
 check("a listed variable carrying a credential's value is withheld from commands too", () => {
   const env = { PATH: "/bin", NOVA_ROUTER_BEARER: "nova-bearer-value", NOVA_URL: "https://r/?b=nova-bearer-value", EM_GITHUB_TOKEN: "ghp_em_token_value",
     NOVA_REMOTE: "https://github.example/repo?access=ghp_em_token_value" };
-  const p = runEnvPolicy(env, "NOVA_*");
+  const p = underList(env, "NOVA_*");
   assert.deepStrictEqual(p.shellExclude.sort(), ["NOVA_REMOTE", "NOVA_ROUTER_BEARER", "NOVA_URL"]);
   // The basics never are: a credential naming a folder on PATH must not take PATH from every command.
-  const q = runEnvPolicy({ PATH: "/usr/bin:/opt/keys/bin", SIGNING_KEY_DIR: "/opt/keys/bin" }, "SIGNING_KEY_DIR");
+  const q = underList({ PATH: "/usr/bin:/opt/keys/bin", SIGNING_KEY_DIR: "/opt/keys/bin" }, "SIGNING_KEY_DIR");
   assert.deepStrictEqual(q.shellExclude, ["SIGNING_KEY_DIR"]);
 });
 
 check("a credential-named variable under a policy prefix is a credential, not a policy", () => {
   const env = { GIT_AUTHOR_NAME: "bot", GIT_AUTHOR_TOKEN: "git-author-token", NOVA_BEARER: "nova-bearer-value" };
   assert.ok(!("GIT_AUTHOR_TOKEN" in inherited(env, "NOVA_BEARER")), "an unlisted credential reached the run under a policy prefix");
-  const listed = runEnvPolicy(env, "NOVA_BEARER,GIT_AUTHOR_TOKEN");
+  const listed = underList(env, "NOVA_BEARER,GIT_AUTHOR_TOKEN");
   assert.strictEqual(listed.inherit.GIT_AUTHOR_TOKEN, env.GIT_AUTHOR_TOKEN);
   assert.ok(listed.shellExclude.includes("GIT_AUTHOR_TOKEN"));
   assert.strictEqual(listed.inherit.GIT_AUTHOR_NAME, "bot");
@@ -705,7 +731,7 @@ check("a policy setting holding a credential's value, exactly or as a substring,
     ]) {
       for (const [where, spec] of [["dropped", "NOVA_BEARER"], ["listed", "NOVA_BEARER,SVC_TOKEN"], ["prefix", "NOVA_*,SVC_*"]]) {
         const env = { PATH: "/bin", NOVA_BEARER: "nova-bearer-value", ...POLICY, [policy]: policyValue, SVC_TOKEN: credValue };
-        const p = runEnvPolicy(env, spec);
+        const p = underList(env, spec);
         const label = `${policy} ${how}, credential ${where}`;
         assert.strictEqual(p.problems.length, 1, `${label}: not refused`);
         assert.strictEqual(p.inherit, null, `${label}: an environment was still built`);
@@ -718,22 +744,22 @@ check("a policy setting holding a credential's value, exactly or as a substring,
 
 check("SMTP_AUTH_USER = BOT_MAIL_ALLOWED_RECIPIENTS refuses, and never drops the allowlist", () => {
   const env = { PATH: "/bin", ...POLICY, NOVA_BEARER: "nova-bearer-value", SMTP_AUTH_USER: "owner@example.com" };
-  const p = runEnvPolicy(env, "NOVA_BEARER");
+  const p = underList(env, "NOVA_BEARER");
   assert.strictEqual(p.inherit, null);
   assert.strictEqual(p.problems.length, 1);
   assert.match(p.problems[0], /^BOT_MAIL_ALLOWED_RECIPIENTS holds the value of SMTP_AUTH_USER/);
   assert.ok(!p.problems[0].includes("owner@example.com"), "the refusal prints the value");
   // Listing the username does not make the overlap safe: its value would reach every command through the allowlist.
-  assert.strictEqual(runEnvPolicy(env, "NOVA_BEARER,SMTP_AUTH_USER").problems.length, 1);
+  assert.strictEqual(underList(env, "NOVA_BEARER,SMTP_AUTH_USER").problems.length, 1);
   // Unset BOT_RUN_ENV inherits everything and drops nothing: nothing to refuse.
-  assert.deepStrictEqual(runEnvPolicy(env, undefined).inherit, env);
+  assert.deepStrictEqual(underList(env, undefined).inherit, env);
 });
 
 check("a short credential value is not matched inside a policy setting", () => {
   // "3" and "true" are counters and flags a policy holds by coincidence.
   const env = { ...POLICY, NOVA_BEARER: "nova-bearer-value", RETRY_AUTH: "3", FLAG_TOKEN: "true", ABCDE_KEY: "12345" };
   assert.ok("12345".length < MIN_CREDENTIAL_CHARS);
-  const p = runEnvPolicy(env, "NOVA_BEARER");
+  const p = underList(env, "NOVA_BEARER");
   assert.deepStrictEqual(p.problems, []);
   assert.strictEqual(p.inherit.BOT_MAX_WAKE_ATTEMPTS, "3");
 });
@@ -742,14 +768,14 @@ check("a list it would read differently from its operator is refused, at startup
   assert.deepStrictEqual(runEnvProblems("NOVA_BEARER, GH_CONFIG_DIR,NOVA_*"), []);
   for (const bad of ["*", "NOVA BEARER", "NOVA-BEARER", "NOVA_*_X", "$HOME"]) {
     assert.strictEqual(runEnvProblems(`NOVA_BEARER,${bad}`).length, 1, `${bad} was accepted`);
-    const p = runEnvPolicy({}, bad);
+    const p = underList({}, bad);
     assert.strictEqual(p.inherit, null);
     assert.match(p.problems.join(), /BOT_RUN_ENV entry/);
   }
   const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.match(bot, /const RUN_ENV_PROBLEMS = runEnvPolicy\(process\.env, process\.env\.BOT_RUN_ENV\)\.problems;\nif \(RUN_ENV_PROBLEMS\.length\) \{[\s\S]{0,200}process\.exit\(EXIT_CONFIG\)/);
-  // A run never builds on a refused policy.
-  assert.match(bot, /function runEnv\(\) \{\n  const policy = runEnvPolicy\(process\.env, process\.env\.BOT_RUN_ENV\);\n  if \(policy\.problems\.length\) throw/);
+  assert.match(bot, /for \(const run of \["session", [^\n]*\]\) \{\n  const \{ problems \} = runEnvFor\(run\);[\s\S]{0,200}process\.exit\(EXIT_CONFIG\)/);
+  // A run never builds on a refused environment.
+  assert.match(bot, /if \(built\.problems\.length\) \{[\s\S]{0,120}throw new Error/);
 });
 
 check("the bot refuses an overlapping policy at startup, before any run, without printing the value", () => {
@@ -764,10 +790,10 @@ check("the bot refuses an overlapping policy at startup, before any run, without
   const r = spawnSync(process.execPath, [join(__dirname, "..", "bot.js")], { cwd: join(dir, "run"), env, encoding: "utf8", timeout: 20000 });
   const out = r.stdout + r.stderr;
   assert.strictEqual(r.status, 78, `exit ${r.status}\n${out}`);
-  assert.match(out, /BOT_RUN_ENV refused — BOT_MAIL_ALLOWED_RECIPIENTS holds the value of SMTP_AUTH_USER/);
+  assert.match(out, /Run environment refused \(session run\) — BOT_MAIL_ALLOWED_RECIPIENTS holds the value of SMTP_AUTH_USER/);
   assert.ok(!/Discord login failed|Bot online|Starting fresh/.test(out), "the bot went on past the refusal");
   // The allowlist itself is the bot's own setting and may appear in its config log; the refusal names variables only.
-  const refusal = out.split("\n").find((l) => /BOT_RUN_ENV refused/.test(l));
+  const refusal = out.split("\n").find((l) => /Run environment refused/.test(l));
   assert.ok(!refusal.includes("allow-me@example.com"), "the refusal prints the credential's value");
   for (const f of [".runenv-refuse.pid", ".runenv-refuse.ready", ".runenv-refuse.surfaces.json"]) rmSync(join(__dirname, "..", f), { force: true });
   rmSync(dir, { recursive: true, force: true });
@@ -840,65 +866,67 @@ check("configured landing still lands inside its paths, and only there, through 
 
 check("the bot builds every run's environment through it", () => {
   const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.ok(/const cleanEnv = \{ \.\.\.runEnv\(\)\.inherit \};/.test(bot));
-  assert.ok(/\.\.\.runEnv\(\)\.shellExclude\]/.test(bot), "the shell exclusions come from the same policy");
+  assert.ok(/const cleanEnv = built\.env;/.test(bot));
+  assert.ok(/shellExclude: built\.shellExclude,/.test(bot), "the shell exclusions come from the same build");
 });
 
 check("every configured board's key is scrubbed from a run, whatever BOT_SURFACES turns on (PR #91 review, round 3)", () => {
   const { boardKeyEnvs } = require("../lib/paperclip");
   const { botSurfaces } = require("../lib/surfaces");
   const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  // bot.js's own scrub lists, run as written against the environment given.
-  const fn = (name) => bot.match(new RegExp(`function ${name}\\(\\) \\{[\\s\\S]*?\\n\\}`))[0];
-  const { paperclipBoards } = require("../lib/paperclip");
-  const scrubOf = (env) => {
-    const boards = paperclipBoards(env).boards;          // the listeners that came on, as bot.js sets them
-    const PAPERCLIP_BOARDS = botSurfaces(env, boards.length).paperclip ? boards : [];
-    return new Function("boardKeyEnvs", "runEnvPolicy", "RUN_AGENT_KEY_ENV", "PAPERCLIP_BOARDS", "process",
-      `${fn("connectorKeys")}\n${fn("runEnv")}\n${fn("shellWithheld")}\nreturn { connectorKeys, shellWithheld };`)(boardKeyEnvs, runEnvPolicy, "PAPERCLIP_RUN_AGENT_KEY", PAPERCLIP_BOARDS, { env });
-  };
+  // bot.js hands the builder every configured board's key, not the listeners that came on.
+  assert.match(bot, /connectorKeys: boardKeyEnvs\(process\.env\),/);
   const extra = JSON.stringify([
     { id: "acme", url: "https://acme.example.com", keyEnv: "ACME_BOARD_KEY" },
     { id: "Broken Id", url: "https://other.example.com", keyEnv: "OTHER_BOARD_KEY" },   // off: a broken entry
   ]);
   for (const surfaces of ["discord", "", "discord,paperclip", "paperclip"]) {
     const env = { PATH: "/bin", DISCORD_TOKEN: "d", BOT_SURFACES: surfaces, PAPERCLIP_URL: "https://board.example.com",
-      PAPERCLIP_API_KEY: "first-board-value", PAPERCLIP_EXTRA_BOARDS: extra, ACME_BOARD_KEY: "acme-board-value", OTHER_BOARD_KEY: "other-board-value" };
+      PAPERCLIP_API_KEY: "first-board-value", PAPERCLIP_EXTRA_BOARDS: extra, ACME_BOARD_KEY: "acme-board-value", OTHER_BOARD_KEY: "other-board-value",
+      BOARD_ALIAS: "acme-board-value" };
     if (surfaces === "discord") assert.strictEqual(botSurfaces(env, 2).paperclip, false, "the Discord-only case no longer turns the boards off");
-    const { connectorKeys, shellWithheld } = scrubOf(env);
-    // The run's environment as bot.js builds it, BOT_RUN_ENV unset: everything, then the scrub.
-    const run = inherited(env, undefined);
-    for (const name of connectorKeys()) delete run[name];
-    const values = Object.values(run).join("\n");
-    for (const v of ["first-board-value", "acme-board-value", "other-board-value"]) assert.ok(!values.includes(v), `BOT_SURFACES=${surfaces}: a board key reached the run`);
-    for (const k of ["PAPERCLIP_API_KEY", "ACME_BOARD_KEY", "OTHER_BOARD_KEY"]) assert.ok(shellWithheld().includes(k), `BOT_SURFACES=${surfaces}: ${k} reaches a Codex command`);
+    for (const runtime of ["claude", "codex"]) {
+      const b = buildRunEnv({ env, runtime, mode: "bypass", run: "session", connectorKeys: boardKeyEnvs(env) });
+      const values = Object.values(b.env).join("\n");
+      for (const v of ["first-board-value", "acme-board-value", "other-board-value"]) assert.ok(!values.includes(v), `BOT_SURFACES=${surfaces}: a board key reached the run`);
+      for (const k of ["PAPERCLIP_API_KEY", "ACME_BOARD_KEY", "OTHER_BOARD_KEY"]) assert.ok(b.shellExclude.includes(k), `BOT_SURFACES=${surfaces}: ${k} reaches a Codex command`);
+    }
   }
   assert.deepStrictEqual(boardKeyEnvs({ PAPERCLIP_EXTRA_BOARDS: "not json" }), ["PAPERCLIP_API_KEY"]);
-  assert.ok(!/function connectorKeys\(\) \{[^}]*PAPERCLIP_BOARDS/.test(bot), "the scrub reads the listeners that came on");
 });
 
-check("every credential the run environment keeps is withheld from a Codex run's commands, through bot.js's own scrub", () => {
+check("every credential the run environment keeps is withheld from a Codex run's commands", () => {
   // The harness's shell exclude list replaces the bot's own Codex config's,
   // so Nova's bearer reached her shell until the harness withheld it (2026-10-15).
   const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  const fn = (name) => bot.match(new RegExp(`function ${name}\\(\\) \\{[\\s\\S]*?\\n\\}`))[0];
-  const withheld = (env) => new Function("boardKeyEnvs", "runEnvPolicy", "RUN_AGENT_KEY_ENV", "process",
-    `${fn("connectorKeys")}\n${fn("runEnv")}\n${fn("shellWithheld")}\nreturn shellWithheld();`)(() => [], runEnvPolicy, "RUN_AGENT_KEY", { env });
+  const withheld = (env) => {
+    const b = buildRunEnv({ env, spec: env.BOT_RUN_ENV, runtime: "codex", mode: "bypass", run: "session" });
+    if (b.problems.length) throw new Error(b.problems.join("; "));
+    return [...b.shellExclude].sort();
+  };
   const env = { PATH: "/bin", NOVA_SLASHBIN_MCP_ROUTER_BEARER: "nova-bearer-value", NOVA_AUTH: "nova-auth-value", GH_CONFIG_DIR: "/gh", DOPPLER_CONFIG_DIR: "/dp" };
-  assert.deepStrictEqual(withheld({ ...env, BOT_RUN_ENV: "NOVA_SLASHBIN_MCP_ROUTER_BEARER,GH_CONFIG_DIR,DOPPLER_CONFIG_DIR" }), ["RUN_AGENT_KEY", "NOVA_SLASHBIN_MCP_ROUTER_BEARER"]);
-  assert.deepStrictEqual(withheld({ ...env, BOT_RUN_ENV: "NOVA_*" }).sort(), ["NOVA_AUTH", "NOVA_SLASHBIN_MCP_ROUTER_BEARER", "RUN_AGENT_KEY"]);
-  assert.deepStrictEqual(withheld({ ...env, BOT_RUN_ENV: "NOVA_AUTH" }), ["RUN_AGENT_KEY", "NOVA_AUTH"]);
-  assert.deepStrictEqual(withheld(env), ["RUN_AGENT_KEY"]);
+  assert.deepStrictEqual(withheld({ ...env, BOT_RUN_ENV: "NOVA_SLASHBIN_MCP_ROUTER_BEARER,GH_CONFIG_DIR,DOPPLER_CONFIG_DIR" }), ["NOVA_SLASHBIN_MCP_ROUTER_BEARER", "PAPERCLIP_RUN_AGENT_KEY"]);
+  assert.deepStrictEqual(withheld({ ...env, BOT_RUN_ENV: "NOVA_*" }), ["NOVA_AUTH", "NOVA_SLASHBIN_MCP_ROUTER_BEARER", "PAPERCLIP_RUN_AGENT_KEY"]);
+  assert.deepStrictEqual(withheld({ ...env, BOT_RUN_ENV: "NOVA_AUTH" }), ["NOVA_AUTH", "PAPERCLIP_RUN_AGENT_KEY"]);
+  assert.deepStrictEqual(withheld(env), ["PAPERCLIP_RUN_AGENT_KEY"]);
   assert.throws(() => withheld({ ...env, BOT_RUN_ENV: "*" }), /BOT_RUN_ENV entry/, "a refused policy built a run");
-  assert.ok(/shellExclude: shellWithheld\(\)/.test(bot));
-  assert.ok(!/runEnvCredentials/.test(bot), "a second credential filter is back");
+  assert.ok(/shellExclude: built\.shellExclude,/.test(bot));
+  assert.ok(!/runEnvCredentials|shellWithheld|function runEnv\(/.test(bot), "a second credential filter is back");
 });
 
 check("a Codex board run hands the escalate action its seat key and run, never to a command", () => {
   const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.ok(/connectorKeys\(\), RUN_AGENT_KEY_ENV,/.test(bot), "the run's seat key is withheld from commands");
+  assert.ok(/seat: seatRun\?\.runId \? \{ value: process\.env\[seatRun\.keyEnv\], runId: seatRun\.runId \} : null,/.test(bot), "the run's seat reaches the builder");
   assert.ok(/paperclipRun: runId \? \{ runId, keyEnv: board\.keyEnv \} : null/.test(bot), "the board answer passes its run");
-  assert.ok(/run\?\.runId && !narrowBoard && PERMISSION_MODE === "bypass"/.test(bot), "never on a narrow run");
+  const seat = { value: "seat-key-value", runId: "run-1" };
+  const parity = buildRunEnv({ env: {}, runtime: "codex", mode: "bypass", run: "parity", seat });
+  assert.strictEqual(parity.env.PAPERCLIP_RUN_AGENT_KEY, "seat-key-value");
+  assert.strictEqual(parity.env.PAPERCLIP_RUN_ID, "run-1");
+  assert.ok(parity.shellExclude.includes("PAPERCLIP_RUN_AGENT_KEY") && !parity.shellExclude.includes("PAPERCLIP_RUN_ID"));
+  for (const o of [{ run: "board" }, { mode: "restricted" }, { runtime: "claude" }]) {
+    const b = buildRunEnv({ env: {}, runtime: "codex", mode: "bypass", run: "parity", seat, ...o });
+    assert.ok(!("PAPERCLIP_RUN_AGENT_KEY" in b.env), `the seat key on ${JSON.stringify(o)}, which has no shell policy to keep it out`);
+  }
   const paperclip = readFileSync(join(__dirname, "..", "lib", "paperclip.js"), "utf8");
   assert.ok(/issue, \{ runId: postRun \}\)\)\.trim\(\)/.test(paperclip), "the task's run reaches the answer");
 });

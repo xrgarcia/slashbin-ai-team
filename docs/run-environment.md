@@ -20,7 +20,7 @@ In the order they write; a later writer wins on the same name.
 |---|---|---|
 | 1 | **Inherit** — the bot's process environment, filtered by `BOT_RUN_ENV` | every run |
 | 2 | **Harness** — the resolved paths (`BOT_STATE_DIR`, `BOT_SUMMARIES_DIR`, `BOT_ATTACHMENTS_DIR`, `BOT_OUTBOX_DIR`, `BOT_BUFFER_FILE`, `BOT_SESSIONS_FILE`, `BOT_JOB_HISTORY_FILE`, `BOT_SCHEDULES_FILE`, `BOT_CHANNEL_ID`), `CLAUDE_PLUGIN_ROOT` (Codex), and the run-kind flags (`CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` on a narrow board or restricted run; `CLAUDE_CODE_DISABLE_AUTO_MEMORY` and the private `TMPDIR` on a narrow board run) | every run |
-| 3 | **Server channel** — the MCP servers' env (`MCP_CONFIG`, `MCP_CONFIG_EXTRA`, the repo's `.mcp.json`, read once at startup with `${VAR}` expanded against the bot's whole environment and inline values as written), and the seat key `PAPERCLIP_RUN_AGENT_KEY` with `PAPERCLIP_RUN_ID` for a board task | Codex in `bypass`, session or parity run only |
+| 3 | **Server channel** — the MCP servers' env (`MCP_CONFIG`, `MCP_CONFIG_EXTRA`, the repo's `.mcp.json`, read once at startup with `${VAR}` expanded against the bot's whole environment and inline values as written; a server's command line is checked under rule 11), and the seat key `PAPERCLIP_RUN_AGENT_KEY` with `PAPERCLIP_RUN_ID` for a board task | Codex in `bypass`, session or parity run only |
 | 4 | **Nesting** — `CLAUDECODE`, `CLAUDE_AGENT_SDK_VERSION`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` removed | every run |
 
 On Claude the MCP config's env is not a writer: the CLI hands it to the server
@@ -117,6 +117,12 @@ Evaluated over the final environment, for each variable:
    configuration only when it carries a rule 2–4 identity.
 10. A server-channel variable that would replace a harness policy setting with
     another value **refuses** the configuration.
+11. A credential identity's value on an MCP server's **command line** (its
+    `command`, `args` or `cwd` after `${VAR}` expansion) **refuses** the
+    configuration wherever the server channel applies. The harness writes those
+    into Codex's own arguments, and a process's arguments are readable by every
+    process on the host (`ps`) — no exclusion keeps a command from them. A
+    server takes a credential through its `env`.
 
 `shellExclude` is every hidden name, plus the connector key names and the seat
 key name whether present or not.
@@ -126,6 +132,18 @@ key name whether present or not.
 - **The summarizer** (`lib/summarize-core.js`) is not a reply run: on Claude it
   has `Read` only and no shell; on Codex it runs narrow, with only the core
   variables. It does not use this builder.
+- **An ancestor's environment.** On a run with no sandbox (a bypass session
+  or a parity run, either runtime) a command can read the environment file
+  under `/proc` of the processes above it — the runtime's and the bot's own —
+  as the same user. What this page withholds or hides is kept out of the
+  child's environment and its shell policy, not out of those files. Closing it
+  needs the bot to start without the credentials in its own environment, which
+  is outside this builder.
+- **Inline configuration on Claude's command line.** An inline JSON
+  `MCP_CONFIG`, `MCP_CONFIG_EXTRA` or `BOT_SETTINGS` goes onto Claude's
+  arguments as written. Claude expands a `${VAR}` reference itself, so a
+  credential written as a reference stays off the command line; one written
+  in as a literal value does not.
 - **Claude cannot hide.** A credential listed in `BOT_RUN_ENV` on a Claude bot
   reaches its commands (rows marked *Claude cannot hide* below). Withhold it, or
   run the bot on Codex, to keep it from them.
@@ -135,7 +153,8 @@ key name whether present or not.
 Values: `{X}` is a distinct secret value, at least 6 characters; anything else
 is literal. Every row also runs with the harness's paths published. *Seat*
 names the board key a board task's seat key is taken from (run id `run-1`).
-`—` is unset or empty.
+`—` is unset or empty. In the *MCP env* column, `@name=…` is server `name`'s
+command line rather than an env entry (rule 11).
 
 | id | runtime | mode | run | BOT_RUN_ENV | process env | MCP env | seat | variable | expected | case |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -230,3 +249,9 @@ names the board key a board task's seat key is taken from (run id `run-1`).
 | F11 | claude | bypass | session | — | `CLAUDECODE=1` | — | — | `CLAUDECODE` | withheld | nesting |
 | F12 | claude | bypass | board | — | `DISCORD_TOKEN={D}; HOME=/home/{D}` | — | — | `HOME` | refused | rule 9 |
 | F13 | claude | bypass | session | — | `DISCORD_TOKEN={D}; HOME=/home/{D}` | — | — | `HOME` | kept | rule 9: the session may hold it |
+| G1 | codex | bypass | session | — | `NOVA_BEARER={N}` | `@router=--bearer={N}` | — | `NOVA_BEARER` | refused | rule 11: `args: ["--bearer=${NOVA_BEARER}"]` |
+| G2 | codex | bypass | parity | — | `DISCORD_TOKEN={D}` | `@relay=--token={D}` | — | `DISCORD_TOKEN` | refused | rule 11 on a parity run |
+| G3 | codex | bypass | session | — | — | `ROUTER_BEARER={X}; @router=--auth={X}` | — | `ROUTER_BEARER` | refused | rule 11: a server-only credential |
+| G4 | codex | bypass | session | — | `NOVA_URL=https://router.example` | `@router=--url=https://router.example` | — | `NOVA_URL` | kept | rule 11: not a credential |
+| G5 | codex | bypass | board | — | `NOVA_BEARER={N}` | `@router=--bearer={N}` | — | `NOVA_BEARER` | hidden | rule 11: a narrow run is passed no server |
+| G6 | claude | bypass | session | — | `NOVA_BEARER={N}` | `@router=--bearer={N}` | — | `NOVA_BEARER` | kept | rule 11 is the server channel's: Claude expands a server's `${VAR}` itself |
