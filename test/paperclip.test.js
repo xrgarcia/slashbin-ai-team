@@ -6,7 +6,7 @@ const assert = require("assert");
 const { readFileSync, readdirSync, writeFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { paperclipBoards, pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED, UNBLOCK_ACTION, OUTCOME_MARK, outcomeOf, refusal } = require("../lib/paperclip");
+const { paperclipBoards, pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED, answeredNote, centralTime, UNBLOCK_ACTION, OUTCOME_MARK, outcomeOf, refusal } = require("../lib/paperclip");
 
 const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
 let pass = 0, fail = 0;
@@ -18,6 +18,8 @@ const silent = { info() {}, warn() {}, error() {}, child() { return silent; } };
 const ME = { id: "agent-1", name: "Bot" };
 // Paperclip refuses a block that names no one to unblock it; an agent may name only itself.
 const UNBLOCK = { owner: { agentId: ME.id }, action: UNBLOCK_ACTION };
+// A re-wake's note names the bot's answer the board recorded (SLA-1605).
+const NOTED_AT = (at) => answeredNote({ body: "the answer", createdAt: at });
 
 function board({ runs, comments = [], wakeCommentId }) {
   const writes = [], activity = [];
@@ -195,7 +197,7 @@ const poller = (b, answer) => createPaperclipPoller({
       await make().tick();
       const run = rewake ? "run-2" : "run-1";
       assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body]),
-        [[run, { status: "done", comment: rewake ? ALREADY_ANSWERED : "the answer" }], [run, { status: "todo" }]],
+        [[run, { status: "done", comment: rewake ? NOTED_AT("2026-01-02T00:02:00Z") : "the answer" }], [run, { status: "todo" }]],
         `${rewake ? "re-wake note" : "answer"}: the newer ask was left on a done task`);
     }
   });
@@ -235,7 +237,7 @@ const poller = (b, answer) => createPaperclipPoller({
       await make().tick();          // and does nothing more once it is done
       const run = rewake ? "run-2" : "run-1";
       assert.strictEqual(calls, 1, "the answered ask ran again");
-      assert.deepStrictEqual(writes, [[run, { status: "done", comment: rewake ? ALREADY_ANSWERED : "the answer" }], [run, { status: "todo" }]],
+      assert.deepStrictEqual(writes, [[run, { status: "done", comment: rewake ? NOTED_AT("2026-01-02T00:02:00Z") : "the answer" }], [run, { status: "todo" }]],
         `${rewake ? "re-wake note" : "answer"}: the reopen was not retried`);
       assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).closing, {});
     }
@@ -581,7 +583,7 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.strictEqual(calls, 1, "a re-wake answered the same ask twice");
     // Second-pass review of 2.7.0: the re-wake was marked handled with nothing
     // under it, and a run is held open until a comment lands under it.
-    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer"], ["run-2", ALREADY_ANSWERED]]);
+    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer"], ["run-2", NOTED_AT("2026-01-02T00:02:00Z")]]);
     await make().tick();
     assert.strictEqual(b.writes.length, 2, "the re-wake was acknowledged twice");
   });
@@ -612,10 +614,64 @@ const poller = (b, answer) => createPaperclipPoller({
     await make().tick();
     runs = [{ id: "run-3", agentId: ME.id, status: "running" }];
     await make().tick();
-    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer"], ["run-2", ALREADY_ANSWERED], ["run-3", ALREADY_ANSWERED]],
+    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer"], ["run-2", NOTED_AT("2026-01-02T00:01:00Z")], ["run-3", NOTED_AT("2026-01-02T00:01:00Z")]],
       "every run still ends on a comment of its own");
     assert.deepStrictEqual(deleted, [["run-3", "c2"]], "the earlier note is taken down under the live run; the answer never is");
-    assert.deepStrictEqual(comments.filter((c) => !c.deletedAt).map((c) => c.body), ["ask", "the answer", ALREADY_ANSWERED]);
+    assert.deepStrictEqual(comments.filter((c) => !c.deletedAt).map((c) => c.body), ["ask", "the answer", NOTED_AT("2026-01-02T00:01:00Z")]);
+  });
+
+  await check("a re-wake note says what was done: the bot's latest answer, its time and first line (SLA-1605)", async () => {
+    // Ray read "This was answered above" as "did you actually do it?": it named nothing.
+    const gate = { body: "## **Release gate signed** — applied `ready for prod release`.\n\nDetails follow.", createdAt: "2026-10-15T22:16:00Z" };
+    assert.strictEqual(answeredNote(gate, new Date("2026-10-15T23:00:00Z")),
+      'Already done — my answer at 5:16 pm above: "Release gate signed — applied ready for prod release.". Nothing new has been asked since, so this wake did nothing more. Add a comment with anything new and I will pick it up.');
+    assert.strictEqual(centralTime("2026-10-15T22:16:00Z", new Date("2026-10-17T15:00:00Z")), "Oct 15, 5:16 pm", "another day's answer carries its day");
+    const long = answeredNote({ body: `- ${"x".repeat(300)}`, createdAt: "2026-10-15T22:16:00Z" });
+    assert.ok(long.includes(`"${"x".repeat(199)}…"`), "a long first line is capped");
+    for (const none of [undefined, { body: "\n  \n", createdAt: "2026-10-15T22:16:00Z" }]) {
+      assert.strictEqual(answeredNote(none), ALREADY_ANSWERED);
+      assert.ok(ALREADY_ANSWERED.includes("this wake did nothing more"), "the fallback still says nothing new was done");
+    }
+  });
+
+  await check("a re-wake note names the answer, not a note, and replaces the card's older note of that kind (SLA-1605)", async () => {
+    // The card's newest comment is the note from before SLA-1605, under a hold note
+    // that came after the answer: the new note names the answer and takes the old one down.
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" },
+      { id: "a", authorAgentId: ME.id, createdByRunId: "run-0", createdAt: "2026-01-02T00:01:00Z", body: "the answer\nmore" },
+      { id: "n", authorAgentId: ME.id, createdByRunId: "run-0", createdAt: "2026-01-02T00:02:00Z", body: "This was answered above. Add a comment with anything new and I will pick it up." }];
+    const b = board({ runs: running, comments, wakeCommentId: "w" });
+    let runs = running, n = 0;
+    const deleted = [];
+    const fetch = async (url, init) => {
+      const path = url.replace(/^.*\/api/, "");
+      if (path === "/issues/iss-1/runs") return { ok: true, text: async () => JSON.stringify(runs) };
+      if (/^\/heartbeat-runs\/run-[23]$/.test(path)) return { ok: true, text: async () => JSON.stringify({ contextSnapshot: {} }) };
+      if (init.method === "DELETE") {
+        const c = comments.find((x) => path === `/issues/iss-1/comments/${x.id}`);
+        deleted.push(c.id);
+        c.deletedAt = "2026-01-02T00:09:00Z";
+        return { ok: true, text: async () => "{}" };
+      }
+      if (init.method === "PATCH") comments.push({ id: `c${++n}`, authorAgentId: ME.id, createdByRunId: init.headers["x-paperclip-run-id"], createdAt: `2026-01-02T00:0${n + 2}:00Z`, body: JSON.parse(init.body).comment });
+      return b.fetch(url, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let calls = 0;
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: async () => { calls++; return "the answer"; } });
+    await make().tick();                   // run-1 answers; the board records it as c1
+    comments.find((c) => c.id === "c1").deletedAt = "2026-01-02T00:04:00Z";   // gone again: the answer to name is "a"
+    runs = [{ id: "run-2", agentId: ME.id, status: "running" }];
+    await make().tick();
+    runs = [{ id: "run-3", agentId: ME.id, status: "running" }];
+    await make().tick();
+    assert.strictEqual(calls, 1);
+    const note = NOTED_AT("2026-01-02T00:01:00Z");
+    assert.deepStrictEqual(b.writes.slice(1).map((w) => [w.runId, w.body.comment]), [["run-2", note], ["run-3", note]],
+      "the note names the answer, never the note after it");
+    assert.deepStrictEqual(deleted, ["n", "c2"], "the old note and then the repeat are taken down");
+    assert.deepStrictEqual(comments.filter((c) => !c.deletedAt).map((c) => c.body), ["ask", "the answer\nmore", note]);
   });
 
   await check("a note is never taken down once someone has said something after it", async () => {
@@ -710,7 +766,7 @@ const poller = (b, answer) => createPaperclipPoller({
     await make().tick();          // a restarted bot retries it
     await make().tick();          // and does not send it again once it landed
     assert.strictEqual(calls, 1, "the task ran again");
-    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer"], ["run-2", ALREADY_ANSWERED]]);
+    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer"], ["run-2", NOTED_AT("2026-01-02T00:02:00Z")]]);
   });
 
   await check("an answer is filed under the comment it answers, not the one that woke the run", async () => {

@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A held card's note is no longer repeated on each of Paperclip's re-wakes of
   an unchanged card.
+- A re-wake of an answered card now says what was done: its note names the
+  bot's latest answer on the card, by its time (U.S. Central) and first line,
+  instead of only "This was answered above" (SLA-1605).
 
 ## [2.9.0] — 2026-10-14
 
