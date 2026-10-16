@@ -1265,7 +1265,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       const realFetch = b.fetch;
       // The hand-off as Paperclip records it: an assignee change by its actor.
       const fetch = async (url, init) => {
-        if (url.endsWith("/issues/t-1/activity")) return { ok: true, text: async () => JSON.stringify([{ action: "issue.updated", ...actor, details: { changes: { assigneeAgentId: { from: ME.id, to: "agent-po" } } } }]) };
+        if (url.endsWith("/issues/t-1/activity")) return { ok: true, text: async () => JSON.stringify([{ action: "issue.updated", createdAt: new Date().toISOString(), ...actor, details: { changes: { assigneeAgentId: { from: ME.id, to: "agent-po" } } } }]) };
         return realFetch(url, init);
       };
       await poller({ ...b, fetch }, async () => assert.fail("ran"), { stateFile, attempts: att }).tick();
@@ -1458,6 +1458,45 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.ok(posted[0].body.comment.startsWith(LOST_NOTE_START));
     assert.match(posted[0].body.comment, /Need T-2\.[\s\S]*Resuming: T-2/, "the first answer goes out with it");
   });
+
+  // A person's status that let the attempt in is no withdrawal of it: only a change made after admission stops its worker.
+  const admitted = [
+    ["an escalation the Foreman's sync blocked and handed over in one write", () => escalationBoard(), { externalWriter: mirror, escalationAuthority: "scope and mechanism" }],
+    ["a labelled escalation a person blocked, no hand-over in the write", () => {
+      const b = board([task("t-1", { description: "source: acme/app#12\nstage review", labels: [{ name: "Needs EM ruling" }], runs: run("r1") })]);
+      b.setStatus("t-1", "blocked", PERSON);
+      b.issues.get("t-1").status = "in_progress";
+      return b;
+    }, { externalWriter: mirror, escalationAuthority: "scope and mechanism" }],
+    ["a card a person put in review", () => {
+      const b = board([task("t-1", { runs: run("r1") })]);
+      b.setStatus("t-1", "in_review", PERSON);
+      return b;
+    }, {}],
+  ];
+  for (const [name, make, opts] of admitted) {
+    await check(`EM#626: ${name} — its worker runs on, live and across a restart, and its own answer goes out once`, async () => {
+      const b = make();
+      const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+      const att = fakeAttempts();
+      const seen = [];
+      poller(b, (p, i, o) => { seen.push(o); att.phases[o.attemptId] = { phase: "running" }; return new Promise(() => {}); }, { stateFile, watchMs: 10, attempts: att, ...opts }).tick();
+      await new Promise((r) => setTimeout(r, 80));
+      assert.strictEqual(seen.length, 1, "admitted");
+      const id = seen[0].attemptId;
+      assert.deepStrictEqual(att.stopped, [], "stopped live by the status that let it in");
+      const after = fakeAttempts({ [id]: { phase: "running" } });
+      // The restarted bot follows the running worker; it never ends here, so the tick is not awaited.
+      poller(b, () => new Promise(() => {}), { stateFile, watchMs: 10, attempts: after, ...opts }).tick();
+      await new Promise((r) => setTimeout(r, 80));
+      assert.deepStrictEqual(after.stopped, [], "stopped by the restarted bot");
+      const done = fakeAttempts({ [id]: { phase: "finished", exit: { code: 0, cause: null } } });
+      await poller(b, async (p, i, o) => { assert.strictEqual(o.attemptId, id, "ran again"); return "RULED-ONCE"; }, { stateFile, attempts: done, ...opts }).tick();
+      const posted = b.writes.filter((x) => x.body.comment?.includes("RULED-ONCE"));
+      assert.strictEqual(posted.length, 1, "its own answer, once");
+      assert.ok(!b.writes.some((x) => x.body.comment?.includes(FALLBACK_REPLY)), "a fallback went out");
+    });
+  }
 
   await check("EM#626: the board loses the run, then a person cancels the card — the worker is still stopped", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
