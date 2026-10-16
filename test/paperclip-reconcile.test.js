@@ -1401,6 +1401,40 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(b.writes.filter((x) => x.body.comment?.includes(id)).length, 1, "never twice");
   });
 
+  await check("EM#626: the board loses the run and the worker ends before the watch looks — still reconciled, and answered once under the new run", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const att = fakeAttempts();
+    await poller(b, async (p, i, o) => {
+      att.phases[o.attemptId] = { phase: "running" };
+      b.recover("t-1", "r1", { hold: true });
+      att.phases[o.attemptId] = { phase: "finished", exit: { code: 0, cause: null } };
+      return "sent";
+    }, { watchMs: 1e6, stateFile, attempts: att }).tick();
+    assert.strictEqual(b.writes.length, 0, "no seat write under the lost run");
+    assert.strictEqual((b.state.resolves ?? []).length, 1, "the settlement reconciled once");
+    await poller(b, async () => assert.fail("ran again"), { stateFile, attempts: att }).tick();
+    const posted = b.writes.filter((x) => x.body.comment?.includes("sent"));
+    assert.deepStrictEqual(posted.map((x) => x.runId), ["w1"], "once, under the run the wake opened");
+    assert.ok(posted[0].body.comment.startsWith(LOST_NOTE_START));
+  });
+
+  await check("EM#626: a person holds the card while the bot is away and the board cancels its run — the restarted bot stops the worker", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const seen = [];
+    poller(b, (p, i, o) => { seen.push(o); return new Promise(() => {}); }, { stateFile, watchMs: 1e6, attempts: fakeAttempts() }).tick();
+    await new Promise((r) => setTimeout(r, 20));
+    const id = seen[0].attemptId;
+    // The bot is down: a person blocks the card, the bot still its assignee, and the board cancels the run.
+    b.setStatus("t-1", "blocked", PERSON);
+    b.runs.get("t-1")[0].status = "cancelled";
+    const att = fakeAttempts({ [id]: { phase: "running" } });
+    await poller(b, async () => assert.fail("ran again"), { stateFile, attempts: att }).tick();
+    assert.deepStrictEqual(att.stopped, [id], "the worker is stopped");
+    assert.strictEqual(b.issues.get("t-1").status, "blocked", "the person's hold stands");
+  });
+
   await check("EM#626: the model hands its card on, the bot restarts, the recipient checks it out — the answer is still posted once, and the recipient keeps it", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
