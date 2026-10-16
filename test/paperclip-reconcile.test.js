@@ -1301,6 +1301,22 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     }
   });
 
+  await check("EM#626: a board restart's recovery block on a card a person set up does not stop the worker", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    // A person made the card ready: the newest status write before the restart is theirs.
+    b.setStatus("t-1", "todo", PERSON);
+    b.issues.get("t-1").status = "in_progress";
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const att = fakeAttempts();
+    const seen = [];
+    poller(b, (p, i, o) => { seen.push(o); att.phases[o.attemptId] = { phase: "running" }; return new Promise(() => {}); }, { stateFile, watchMs: 10, attempts: att }).tick();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.ok(seen[0]?.attemptId);
+    b.recover("t-1", "r1");
+    await new Promise((r) => setTimeout(r, 80));
+    assert.deepStrictEqual(att.stopped, [], "the board's own block is no one's hold");
+  });
+
   await check("EM#626: the model hands its card on itself, then the bot restarts — the answer is posted once as a comment, and the hand-off stands", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
