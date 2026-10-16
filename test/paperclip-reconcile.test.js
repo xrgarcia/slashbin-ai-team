@@ -1168,6 +1168,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     const stopped = [];
     return { stopped, phases,
       state: (id) => phases[id] ?? { phase: "none" },
+      current: (id) => phases[id] ?? { phase: "none" },
       alive: (id) => (phases[id]?.phase ?? "none") === "running",
       stop: (id) => { if (phases[id]?.phase !== "running") return false; stopped.push(id); phases[id] = { phase: "finished", exit: { code: null, cause: "stopped" } }; return true; } };
   };
@@ -1282,6 +1283,62 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(after[0].attemptId, id);
     assert.strictEqual(after[0].runId, "w1", "under the new run");
     assert.ok(b.writes.some((x) => x.runId === "w1" && x.body.comment?.startsWith("sent")));
+  });
+
+  await check("EM#626: a person's hold mid-run stops the worker; the model's own block, a recovery block, do not", async () => {
+    for (const [actor, stops] of [[PERSON, true], [{ actorType: "agent", actorId: ME.id }, false], [{ actorType: "system" }, false]]) {
+      const b = board([task("t-1", { runs: run("r1") })]);
+      const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+      const att = fakeAttempts();
+      const seen = [];
+      poller(b, (p, i, o) => { seen.push(o); att.phases[o.attemptId] = { phase: "running" }; return new Promise(() => {}); }, { stateFile, watchMs: 10, attempts: att }).tick();
+      await new Promise((r) => setTimeout(r, 30));
+      assert.ok(seen[0]?.attemptId);
+      // The bot stays its assignee; only the status moves.
+      b.setStatus("t-1", "blocked", actor);
+      await new Promise((r) => setTimeout(r, 80));
+      assert.deepStrictEqual(att.stopped, stops ? [seen[0].attemptId] : [], JSON.stringify(actor));
+    }
+  });
+
+  await check("EM#626: the model hands its card on itself, then the bot restarts — the answer is posted once as a comment, and the hand-off stands", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const seen = [];
+    poller(b, (p, i, o) => { seen.push(o); return new Promise(() => {}); }, { stateFile, watchMs: 1e6, attempts: fakeAttempts() }).tick();
+    await new Promise((r) => setTimeout(r, 20));
+    const id = seen[0].attemptId;
+    // Its model's process.escalate: the card goes to the PO, blocked, by the seat.
+    const i = b.issues.get("t-1");
+    b.setStatus("t-1", "blocked", { actorType: "agent", actorId: ME.id }, { runId: "r1" }, { assigneeAgentId: { from: ME.id, to: "agent-po" } });
+    i.assigneeAgentId = "agent-po";
+    const att = fakeAttempts({ [id]: { phase: "finished", exit: { code: 0, cause: null } } });
+    const reads = [];
+    await poller(b, async (p, iss, o) => { reads.push(o); return "handed up to the PO"; }, { stateFile, attempts: att }).tick();
+    assert.deepStrictEqual(reads.map((o) => o.attemptId), [id], "read from the same attempt's record");
+    const posted = b.writes.filter((x) => x.body.comment?.includes(`<!-- slashbin-attempt:${id}:result -->`));
+    assert.strictEqual(posted.length, 1, "posted once");
+    assert.strictEqual(posted[0].runId, "r1", "under the attempt's run");
+    assert.ok(posted[0].body.comment.startsWith("handed up to the PO"));
+    assert.ok(!("status" in posted[0].body) && !("assigneeAgentId" in posted[0].body), "a comment only");
+    assert.strictEqual(i.assigneeAgentId, "agent-po", "the hand-off stands");
+    assert.strictEqual(i.status, "blocked");
+    await poller(b, async () => assert.fail("ran again"), { stateFile, attempts: att }).tick();
+    assert.strictEqual(b.writes.filter((x) => x.body.comment?.includes(id)).length, 1, "never twice");
+  });
+
+  await check("EM#626: a provider killed outright is answered blocked, naming the kill — never the generic fallback", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const seen = [];
+    poller(b, (p, i, o) => { seen.push(o); return new Promise(() => {}); }, { stateFile, watchMs: 1e6, attempts: fakeAttempts() }).tick();
+    await new Promise((r) => setTimeout(r, 20));
+    const id = seen[0].attemptId;
+    const att = fakeAttempts({ [id]: { phase: "died", exit: { code: null, signal: "SIGKILL", cause: null }, started: { at: "2026-10-15T01:00:00Z" } } });
+    await poller(b, async () => { throw new Error("worker died"); }, { stateFile, attempts: att }).tick();
+    const posted = b.writes.find((x) => x.body.comment?.includes("killed by SIGKILL"));
+    assert.ok(posted, "the died note names the kill");
+    assert.strictEqual(posted.body.status, "blocked");
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

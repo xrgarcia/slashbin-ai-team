@@ -147,6 +147,46 @@ check("the provider gets exactly the environment it was given", async () => {
   void count;
 });
 
+check("the worker removes only the temp folder it was handed, never an inherited TMPDIR", async () => {
+  const a = fresh(), count = join(root, "c10");
+  const shared = mkdtempSync(join(root, "shared-board-")), own = mkdtempSync(join(root, "own-board-"));
+  const child = a.run("a10", { ...spec(count, 0, { TMPDIR: shared }), ownTmp: own });
+  assert.strictEqual(child.tmpHanded, true, "the folder is the worker's to remove now");
+  await closed(child);
+  assert.ok(existsSync(shared), "an inherited TMPDIR named like a board folder stays");
+  assert.ok(!existsSync(own), "the folder it was handed goes when it ends");
+  const none = a.run("a10b", spec(join(root, "c10b"), 0, { TMPDIR: shared }));
+  assert.ok(!none.tmpHanded);
+  await closed(none);
+  assert.ok(existsSync(shared), "with none handed, nothing is removed");
+});
+
+check("a provider killed outright while its worker lives is died, named by its signal, never re-run", async () => {
+  const a = fresh(), count = join(root, "c11");
+  const p = closed(a.run("a11", spec(count, 30)));
+  assert.ok(await until(() => a.state("a11").phase === "running" && launches(count) === 1));
+  // Only the provider: the sleeping shell, not the worker's group.
+  spawnSync("pkill", ["-KILL", "-f", `^/bin/sh ${provider}$`]);
+  const r = await p;
+  assert.strictEqual(r.child.died, true);
+  assert.strictEqual(r.child.exit.signal, "SIGKILL");
+  assert.strictEqual(a.state("a11").phase, "died");
+  assert.strictEqual(launches(count), 1);
+});
+
+check("stop, alive and current follow an attempt to its fresh successor", async () => {
+  const a = fresh(), count = join(root, "c12");
+  await closed(a.run("a12", { ...spec(count, 0), env: { ...spec(count, 0).env, CODE: "1" } }));
+  const p = closed(a.run("a12-fresh", spec(count, 30)));
+  assert.ok(await until(() => a.state("a12-fresh").phase === "running"));
+  assert.strictEqual(a.latest("a12"), "a12-fresh");
+  assert.strictEqual(a.alive("a12"), true, "the ask's first id sees the fresh one running");
+  assert.strictEqual(a.current("a12").phase, "running");
+  assert.strictEqual(a.stop("a12"), true, "a stop by the first id reaches the fresh one");
+  const r = await p;
+  assert.strictEqual(r.child.exit.cause, "stopped");
+});
+
 check("an attempt id cannot name a path outside the attempts folder", () => {
   assert.throws(() => fresh().dirOf("../x"), /bad attempt id/);
 });

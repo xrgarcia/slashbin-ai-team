@@ -1987,8 +1987,9 @@ function collectOutboxFiles(sinceMs, dir = OUTBOX_DIR) {
 function isSafeToRetryFresh(err) {
   if (!err) return false;
   // A board attempt is never run a second time in-process: a worker that died
-  // may have acted, and one that never started was already launched again once.
-  if (err.attemptDied || err.attemptNeverStarted) return false;
+  // may have acted, one that never started was already launched again once,
+  // and one that was stopped (a cancel, a hand-on) or hit its limit ended on purpose.
+  if (err.attemptDied || err.attemptNeverStarted || err.attemptCause) return false;
   return !err.sessionStarted && !err.toolCalls && !err.producedText;
 }
 
@@ -2279,7 +2280,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     // (EM#626, lib/attempts.js): the same binary, arguments, environment and
     // folder, its output on disk. A restarted bot follows the same attempt.
     const child = opts.attempt
-      ? attempts.run(opts.attempt, { bin: RUNTIME.bin, args: safeArgs, cwd: CLAUDE_CWD, env: cleanEnv, timeoutMs: CLAUDE_TIMEOUT_MS })
+      ? attempts.run(opts.attempt, { bin: RUNTIME.bin, args: safeArgs, cwd: CLAUDE_CWD, env: cleanEnv, timeoutMs: CLAUDE_TIMEOUT_MS, ownTmp: boardTmp })
       : spawn(RUNTIME.bin, safeArgs, {
         cwd: CLAUDE_CWD,
         env: cleanEnv,
@@ -2332,9 +2333,12 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       reqLog.warn({ stderr: data.toString().trim() }, "Claude stderr");
     });
 
+    // A worker handed the temp folder removes it itself, when it ends; the bot
+    // may close first (a stop, a restart), so it never removes one it handed over.
+    const dropTmp = () => { if (boardTmp && !child.tmpHanded) rmSync(boardTmp, { recursive: true, force: true }); };
     child.on("close", async (code) => {
       activeProcesses.delete(channelId);
-      if (boardTmp) rmSync(boardTmp, { recursive: true, force: true });
+      dropTmp();
       // Remove the status message first, so it never sits above the answer.
       try { await progress?.finish(); } catch { /* never block the reply */ }
       const elapsed = Date.now() - startTime;
@@ -2482,7 +2486,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     });
 
     child.on("error", (err) => {
-      if (boardTmp) rmSync(boardTmp, { recursive: true, force: true });
+      dropTmp();
       reqLog.error({ err }, "Failed to spawn Claude");
       reject(new Error(`Failed to spawn claude: ${err.message}`));
     });
