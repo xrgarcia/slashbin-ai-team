@@ -27,8 +27,12 @@ It lands only the files this bot may land (the host sets which), and only files
 you name. It refuses, and pushes nothing, when:
 
 - a file is outside the paths you may land: your instructions are not yours to change
-- a file has no change
-- the checkout holds someone else's commit that is not pushed yet
+- a file has no change, or already matches the upstream
+- the checkout holds someone else's unpushed commit that changed one of your
+  files, or the upstream changed one of your files since that commit, unless
+  the upstream still holds exactly what this checkout last landed there (their
+  commit is otherwise left alone and never published: your files still land)
+- an edit was made in this checkout while landing: nothing is pushed
 - the push is rejected: nothing was committed and your edit stays on disk
 
 A refusal says why. Do not try another way to commit; tell whoever asked that

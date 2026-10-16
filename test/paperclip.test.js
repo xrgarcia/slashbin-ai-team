@@ -27,7 +27,7 @@ function board({ runs, comments = [], wakeCommentId }) {
     "GET /agents/me": ME,
     "GET /agents/me/inbox-lite": [{ id: "iss-1" }],
     "GET /issues/iss-1/runs": runs,
-    "GET /issues/iss-1": { id: "iss-1", identifier: "T-1", title: "A question", createdAt: "2026-01-01T00:00:00Z" },
+    "GET /issues/iss-1": { id: "iss-1", identifier: "T-1", title: "A question", assigneeAgentId: ME.id, createdAt: "2026-01-01T00:00:00Z" },
     "GET /issues/iss-1/comments": comments,
     "GET /heartbeat-runs/run-1": { contextSnapshot: { wakeCommentId } },
   };
@@ -205,7 +205,7 @@ const poller = (b, answer) => createPaperclipPoller({
     // so one failed reopen left the newer ask on a done task for good.
     for (const rewake of [false, true]) {
       const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "first ask" }];
-      const issue = { id: "iss-1", identifier: "T-1", title: "A question", status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
+      const issue = { id: "iss-1", identifier: "T-1", title: "A question", assigneeAgentId: ME.id, status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
       let runs = running, landing = false, reopenFails = 0;
       const writes = [];
       const fetch = async (url, init) => {
@@ -246,7 +246,7 @@ const poller = (b, answer) => createPaperclipPoller({
     // ask moved, so a comment-and-cancel came back as todo.
     for (const decided of ["cancelled", "blocked"]) {
       const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "first ask" }];
-      const issue = { id: "iss-1", identifier: "T-1", title: "A question", status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
+      const issue = { id: "iss-1", identifier: "T-1", title: "A question", assigneeAgentId: ME.id, status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
       const writes = [];
       const fetch = async (url, init) => {
         const path = url.replace(/^.*\/api/, "");
@@ -738,7 +738,7 @@ const poller = (b, answer) => createPaperclipPoller({
     // Second-pass review of 2.7.0: the key named the ask but not its content, so
     // a reopened task with a new description, or an edited ask, was never answered.
     const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
-    const issue = { id: "iss-1", identifier: "T-1", title: "A question", description: "v1", createdAt: "2026-01-01T00:00:00Z" };
+    const issue = { id: "iss-1", identifier: "T-1", title: "A question", assigneeAgentId: ME.id, description: "v1", createdAt: "2026-01-01T00:00:00Z" };
     let run = 0;
     const fetch = async (url, init) => {
       const path = url.replace(/^.*\/api/, "");
@@ -768,7 +768,7 @@ const poller = (b, answer) => createPaperclipPoller({
     const routes = { "GET /agents/me": ME, "GET /agents/me/inbox-lite": [{ id: "iss-1" }, { id: "iss-2" }] };
     for (const n of [1, 2]) {
       routes[`GET /issues/iss-${n}/runs`] = [{ id: `run-${n}`, agentId: ME.id, status: "running" }];
-      routes[`GET /issues/iss-${n}`] = { id: `iss-${n}`, identifier: `T-${n}`, title: "Q", createdAt: "2026-01-01T00:00:00Z" };
+      routes[`GET /issues/iss-${n}`] = { id: `iss-${n}`, identifier: `T-${n}`, title: "Q", assigneeAgentId: ME.id, createdAt: "2026-01-01T00:00:00Z" };
       routes[`GET /issues/iss-${n}/comments`] = [];
       routes[`GET /issues/iss-${n}/activity`] = [];
       routes[`GET /heartbeat-runs/run-${n}`] = { contextSnapshot: {} };
@@ -839,7 +839,7 @@ const poller = (b, answer) => createPaperclipPoller({
     for (let n = 1; n <= N; n++) {
       routes["GET /agents/me/inbox-lite"].push({ id: `iss-${n}` });
       routes[`GET /issues/iss-${n}/runs`] = [{ id: `run-${n}`, agentId: ME.id, status: "running" }];
-      routes[`GET /issues/iss-${n}`] = { id: `iss-${n}`, identifier: `T-${n}`, title: "Q", createdAt: "2026-01-01T00:00:00Z" };
+      routes[`GET /issues/iss-${n}`] = { id: `iss-${n}`, identifier: `T-${n}`, title: "Q", assigneeAgentId: ME.id, createdAt: "2026-01-01T00:00:00Z" };
       routes[`GET /issues/iss-${n}/comments`] = [];
       routes[`GET /issues/iss-${n}/activity`] = [];
       routes[`GET /heartbeat-runs/run-${n}`] = { contextSnapshot: {} };
@@ -867,8 +867,8 @@ const poller = (b, answer) => createPaperclipPoller({
   await check("bot.js: board runs never see the buffer, and the key never reaches Claude", () => {
     assert.match(bot, /noBufferContext: true/);
     assert.match(bot, /opts\.noBufferContext \? "" : buildContextPrompt/);
-    assert.match(bot, /\["PAPERCLIP_API_KEY", \.\.\.PAPERCLIP_BOARDS\.map\(\(b\) => b\.keyEnv\)\]/);
-    assert.match(bot, /for \(const name of connectorKeys\(\)\) delete cleanEnv\[name\];/);
+    // Every board's key, withheld from every run by the one builder (buildRunEnv).
+    assert.match(bot, /connectorKeys: \[\.\.\.boardKeyEnvs\(process\.env\), \.\.\.escalateBearer\(\)\],/);
   });
 
   await check("a file the run made is named as not delivered, never left to read as attached", () => {
@@ -893,8 +893,8 @@ const poller = (b, answer) => createPaperclipPoller({
     const { boards, problems } = paperclipBoards(env);
     assert.deepStrictEqual(problems, []);
     assert.deepStrictEqual(boards.map(({ escalation, ...b }) => b), [
-      { id: null, url: "https://one.example.com", apiKey: "k1", keyEnv: "PAPERCLIP_API_KEY", promptChannel: "123456789012345678" },
-      { id: "two", url: "https://two.example.com", apiKey: "k2", keyEnv: "TWO_KEY", promptChannel: "chan-2" },
+      { id: null, url: "https://one.example.com", apiKey: "k1", keyEnv: "PAPERCLIP_API_KEY", promptChannel: "123456789012345678", contract: null },
+      { id: "two", url: "https://two.example.com", apiKey: "k2", keyEnv: "TWO_KEY", promptChannel: "chan-2", contract: null },
     ]);
   });
 
@@ -933,7 +933,7 @@ const poller = (b, answer) => createPaperclipPoller({
   });
 
   await check("bot.js: every board's key is kept from Claude, and an extra board has its own state and sessions", () => {
-    assert.match(bot, /\.\.\.PAPERCLIP_BOARDS\.map\(\(b\) => b\.keyEnv\)/);
+    assert.match(bot, /connectorKeys: \[\.\.\.boardKeyEnvs\(process\.env\), \.\.\.escalateBearer\(\)\],/);
     assert.match(bot, /const tag = board\.id \? `paperclip-\$\{board\.id\}` : "paperclip";/);
     assert.match(bot, /stateFile: join\(STATE_DIR, `\$\{tag\}\.json`\)/);
     assert.match(bot, /runClaude\(prompt, `\$\{tag\}-\$\{issue\.identifier\}`/);
@@ -958,7 +958,7 @@ const poller = (b, answer) => createPaperclipPoller({
 
   await check("a blocked close that a newer ask lands on is reopened for it", async () => {
     const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "first ask" }];
-    const issue = { id: "iss-1", identifier: "T-1", title: "A question", status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
+    const issue = { id: "iss-1", identifier: "T-1", title: "A question", assigneeAgentId: ME.id, status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
     const writes = [], activity = [];
     let landing = true;
     const fetch = async (url, init) => {

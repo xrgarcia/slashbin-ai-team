@@ -234,11 +234,16 @@ const RETURNED = `Only the Product Owner can rule on scope.\n${OUTCOME_MARK} ret
 
   await check("the action's bearer never reaches a run, and only the first board uses it", () => {
     const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-    assert.match(bot, /function shellWithheld\(\)[\s\S]{0,200}\.\.\.escalateBearer\(\)/);
-    // Every runtime's environment loses it before the runtime branches, not only Codex's commands.
-    const scrub = bot.indexOf("for (const name of escalateBearer()) delete cleanEnv[name];");
-    assert.ok(scrub > 0 && scrub < bot.indexOf("if (CODEX) {", bot.indexOf("for (const name of connectorKeys()) delete cleanEnv[name];")),
-      "the bearer leaves every run's environment, Claude's included");
+    // The bearer is a connector key to the one run-environment builder: no
+    // run of any runtime has it, and no command can read it.
+    assert.match(bot, /connectorKeys: \[\.\.\.boardKeyEnvs\(process\.env\), \.\.\.escalateBearer\(\)\],/);
+    const { buildRunEnv } = require("../lib/permission-mode");
+    const env = { PATH: "/usr/bin", HOME: "/home/bot", ESCALATE_BEARER: "bearer-value-long-enough-0123456789" };
+    for (const runtime of ["claude", "codex"]) for (const run of ["session", "parity", "board"]) {
+      const built = buildRunEnv({ env, runtime, mode: "bypass", run, connectorKeys: ["ESCALATE_BEARER"] });
+      assert.ok(built.env && !("ESCALATE_BEARER" in built.env), `${runtime}/${run}: the bearer leaves the run's environment`);
+      assert.ok(built.shellExclude.includes("ESCALATE_BEARER"), `${runtime}/${run}: no command reads the bearer`);
+    }
     assert.match(bot, /escalate: !board\.id && process\.env\.PAPERCLIP_ESCALATE_URL/);
   });
 

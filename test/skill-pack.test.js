@@ -127,7 +127,7 @@ console.log("\nThe contract the pack depends on");
 check("the harness publishes resolved paths for skills to read", () => {
   for (const v of ["BOT_STATE_DIR", "BOT_SUMMARIES_DIR", "BOT_ATTACHMENTS_DIR",
                    "BOT_OUTBOX_DIR", "BOT_BUFFER_FILE", "BOT_SESSIONS_FILE"]) {
-    assert.ok(new RegExp(`cleanEnv\\.${v} =`).test(bot),
+    assert.ok(new RegExp(`\\b${v}: `).test(bot),
       `${v} is not published — a pack skill would have to hardcode it, which is the bug this pack exists to end`);
   }
 });
