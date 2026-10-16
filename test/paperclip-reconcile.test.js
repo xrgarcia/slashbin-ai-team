@@ -1435,6 +1435,45 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(b.issues.get("t-1").status, "blocked", "the person's hold stands");
   });
 
+  await check("EM#626: the board loses the run during a going-on after a wait already done — reconciled, and answered once under the new run", async () => {
+    const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "done" })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const att = fakeAttempts();
+    let launches = 0;
+    await poller(b, async (p, i, o) => {
+      launches++;
+      att.phases[o.attemptId] = { phase: "running" };
+      if (launches === 1) { att.phases[o.attemptId] = { phase: "finished", exit: { code: 0, cause: null } }; return `Need T-2.\n${OUTCOME_MARK} blocked on T-2`; }
+      b.recover("t-1", "r1", { hold: true });
+      att.phases[o.attemptId] = { phase: "finished", exit: { code: 0, cause: null } };
+      return "DONE-CONTINUATION";
+    }, { watchMs: 1e6, stateFile, attempts: att }).tick();
+    assert.strictEqual(launches, 2);
+    assert.strictEqual(b.writes.length, 0, "no seat write under the lost run");
+    assert.strictEqual((b.state.resolves ?? []).length, 1, "the settlement reconciled once");
+    assert.ok(Object.keys(JSON.parse(readFileSync(stateFile, "utf8")).pendingReplies).length, "the answer was dropped before delivery");
+    await poller(b, async () => assert.fail("ran again"), { stateFile, attempts: att }).tick();
+    const posted = b.writes.filter((x) => x.body.comment?.includes("DONE-CONTINUATION"));
+    assert.deepStrictEqual(posted.map((x) => x.runId), ["w1"], "once, under the run the wake opened");
+    assert.ok(posted[0].body.comment.startsWith(LOST_NOTE_START));
+    assert.match(posted[0].body.comment, /Need T-2\.[\s\S]*Resuming: T-2/, "the first answer goes out with it");
+  });
+
+  await check("EM#626: the board loses the run, then a person cancels the card — the worker is still stopped", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const att = fakeAttempts();
+    const seen = [];
+    poller(b, (p, i, o) => { seen.push(o); att.phases[o.attemptId] = { phase: "running" }; return new Promise(() => {}); }, { stateFile, watchMs: 10, attempts: att }).tick();
+    await new Promise((r) => setTimeout(r, 20));
+    b.recover("t-1", "r1", { hold: true });
+    await new Promise((r) => setTimeout(r, 60));
+    assert.deepStrictEqual(att.stopped, [], "the board's own block stops nothing");
+    b.setStatus("t-1", "cancelled", PERSON);
+    await new Promise((r) => setTimeout(r, 60));
+    assert.deepStrictEqual(att.stopped, [seen[0].attemptId], "the cancel stops the worker");
+  });
+
   await check("EM#626: the model hands its card on, the bot restarts, the recipient checks it out — the answer is still posted once, and the recipient keeps it", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
