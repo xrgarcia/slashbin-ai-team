@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A hold that waits on a person ends with that person.** `PAPERCLIP-OUTCOME:
+  blocked on <Name>` hands the task to the named board user, still blocked, in
+  the run's own write, as its assignee; the bot stays the unblock owner, since
+  the board refuses an agent naming anyone else, and the unblock note names them. A name the board does
+  not have keeps the task with the bot, blocked, and the comment says so.
 - **Paperclip escalations are worked, and can be handed up a chain.** A blocked
   card assigned to the bot that carries one of `PAPERCLIP_ESCALATION_LABELS`
   (default `Needs EM ruling`) is worked instead of refused, and stays blocked:
@@ -28,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first raised it. A person resolves by commenting and reassigning down; the
   bot is told the card came back with a resolution. `PAPERCLIP-OUTCOME:
   blocked` keeps a card the bot can neither resolve nor escalate.
+
+### Changed
+
+- **A re-wake note never buries a held answer.** The note on an unchanged ask
+  now repeats the answer's first line and who the task waits on, in place of
+  "This was answered above. Add a comment with anything new". Earlier notes are
+  no longer deleted: the board lists a deleted comment as a blank one, which
+  read as the bot posting an empty reply. A blank answer is posted as the
+  fallback reply, never empty.
 
 ### Fixed
 
