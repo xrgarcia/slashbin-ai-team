@@ -1163,6 +1163,127 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.deepStrictEqual(paperclipBoards({ PAPERCLIP_URL: "https://one.example.com", PAPERCLIP_API_KEY: "k", PAPERCLIP_ESCALATION_LABELS: "" }).boards[0].escalation.labels, []);
   });
 
+  // EM#626: a board attempt runs in a worker that outlives the bot (lib/attempts.js).
+  const fakeAttempts = (phases = {}) => {
+    const stopped = [];
+    return { stopped, phases,
+      state: (id) => phases[id] ?? { phase: "none" },
+      alive: (id) => (phases[id]?.phase ?? "none") === "running",
+      stop: (id) => { if (phases[id]?.phase !== "running") return false; stopped.push(id); phases[id] = { phase: "finished", exit: { code: null, cause: "stopped" } }; return true; } };
+  };
+
+  await check("EM#626: a restart follows the attempt under way — never run again, never told it was interrupted — and its answer carries the attempt's mark", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const seen = [];
+    // The first bot dies mid-run; its worker does not.
+    poller(b, (p, i, o) => { seen.push(o); return new Promise(() => {}); }, { stateFile, watchMs: 1e6, attempts: fakeAttempts() }).tick();
+    await new Promise((r) => setTimeout(r, 20));
+    const id = seen[0].attemptId;
+    assert.ok(id, "the attempt was named before it ran");
+    assert.deepStrictEqual(Object.values(JSON.parse(readFileSync(stateFile, "utf8")).attemptIds), [id], "and saved with it");
+    const after = [];
+    await poller(b, async (p, i, o) => { after.push({ p, o }); return "sent"; }, { stateFile, resumeInterrupted: true, attempts: fakeAttempts({ [id]: { phase: "running" } }) }).tick();
+    assert.strictEqual(after.length, 1);
+    assert.strictEqual(after[0].o.attemptId, id, "the same attempt, followed");
+    assert.strictEqual(after[0].o.runId, "r1", "under the same run");
+    assert.ok(!after[0].p.includes(INTERRUPTED_NOTE), "not re-run as an interrupted attempt");
+    const posted = b.writes.find((x) => x.body.comment?.startsWith("sent"));
+    assert.ok(posted?.body.comment.includes(`<!-- slashbin-attempt:${id}:result -->`), "marked");
+    assert.strictEqual(b.issues.get("t-1").status, "done");
+    await poller(b, async () => assert.fail("ran again"), { stateFile, attempts: fakeAttempts() }).tick();
+  });
+
+  await check("EM#626: a worker that died after it started is answered blocked from its record — never run again", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const seen = [];
+    poller(b, (p, i, o) => { seen.push(o); return new Promise(() => {}); }, { stateFile, watchMs: 1e6, attempts: fakeAttempts() }).tick();
+    await new Promise((r) => setTimeout(r, 20));
+    const id = seen[0].attemptId;
+    const att = fakeAttempts({ [id]: { phase: "died", started: { at: "2026-10-15T01:00:00Z" } } });
+    await poller(b, async () => { throw new Error("worker died"); }, { stateFile, attempts: att }).tick();
+    const posted = b.writes.find((x) => x.body.comment?.includes("was not run again"));
+    assert.ok(posted, "the died note is posted");
+    assert.strictEqual(posted.body.status, "blocked");
+    assert.ok(!posted.body.comment.includes("PAPERCLIP-OUTCOME"), "the outcome line is read, not shown");
+  });
+
+  await check("EM#626: a worker whose task a person cancelled while the bot was away is stopped", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const seen = [];
+    poller(b, (p, i, o) => { seen.push(o); return new Promise(() => {}); }, { stateFile, watchMs: 1e6, attempts: fakeAttempts() }).tick();
+    await new Promise((r) => setTimeout(r, 20));
+    const id = seen[0].attemptId;
+    b.setStatus("t-1", "cancelled", PERSON);
+    const att = fakeAttempts({ [id]: { phase: "running" } });
+    await poller(b, async () => assert.fail("ran"), { stateFile, attempts: att }).tick();
+    assert.deepStrictEqual(att.stopped, [id]);
+  });
+
+  await check("EM#626: the model's own hand-off is not a reason to stop its worker; a person's is", async () => {
+    for (const [actor, stops] of [[{ actorType: "agent", actorId: ME.id }, false], [PERSON, true]]) {
+      const b = board([task("t-1", { runs: run("r1") })]);
+      const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+      const seen = [];
+      poller(b, (p, i, o) => { seen.push(o); return new Promise(() => {}); }, { stateFile, watchMs: 1e6, attempts: fakeAttempts() }).tick();
+      await new Promise((r) => setTimeout(r, 20));
+      const id = seen[0].attemptId;
+      b.issues.get("t-1").assigneeAgentId = "agent-po";
+      const att = fakeAttempts({ [id]: { phase: "running" } });
+      const realFetch = b.fetch;
+      // The hand-off as Paperclip records it: an assignee change by its actor.
+      const fetch = async (url, init) => {
+        if (url.endsWith("/issues/t-1/activity")) return { ok: true, text: async () => JSON.stringify([{ action: "issue.updated", ...actor, details: { changes: { assigneeAgentId: { from: ME.id, to: "agent-po" } } } }]) };
+        return realFetch(url, init);
+      };
+      await poller({ ...b, fetch }, async () => assert.fail("ran"), { stateFile, attempts: att }).tick();
+      assert.deepStrictEqual(att.stopped, stops ? [id] : [], JSON.stringify(actor));
+    }
+  });
+
+  await check("EM#626: a run lost while the bot was away is reconciled from the attempt's record only once its worker stopped, then the bot wakes itself", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const seen = [];
+    poller(b, (p, i, o) => { seen.push(o); return new Promise(() => {}); }, { stateFile, watchMs: 1e6, attempts: fakeAttempts() }).tick();
+    await new Promise((r) => setTimeout(r, 20));
+    const id = seen[0].attemptId;
+    b.runs.set("t-1", [{ id: "r1", agentId: ME.id, status: "failed" }]);
+    b.issues.get("t-1").status = "blocked";
+    const resolves = [];
+    const realFetch = b.fetch;
+    const fetch = async (url, init) => {
+      if (url.endsWith("/issues/t-1/recovery-actions")) return { ok: true, text: async () => JSON.stringify({ active: { id: "ra-1", cause: "legacy_execution_requires_reconciliation", evidence: { runId: "r1" } } }) };
+      if (url.endsWith("/issues/t-1/recovery-actions/resolve")) { resolves.push({ body: JSON.parse(init.body), run: init.headers["x-paperclip-run-id"] }); return { ok: true, text: async () => "{}" }; }
+      return realFetch(url, init);
+    };
+    const att = fakeAttempts({ [id]: { phase: "running" } });
+    await poller({ ...b, fetch }, async () => assert.fail("ran"), { stateFile, attempts: att }).tick();
+    assert.strictEqual(resolves.length, 0, "nothing sent while the worker runs");
+    assert.strictEqual(b.wakes.length, 0);
+    att.phases[id] = { phase: "finished", exit: { code: 0, cause: null, at: "2026-10-15T02:00:00Z" } };
+    await poller({ ...b, fetch }, async () => assert.fail("ran"), { stateFile, attempts: att }).tick();
+    assert.strictEqual(resolves.length, 1);
+    const { body, run: header } = resolves[0];
+    assert.strictEqual(header, "r1");
+    assert.strictEqual(body.actionId, "ra-1");
+    assert.strictEqual(body.outcome, "restored");
+    assert.strictEqual(body.sourceIssueStatus, "todo");
+    assert.strictEqual(body.executionReconciliation.runId, "r1");
+    assert.strictEqual(body.executionReconciliation.actionOutcome, "completed");
+    assert.ok(body.executionReconciliation.outcomeEvidence.includes(id));
+    assert.strictEqual(b.wakes.length, 1, "the bot wakes itself on the task");
+    // The next run delivers the stored result, read from the same attempt.
+    const after = [];
+    await poller({ ...b, fetch }, async (p, i, o) => { after.push(o); return "sent"; }, { stateFile, attempts: att }).tick();
+    assert.strictEqual(after.length, 1);
+    assert.strictEqual(after[0].attemptId, id);
+    assert.strictEqual(after[0].runId, "w1", "under the new run");
+    assert.ok(b.writes.some((x) => x.runId === "w1" && x.body.comment?.startsWith("sent")));
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

@@ -621,7 +621,7 @@ check("a Codex board run hands the escalate action its seat key and run, never t
   assert.ok(/paperclipRun: runId \? \{ runId, keyEnv: board\.keyEnv \} : null/.test(bot), "the board answer passes its run");
   assert.ok(/run\?\.runId && !narrowBoard && PERMISSION_MODE === "bypass"/.test(bot), "never on a narrow run");
   const paperclip = readFileSync(join(__dirname, "..", "lib", "paperclip.js"), "utf8");
-  assert.ok(/issue, \{ runId: postRun \}\)\)\.trim\(\)/.test(paperclip), "the task's run reaches the answer");
+  assert.ok(/issue, \{ runId: postRun, attemptId \}\)\)\.trim\(\)/.test(paperclip), "the task's run reaches the answer");
 });
 
 console.log(`\n${passes} passed, ${failures} failed\n`);

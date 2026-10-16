@@ -15,6 +15,7 @@ const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
 const { createPaperclipPoller, paperclipBoards, replyCollector } = require("./lib/paperclip");
 const { processEscalateClient } = require("./lib/process-escalate");
+const { createAttempts } = require("./lib/attempts");
 const { createLiveEvents, eventsSetting, startBoard } = require("./lib/paperclip-events");
 const { botSurfaces, PAPERCLIP_PREREQUISITE } = require("./lib/surfaces");
 const { resolveRuntime } = require("./lib/runtime");
@@ -126,6 +127,9 @@ const STATE_DIR = process.env.BOT_STATE_DIR
       ? process.env.BOT_STATE_DIR
       : join(__dirname, process.env.BOT_STATE_DIR))
   : HISTORY_DIR;
+
+// Board attempts: each one's worker, output and end, under the state folder (EM#626).
+const attempts = createAttempts(STATE_DIR);
 
 // Runtime state, not memory. HISTORY_DIR holds SUMMARIES — the reviewable record
 // people deliberately keep in a repo. A user's schedules, the summarizer's read
@@ -1982,6 +1986,9 @@ function collectOutboxFiles(sinceMs, dir = OUTBOX_DIR) {
  */
 function isSafeToRetryFresh(err) {
   if (!err) return false;
+  // A board attempt is never run a second time in-process: a worker that died
+  // may have acted, and one that never started was already launched again once.
+  if (err.attemptDied || err.attemptNeverStarted) return false;
   return !err.sessionStarted && !err.toolCalls && !err.producedText;
 }
 
@@ -2013,6 +2020,12 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {
   const existingSession = channelSessions.get(channelId);
   // A board run's session is stamped with the access it was made under.
   if (opts.noBufferContext) opts = { ...opts, access: boardAccess() };
+  // An attempt that already fell back to a fresh session is followed there.
+  const freshAttempt = opts.attempt ? `${opts.attempt}-fresh` : null;
+  if (freshAttempt && attempts.state(freshAttempt).phase !== "none") {
+    opts = { ...opts, attempt: freshAttempt };
+    return spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, null, progress, opts);
+  }
   // A session from the other runtime is not carried over: after a switch the
   // channel starts fresh. Nor is a board session made under other access.
   const canResume = existingSession &&
@@ -2045,6 +2058,8 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {
     }
   }
 
+  // A fresh session after a failed resume is an attempt of its own.
+  if (canResume && freshAttempt) opts = { ...opts, attempt: freshAttempt };
   return spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, null, progress, opts);
 }
 
@@ -2260,12 +2275,18 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     }
 
     const startTime = Date.now();
-    const child = spawn(RUNTIME.bin, safeArgs, {
-      cwd: CLAUDE_CWD,
-      env: cleanEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: CLAUDE_TIMEOUT_MS,
-    });
+    // A board attempt runs in a worker of its own that outlives this process
+    // (EM#626, lib/attempts.js): the same binary, arguments, environment and
+    // folder, its output on disk. A restarted bot follows the same attempt.
+    const child = opts.attempt
+      ? attempts.run(opts.attempt, { bin: RUNTIME.bin, args: safeArgs, cwd: CLAUDE_CWD, env: cleanEnv, timeoutMs: CLAUDE_TIMEOUT_MS })
+      : spawn(RUNTIME.bin, safeArgs, {
+        cwd: CLAUDE_CWD,
+        env: cleanEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: CLAUDE_TIMEOUT_MS,
+      });
+    if (child.adopted) reqLog.info({ attempt: opts.attempt, phase: child.adopted }, "Board attempt already under way — following it, not starting it again");
 
     activeProcesses.set(channelId, child);
     // Codex events become the Claude events handleStreamEvent reads.
@@ -2441,7 +2462,12 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
           { code, elapsed, subtype: state.resultSubtype, toolCalls: state.toolCalls, sessionStarted: Boolean(state.sessionId) },
           "Claude exited with non-zero code"
         );
-        const failure = new Error(`Claude exited with code ${code} after ${Math.round(elapsed / 1000)}s`);
+        const failure = new Error(child.died ? `The board attempt's worker died after it started (attempt ${opts.attempt})`
+          : child.neverStarted ? `The board attempt's worker never started (attempt ${opts.attempt})`
+            : `Claude exited with code ${code} after ${Math.round(elapsed / 1000)}s`);
+        failure.attemptDied = Boolean(child.died);
+        failure.attemptNeverStarted = Boolean(child.neverStarted);
+        failure.attemptCause = child.exit?.cause ?? null;
         // Evidence for the caller: a run that started a session, called tools, or
         // produced text may have already changed something in the world.
         failure.sessionStarted = Boolean(state.sessionId);
@@ -3303,14 +3329,16 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
           allowedMentions: { parse: ["users"] } });
         pLog.info({ paperclipTask: task, channelId }, "Paperclip escalation — the person was told on Discord");
       },
+      // The board's attempts, so a cancel or reassignment stops the worker.
+      attempts,
       // The first poll that reaches the board makes it a ready surface.
       onPoll: () => { if (surfaces.boards[tag] !== "ready") { setSurface("board", "ready", tag); pLog.info("Paperclip board ready — first poll succeeded"); } },
       // One session per task, so a reply on the task continues its conversation.
-      answer: (prompt, issue, { runId } = {}) => {
+      answer: (prompt, issue, { runId, attemptId } = {}) => {
         const reply = replyCollector();
         return runClaude(prompt, `${tag}-${issue.identifier}`, pLog.child({ paperclipTask: issue.identifier }),
           reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true, finalTextOnly: true,
-            paperclipRun: runId ? { runId, keyEnv: board.keyEnv } : null })
+            paperclipRun: runId ? { runId, keyEnv: board.keyEnv } : null, attempt: attemptId ?? null })
           .then(() => reply.text());
       },
     });
