@@ -90,9 +90,9 @@ const poller = (b, answer) => createPaperclipPoller({
   });
 
   await check("an unchanged hold is answered blocked, never with a still-held comment", () => {
-    // SLA-1559, 2026-10-16: the EM answered each Foreman "clear the hold" with
-    // "nothing has changed, the hold stays", left the task open, and the
-    // comment itself re-woke the Foreman, so the two looped.
+    // A bot answered each "clear the hold" with "nothing has changed, the hold
+    // stays" and left the task open; the comment itself re-woke the asker, so
+    // the two looped.
     const p = buildTaskPrompt({ identifier: "T-1", title: "Q" }, [{ authorAgentId: null, createdAt: "1", body: "clear the hold" }], ME, "u");
     assert.match(p, new RegExp(`asked to clear a hold and it stays[^\\n]*end with ${OUTCOME_MARK} blocked`));
   });
