@@ -89,6 +89,14 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.match(p, /T-1: Q/); assert.match(p, /details/); assert.match(p, /first ask/);
   });
 
+  await check("an unchanged hold is answered blocked, never with a still-held comment", () => {
+    // SLA-1559, 2026-10-16: the EM answered each Foreman "clear the hold" with
+    // "nothing has changed, the hold stays", left the task open, and the
+    // comment itself re-woke the Foreman, so the two looped.
+    const p = buildTaskPrompt({ identifier: "T-1", title: "Q" }, [{ authorAgentId: null, createdAt: "1", body: "clear the hold" }], ME, "u");
+    assert.match(p, new RegExp(`asked to clear a hold and it stays[^\\n]*end with ${OUTCOME_MARK} blocked`));
+  });
+
   await check("a long thread loses its oldest comments, never the latest ask", () => {
     // Second-pass review of 2.7.0: 36 older comments of 4,410 bytes pushed the
     // latest ask past the argument limit, whose clamp keeps only the head; the
