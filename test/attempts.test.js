@@ -105,6 +105,23 @@ check("a worker killed outright is died: reported, never launched again", async 
   assert.strictEqual(launches(count), 1, "never re-run");
 });
 
+check("a worker wrapper killed alone leaves its provider running, stoppable, and never called stopped while it runs", async () => {
+  const a = fresh(), count = join(root, "c5w");
+  const p = closed(a.run("a5w", spec(count, 30)));
+  assert.ok(await until(() => a.state("a5w").phase === "running" && launches(count) === 1));
+  const { pid, pgid } = a.state("a5w").started;
+  process.kill(pid, "SIGKILL");
+  await sleep(500);
+  assert.doesNotThrow(() => process.kill(-pgid, 0), "the provider outlives its wrapper");
+  assert.strictEqual(a.state("a5w").phase, "running", "the provider holds the lock: the attempt is not over");
+  assert.strictEqual(a.stop("a5w"), true, "a stop still reaches it");
+  const r = await p;
+  assert.strictEqual(r.child.died, true);
+  assert.ok(await until(() => { try { process.kill(-pgid, 0); return false; } catch { return true; } }), "nothing left in its group");
+  assert.strictEqual(a.state("a5w").phase, "died");
+  assert.strictEqual(launches(count), 1, "never re-run");
+});
+
 check("accepted but never launched (the bot died first) is launched once", async () => {
   const dir = mkdtempSync(join(root, "state-")), count = join(root, "c6");
   const a = createAttempts(dir, { pollMs: 50, launchGraceMs: 500 });
