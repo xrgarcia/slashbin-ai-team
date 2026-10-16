@@ -50,6 +50,10 @@ function board({ description = "Ship the release." } = {}) {
     if (init.method === "PATCH") {
       const runId = init.headers["x-paperclip-run-id"];
       const body = JSON.parse(init.body);
+      // As the live board: an agent may name only itself as the unblock owner.
+      if (body.unblockDescriptor && body.unblockDescriptor.owner?.agentId !== "agent-em") {
+        return { ok: false, status: 403, text: async () => JSON.stringify({ error: "Agents may only name themselves as an unblock owner" }) };
+      }
       if (body.status === "blocked" && card.status !== "blocked" && !body.unblockDescriptor && !body.blockedByIssueIds?.length) {
         return { ok: false, status: 422, text: async () => JSON.stringify({ error: "Entering blocked requires unblockDescriptor" }) };
       }
@@ -100,12 +104,24 @@ const visible = (b) => b.comments.filter((c) => !c.deletedAt);
     assert.strictEqual(b.card.status, "blocked");
     assert.strictEqual(b.card.assigneeUserId, "user-avery", JSON.stringify(b.writes));
     assert.strictEqual(b.card.assigneeAgentId, null);
-    assert.deepStrictEqual(b.card.unblockDescriptor.owner, { userId: "user-avery" });
-    assert.match(b.card.unblockDescriptor.action, /Avery/);
+    assert.deepStrictEqual(b.card.unblockDescriptor.owner, { agentId: "agent-em" }, "the board refuses an agent naming anyone else as unblock owner");
+    assert.match(b.card.unblockDescriptor.action, /Waits on Avery/);
     assert.strictEqual(visible(b).at(-1).body, HELD.split("\n")[0], "the held answer is not the newest visible comment");
     assert.ok(b.writes.every((w) => w.runId === "r1"), `a self-caused wake wrote: ${JSON.stringify(b.writes)}`);
     assert.ok(b.comments.every((c) => c.body.trim()), "an empty comment is on the card");
     assert.ok(b.comments.every((c) => !/answered above|anything new/.test(c.body)));
+  });
+
+  await check("the hand-off write names the bot as unblock owner and the person as assignee only (the board's 403 rule)", async () => {
+    const b = board(), seat = seatOn(b);
+    await seat(async () => HELD).tick();
+    const [w] = b.writes;
+    assert.strictEqual(b.writes.length, 1, JSON.stringify(b.writes));
+    assert.deepStrictEqual(w.body.unblockDescriptor.owner, { agentId: "agent-em" });
+    assert.strictEqual(w.body.assigneeUserId, "user-avery");
+    assert.strictEqual(w.body.assigneeAgentId, null);
+    assert.strictEqual(w.body.status, "blocked");
+    assert.ok(!b.comments.some((c) => /refused/.test(c.body)), "the board refused the hand-off");
   });
 
   await check("a person the board does not have leaves the task with the bot, blocked, and says so", async () => {

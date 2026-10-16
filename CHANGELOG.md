@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A hold that waits on a person ends with that person.** `PAPERCLIP-OUTCOME:
   blocked on <Name>` hands the task to the named board user, still blocked, in
-  the run's own write, with an unblock note naming them. A name the board does
+  the run's own write, as its assignee; the bot stays the unblock owner, since
+  the board refuses an agent naming anyone else, and the unblock note names them. A name the board does
   not have keeps the task with the bot, blocked, and the comment says so.
 - **Paperclip escalations are worked, and can be handed up a chain.** A blocked
   card assigned to the bot that carries one of `PAPERCLIP_ESCALATION_LABELS`
