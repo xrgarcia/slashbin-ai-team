@@ -64,6 +64,10 @@ check("the real regression: long run, merged, then crashed", () =>
   assert.strictEqual(isSafeToRetryFresh({ sessionStarted: true, toolCalls: 31, producedText: true }), false));
 check("a timed-out run that did work is not retried", () =>
   assert.strictEqual(isSafeToRetryFresh({ sessionStarted: true, toolCalls: 12, producedText: false }), false));
+check("a board attempt stopped on purpose (a cancel, a person's hold) is not retried, even having done nothing", () =>
+  assert.strictEqual(isSafeToRetryFresh({ ...didNothing, attemptCause: "stopped" }), false));
+check("a board attempt that hit its limit is not retried", () =>
+  assert.strictEqual(isSafeToRetryFresh({ ...didNothing, attemptCause: "limit" }), false));
 
 console.log("\nDegenerate input");
 check("null does not retry", () =>

@@ -14,8 +14,13 @@ import {
   checkNode, checkRuntimeCli, checkDiscordToken, checkMessageContentIntent,
   checkClaudeCwd, checkPortFree, checkAllowlist, checkEcosystem, checkStateDir,
   checkReservedCommands, checkScheduleCadence, checkRunningCodeFresh,
-  checkBillingKeyAbsent, checkFleet, parseFleet, render, skip,
+  checkBillingKeyAbsent, checkFleet, parseFleet, render, skip, bad,
 } from "./lib/checks.mjs";
+import { createRequire } from "module";
+
+const require = createRequire(import.meta.url);
+const { botSurfaces } = require("../lib/surfaces.js");
+const { paperclipBoards } = require("../lib/paperclip.js");
 
 const HARNESS = dirname(dirname(fileURLToPath(import.meta.url)));
 const ECOSYSTEM = join(HARNESS, "ecosystem.config.js");
@@ -30,6 +35,7 @@ const SESSION_TIMEOUT_MS = Number(process.env.SESSION_TIMEOUT_MS) || 30 * 60 * 1
 // the 2-bot host with nothing wrong, so the gate stopped being read.
 // `--fleet` checks each bot properly, against its own token and its own cwd.
 const FLEET_BOTS = parseFleet(ECOSYSTEM);
+const SURFACES = botSurfaces(process.env, paperclipBoards(process.env).boards.length);
 const PER_BOT_ENV = FLEET_BOTS.length > 0 && !process.env.DISCORD_TOKEN && !process.env.CLAUDE_CWD;
 const DEFER = `This host runs ${FLEET_BOTS.length} bot(s) from ecosystem.config.js, each with its own credentials. Run \`npm run doctor:fleet\` — it checks every bot against its own token and CLAUDE_CWD.`;
 
@@ -45,6 +51,15 @@ if (PER_BOT_ENV) {
   results.push(skip("Discord token", "per-bot — not set at host level", DEFER));
   results.push(skip("Message Content Intent", "per-bot — needs a bot's own token", DEFER));
   results.push(skip("CLAUDE_CWD", "per-bot — each app sets its own", DEFER));
+} else if (!SURFACES.discord || SURFACES.errors.length) {
+  // The bot's own start gate (lib/surfaces.js): a refusal there is the first
+  // thing wrong, and a bot with Discord off has no token to check.
+  for (const error of SURFACES.errors) results.push(bad("Surfaces", `the bot refuses to start: ${error}`, null));
+  if (!SURFACES.discord) {
+    results.push(skip("Discord token", "Discord off — BOT_SURFACES=paperclip", null));
+    results.push(skip("Message Content Intent", "Discord off — BOT_SURFACES=paperclip", null));
+  }
+  results.push(await checkClaudeCwd(process.env.CLAUDE_CWD || process.cwd(), HARNESS));
 } else {
   results.push(await checkDiscordToken(process.env.DISCORD_TOKEN));
   results.push(await checkMessageContentIntent(process.env.DISCORD_TOKEN));

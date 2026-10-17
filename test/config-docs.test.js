@@ -72,6 +72,7 @@ const EXEMPT = new Set([
   "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
   "X",                                     // appears only in envInt()'s own doc comment
   "CLAUDE_PLUGIN_ROOT",                    // set by the CLI for a plugin's hooks
+  "TMPDIR",                                // a board attempt's own temp folder, set by the bot for its worker
 ]);
 
 // Variables the harness PUBLISHES to skills, rather than settings an operator

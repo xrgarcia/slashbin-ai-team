@@ -31,7 +31,7 @@ function extractFn(name) {
 const handlerSrc = extractFn("handleStreamEvent");
 const silentLog = { info() {}, debug() {}, warn() {}, error() {} };
 
-function run(flag, events) {
+function run(flag, events, { finalTextOnly } = {}) {
   const handle = new Function(
     "REPLY_FINAL_TEXT_ONLY", "ATTACH_RE",
     `${handlerSrc}; return handleStreamEvent;`
@@ -43,6 +43,7 @@ function run(flag, events) {
     writtenFiles: [],
     toolCalls: 0,
     progress: null,
+    finalTextOnly,
   };
   for (const e of events) handle(e, silentLog, () => {}, state);
   return { turnText, toolCalls: state.toolCalls };
@@ -99,10 +100,19 @@ const leaked = [
   );
 }
 
-// 5. The flag reads "true" only — an unset or other value leaves it off.
+// 5. A Paperclip card answer posts only the final text even with the flag off
+//    (SLA-1361: a note written before a hook-blocked retry opened the answer,
+//    joined to it with no break).
+{
+  const r = run(false, leaked, { finalTextOnly: true });
+  assert.strictEqual(r.turnText, "Alex, there are 11 items in flight.");
+  assert.ok(/noBufferContext: true, finalTextOnly: true[,\s}]/.test(SRC), "the Paperclip answer must ask for final text only");
+}
+
+// 6. The flag reads "true" only — an unset or other value leaves it off.
 assert.ok(
   /const REPLY_FINAL_TEXT_ONLY = process\.env\.REPLY_FINAL_TEXT_ONLY === "true";/.test(SRC),
   "REPLY_FINAL_TEXT_ONLY must default off"
 );
 
-console.log("final-text-only: 5 checks passed");
+console.log("final-text-only: 6 checks passed");

@@ -133,6 +133,18 @@ leaves the task **blocked**. Paperclip blocks a task only when the write names w
 unblocks it, and an agent may name only itself, so the bot names itself: a person
 commenting on a blocked task reopens it, and the bot picks it up again.
 
+A mirrored task (`PAPERCLIP_EXTERNAL_WRITER`) is blocked the same way, linked to
+the tasks its answer waits on; its holder is left to its writer. Left open as a
+comment only, it had no durable wait, and Paperclip's disposition repair woke
+the bot on it until the board took it over (SLA-1775).
+
+A re-wake on an ask answered as waiting is decided by the model again, told
+what it said, why it woke, and the status, holder and recent comments of each
+task it waits on. It posts one comment: progress on a blocker being worked, an
+escalation, or the work. The bot escalates on its own an answer that only
+repeats the last one, Paperclip's last disposition repair, a blocker nobody
+works on a wake that finds nothing changed, and a fourth such wake on one ask.
+
 ## Symptom → fix
 
 | Symptom | Cause | Fix |
@@ -152,4 +164,5 @@ commenting on a blocked task reopens it, and the bot picks it up again.
 | Log: `HTTP 401` | Key wrong or revoked | Issue the agent a new key; update `PAPERCLIP_API_KEY` |
 | Log: `… tested on Codex 0.162.x, this host has …` | A Codex bot on an untested version | Install 0.162.x for board work, or run the bot on Claude |
 | Log: `BOT_BOARD_NETWORK_ALLOW: a host allow list is not available on Codex` | Codex profiles allow all hosts or none | Remove it (the run has no network), or run the bot on Claude |
+| A card's comments repeat "Nothing has changed since my last comment", nested; Paperclip escalates it to the board after its disposition repairs | Before SLA-1775's fix: a mirrored card answered blocked was left in progress as a comment only, and each re-wake quoted the last note | Deploy the fix. On a card already in the loop, a comment from whoever decides gives the bot a new ask |
 | Task stays `todo`, nothing in the log | Not assigned to this agent, or the connector is off | Check the assignee and the startup log |

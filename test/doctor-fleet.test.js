@@ -344,6 +344,15 @@ ${keys.map((k) => `  ${k}: 'v',`).join("\n")}
     assert.strictEqual(line.detail, "NOBODY_READS_THIS");
   });
 
+  check("every bot runs under one run limit; a bot set apart fails (SLA-1399)", () => {
+    const limitOf = (body) => checkEcosystem(write(`eco-${Math.random().toString(36).slice(2)}.js`, body), dir).find((r) => r.name === "ecosystem: CLAUDE_TIMEOUT_MS");
+    const shared = limitOf("const RUN_LIMITS = { CLAUDE_TIMEOUT_MS: '2700000', CLAUDE_MAX_TURNS: '0' };\nmodule.exports = { apps: [ { env: { BOT_NAME: 'a', ...RUN_LIMITS } }, { env: { BOT_NAME: 'b', ...RUN_LIMITS } } ] };");
+    assert.strictEqual(shared.status, PASS, shared.detail);
+    const apart = limitOf("module.exports = { apps: [ { env: { BOT_NAME: 'a', CLAUDE_TIMEOUT_MS: '2700000' } }, { env: { BOT_NAME: 'b', CLAUDE_TIMEOUT_MS: '1500000' } } ] };");
+    assert.strictEqual(apart.status, FAIL);
+    assert.match(apart.detail, /2700000, 1500000/);
+  });
+
   rmSync(dir, { recursive: true, force: true });
 
   console.log(`\n${passes} passed, ${failures} failed\n`);

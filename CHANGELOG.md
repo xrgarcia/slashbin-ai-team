@@ -9,6 +9,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A hold that waits on a person ends with that person.** `PAPERCLIP-OUTCOME:
+  blocked on <Name>` hands the task to the named board user, still blocked, in
+  the run's own write, as its assignee; the bot stays the unblock owner, since
+  the board refuses an agent naming anyone else, and the unblock note names them. A name the board does
+  not have keeps the task with the bot, blocked, and the comment says so.
+- **Paperclip escalations are worked, and can be handed up a chain.** A blocked
+  card assigned to the bot that carries one of `PAPERCLIP_ESCALATION_LABELS`
+  (default `Needs EM ruling`) is worked instead of refused, and stays blocked:
+  the wake's checkout is put back, and the run is told it is an escalation and
+  what is its to decide (`PAPERCLIP_ESCALATION_AUTHORITY`). It resolves it, or
+  ends `PAPERCLIP-OUTCOME: escalate` and the card is reassigned, inside its
+  run, to `PAPERCLIP_ESCALATE_TO` (`agent:<seat>` or `user:<id>|Name`); a
+  person is also pinged once in `PAPERCLIP_ESCALATION_CHANNEL` with
+  `PAPERCLIP_ESCALATION_MENTION`. Each setting has a per-board key in
+  `PAPERCLIP_EXTRA_BOARDS`. An escalation runs once per hand-off or comment;
+  a re-wake on an unchanged card is left blocked and quiet.
+- **A resolved escalation unwinds back down its chain, still blocked.** The
+  chain is read from the card's assignment records since it last went
+  blocked. A bot that resolves hands the card back, inside its run, to whoever
+  handed it up — or to `PAPERCLIP_ESCALATION_RETURN_TO` (per board,
+  `escalationReturnTo`), for the bottom bot that returns it to the seat that
+  first raised it. A person resolves by commenting and reassigning down; the
+  bot is told the card came back with a resolution. `PAPERCLIP-OUTCOME:
+  blocked` keeps a card the bot can neither resolve nor escalate.
+
+### Changed
+
+- **A re-wake note never buries a held answer.** The note on an unchanged ask
+  now repeats the answer's first line and who the task waits on, in place of
+  "This was answered above. Add a comment with anything new". Earlier notes are
+  no longer deleted: the board lists a deleted comment as a blank one, which
+  read as the bot posting an empty reply. A blank answer is posted as the
+  fallback reply, never empty.
+
+### Fixed
+
+- A held card's note is no longer repeated on each of Paperclip's re-wakes of
+  an unchanged card.
+
+## [2.9.0] — 2026-10-14
+
+### Added
+
+- **A bot can listen on Paperclip alone, with Discord off.** Discord and
+  Paperclip are peer surfaces, and `BOT_SURFACES` declares which a bot is on:
+  unset, Discord (`DISCORD_TOKEN` required) plus any board it is given;
+  `paperclip`, its board alone. A declared surface is a prerequisite:
+  `BOT_SURFACES=paperclip` without the Paperclip connector enabled (a board,
+  and its connector on) exits 78, saying the Paperclip connector must be
+  enabled first, and `doctor` / `doctor:fleet` fail it the same way.
+  Paperclip-only is never inferred: a bot with no `DISCORD_TOKEN` and no
+  `BOT_SURFACES=paperclip` exits 78, rather than come up deaf on Discord and
+  report ready. A Paperclip-only bot logs `Discord off — Paperclip-only` and
+  never builds or logs in a Discord client; a scheduled job
+  (which posts to a Discord channel) is refused when it is loaded, with a log
+  line, and kept in its file; the background summarizer is off.
+  Readiness is per surface: the ready marker is written once Discord is ready
+  (if on) and each board's first poll has succeeded (if on), each board is
+  polled once at startup rather than after the first interval, and
+  `doctor:fleet` reports each surface (`Discord: off · board paperclip:
+  ready`). A bot on both surfaces is now
+  ready only once its board has answered a poll too.
+
 - **One bot can answer on more than one Paperclip board.** `PAPERCLIP_EXTRA_BOARDS`
   lists the others as `{ id, url, keyEnv, promptChannel }`, so an agent seated
   in two companies is answered by the same bot, with each board's replies
@@ -21,6 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An answer owed by a run Paperclip cancelled waits for the task's next
+  run.** When a person blocked a task and stopped the bot mid-run, Paperclip
+  cancelled the run, and the bot retried the fallback under it every poll,
+  refused each time (403 `agent_run_cancelled`, SLA-1337). A cancelled run is
+  now never written under; the owed answer goes out under the task's next run.
 - **A run Paperclip loses after a resume, or a replacement run it loses
   too, is recovered like any other.** The wake that resumes a task checks it
   out with no record, so the bot's earlier block used to outrank Paperclip's
@@ -82,6 +150,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new work: the retry used to post only the "stopped by someone else" note,
   and the answer already made was never delivered. It goes out now as a
   comment only, and the card stays as the person set it.
+- **A card the Foreman blocks and hands to the bot is worked.** The Foreman's
+  sync writes with a board user's key, so its escalation (blocked, assigned to
+  the EM) read as a person's stop: the bot posted the "stopped by someone else"
+  note on each wake and Paperclip escalated the retries. On a mirrored card, a
+  stop whose write also assigns the card to the bot is now that hand-off; a
+  person's stop that does not hand it over still holds.
 - **A board run never keeps a Discord or bridge credential under another
   name.** Bots started from one shared environment hold every bot's token
   under its own name (`EM_DISCORD_TOKEN`, `PO_DISCORD_TOKEN`, `DISCORD_BOT_KEY`…);
