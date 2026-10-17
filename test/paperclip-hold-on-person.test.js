@@ -9,7 +9,7 @@ const assert = require("assert");
 const { mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, outcomeOf, unchangedNote, OUTCOME_MARK } = require("../lib/paperclip");
+const { createPaperclipPoller, outcomeOf, OUTCOME_MARK } = require("../lib/paperclip");
 
 let pass = 0, fail = 0;
 async function check(label, fn) {
@@ -132,17 +132,23 @@ const visible = (b) => b.comments.filter((c) => !c.deletedAt);
     assert.match(b.writes.at(-1).body.comment, /could not hand this task to Quinn: the board has no person by that name/);
   });
 
-  await check("on a task another writer owns, a re-wake note restates the held answer and never asks for anything new", async () => {
+  // A mirrored card held on a person is blocked by the bot's answer, its holder
+  // and links left to its writer; each re-wake is the model's to decide once,
+  // and an answer that only repeats the last one escalates (SLA-1775).
+  await check("on a task another writer owns, a held answer blocks it in place, and a re-wake never restates it", async () => {
     const b = board({ description: "source: org/docs#456\nShip the release." }), seat = seatOn(b);
     const answer = async () => HELD;
     await seat(answer).tick();
+    assert.strictEqual(b.card.status, "blocked");
+    assert.strictEqual(b.card.assigneeAgentId, "agent-em", "another writer's task changed holder");
+    assert.ok(b.writes.every((w) => !("assigneeUserId" in w.body) && !("blockedByIssueIds" in w.body)), "another writer's holder or links were written");
     b.wake("r2"); await seat(answer).tick();
     b.wake("r3"); await seat(answer).tick();
-    assert.ok(b.writes.every((w) => !("status" in w.body) && !("assigneeUserId" in w.body)), "another writer's task got a status or holder");
     assert.ok(b.writes.every((w) => !w.deleted), "a note was taken down, leaving a blank comment");
-    const notes = b.writes.filter((w) => w.runId !== "r1").map((w) => w.body.comment);
-    assert.deepStrictEqual(notes, [unchangedNote(HELD), unchangedNote(HELD)]);
-    assert.ok(notes.every((n) => n.includes("Avery must approve the release window") && !/anything new|answered above/.test(n)));
+    const later = b.writes.filter((w) => w.runId !== "r1").map((w) => w.body.comment);
+    assert.strictEqual(later.length, 2, JSON.stringify(later));
+    assert.ok(later.every((n) => /Escalating: I would only repeat my last answer/.test(n) && !/Nothing has changed since my last/.test(n)), JSON.stringify(later));
+    assert.strictEqual(b.card.status, "blocked");
     assert.ok(b.comments.every((c) => c.body.trim()), "an empty comment is on the card");
   });
 
