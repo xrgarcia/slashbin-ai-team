@@ -3329,6 +3329,7 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       // The action serves one board: PAPERCLIP_ESCALATE_BOARD's, else the first.
       escalate,
       contract: board.contract,
+      policy: board.policy,
       onEscalate: async ({ task, link, to, ask }) => {
         const channelId = escalation.channel ?? promptChannel;
         const channel = await resolveBridgeChannel(channelId, { paperclipTask: task, escalation: true });

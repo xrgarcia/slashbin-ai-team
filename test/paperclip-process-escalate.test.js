@@ -179,7 +179,7 @@ const RETURNED = `Only the Product Owner can rule on scope.\n${OUTCOME_MARK} ret
     const close = b.writes.find((w) => w.body.status);
     assert.ok(close, JSON.stringify(b.writes));
     assert.strictEqual(close.body.status, "in_review");
-    assert.deepStrictEqual(close.body.executionPolicy, { stages: [{ type: "review", participants: [{ type: "agent", agentId: "agent-po" }] }] });
+    assert.deepStrictEqual(close.body.executionPolicy, { maxReviewRounds: 10, stages: [{ type: "review", participants: [{ type: "agent", agentId: "agent-po" }] }] });
     assert.strictEqual(close.body.comment, "Done; please check the copy.");
   });
 

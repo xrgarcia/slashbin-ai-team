@@ -71,7 +71,7 @@ const RETURNED = `Only the Product Owner can change its own routine.\n1. Fix the
 
 (async () => {
   await check("`return` is a blocked outcome that asks for a hand-back", async () => {
-    assert.deepStrictEqual(outcomeOf(`Fix the path.\n${OUTCOME_MARK} return`), { comment: "Fix the path.", status: "blocked", waitsOn: [], escalate: false, giveBack: true, person: null });
+    assert.deepStrictEqual(outcomeOf(`Fix the path.\n${OUTCOME_MARK} return`), { comment: "Fix the path.", status: "blocked", waitsOn: [], escalate: false, giveBack: true, followUp: false, person: null });
     assert.strictEqual(outcomeOf(`x\n${OUTCOME_MARK} blocked`).giveBack, false);
   });
 
