@@ -1,16 +1,42 @@
 # Install guide
 
-From nothing to a bot answering you in Discord. No prior Discord-developer or
-agent-CLI knowledge assumed.
+[README](../README.md) · [All documentation](../README.md#documentation-table-of-contents)
 
-**Time:** about 10 minutes, most of it in the Discord portal.
+## Contents
+
+- [1. Prerequisites](#1-prerequisites)
+- [2. Create the Discord bot](#2-create-the-discord-bot)
+  - [5. Turn on Message Content Intent — do not skip this](#5-turn-on-message-content-intent--do-not-skip-this)
+  - [6. Invite the bot to your server](#6-invite-the-bot-to-your-server)
+- [3. Install the harness](#3-install-the-harness)
+- [4. Configure](#4-configure)
+  - [Paperclip connector](#paperclip-connector)
+  - [Paperclip-only](#paperclip-only)
+- [5. Give the bot a role](#5-give-the-bot-a-role)
+- [6. Check before you start](#6-check-before-you-start)
+- [7. Start it](#7-start-it)
+- [8. Add tools (optional)](#8-add-tools-optional)
+- [9. Let it do more (optional)](#9-let-it-do-more-optional)
+- [10. Run a team](#10-run-a-team)
+- [Troubleshooting](#troubleshooting)
+- [Next](#next)
+
+Start an agent on Paperclip, Discord, or both. Choose the surface you already use.
+
+- **Paperclip only:** use the [Paperclip guide](paperclip.md). You can skip all
+  Discord setup, including its developer portal and interactive setup wizard.
+- **Discord only:** follow the steps below.
+- **Both:** follow the Discord steps, then add the [Paperclip connector](#paperclip-connector).
+
+You need the harness, an authenticated agent CLI, and at least one configured
+surface. Check the [runtime guide](runtimes.md) for differences between Claude
+Code and Codex.
 
 ---
 
 ## 1. Prerequisites
 
-Three things. Check each one before continuing — a missing prerequisite is the
-most common reason the later steps behave strangely.
+Check the host and your selected agent CLI before continuing.
 
 ```bash
 node -v          # need v18.0.0 or newer
@@ -55,7 +81,7 @@ read-only runs. In step 4, add `BOT_RUNTIME=codex` to the bot's `.env`.
 [docs/runtimes.md](runtimes.md) lists what differs on Codex.
 </details>
 
-You also need a Discord account and a server you can add a bot to. Creating a
+For Discord, you also need an account and a server you can add a bot to. Creating a
 server is free: Discord → **+** in the left sidebar → **Create My Own**.
 
 ---
@@ -110,6 +136,9 @@ npm install
 
 ## 4. Configure
 
+For Paperclip-only, follow the [manual board configuration](paperclip.md#paperclip-only).
+The interactive wizard below is for Discord installations.
+
 ```bash
 npm run setup
 ```
@@ -134,8 +163,8 @@ It asks for:
 **Developer Mode**. Then right-click your own name anywhere → **Copy User ID**.
 
 **Project directory (`CLAUDE_CWD`)** is the most misunderstood setting. It is
-**your** project — the repo you want the bot to work on and whose `CLAUDE.md`
-gives it its role. It is *not* this harness directory. Pointing it here gives the
+**your** project — the repo you want the bot to work on. Its `CLAUDE.md` gives
+Claude Code its role; its `AGENTS.md` gives Codex its role. It is *not* this harness directory. Pointing it here gives the
 bot no role and lets it edit its own source; setup refuses if you try.
 
 <details>
@@ -187,18 +216,17 @@ the Paperclip connector must be enabled first. A bot with neither a
 
 ## 5. Give the bot a role
 
-The `CLAUDE.md` in your project directory is the bot's job description.
+The role file in your project directory describes the agent's responsibility.
+Use `CLAUDE.md` for Claude Code or `AGENTS.md` for Codex.
+If the project already has that file, read and adapt it rather than replacing it.
 
-```bash
-cp CLAUDE.md.example /path/to/your/project-repo/CLAUDE.md
-```
+For a new role, [CLAUDE.md.example](../CLAUDE.md.example) shows the sections to include.
+Use the filename for your selected runtime.
 
 Edit it: who the bot is, what it can look up, what it's allowed to do, your
-domain terms, your repos. Keep it under about 100 lines — it's loaded on every
-message, so lean context means faster replies.
-
-Without a `CLAUDE.md` the bot still works; it just behaves like a generic
-assistant that happens to have access to your files.
+domain terms, and your repos. Keep the role focused and put detailed procedures
+in skills or linked documents. The [runtime layout reference](runtimes.md#the-bots-repository-per-runtime)
+shows where each runtime reads those files.
 
 ---
 
@@ -222,7 +250,7 @@ which means every Discord user who can reach the bot can drive it.
 npm start
 ```
 
-Expect:
+For a Discord agent, expect:
 
 ```
 Bot 'product-owner' started and connected to Discord (PID 12345)
@@ -240,9 +268,14 @@ npm run status
 # Bot 'product-owner' is running and connected to Discord (PID 12345)
 ```
 
-Then in Discord, **DM your bot**: `hello, what repo are you working in?`
+Then in Discord, **DM your bot**:
 
-You should see it start typing, then reply. That's a working install.
+> Read this project's README and explain how to run the project. Name the files
+> you used.
+
+You should see activity, then an answer grounded in the project. Check the named
+files against your repo. That checks the agent's working directory and role as
+well as its connection.
 
 The ready marker means **every** surface the bot runs is up: Discord once it
 connects (if on), and each Paperclip board once its first poll succeeds (if on).
@@ -254,8 +287,8 @@ assigning it a task on its board.
 
 ## 8. Add tools (optional)
 
-Give the bot access to real systems with an `.mcp.json` in your **project**
-directory:
+For Claude Code, give the bot access to real systems with an `.mcp.json` in your
+**project** directory:
 
 ```json
 {
@@ -268,6 +301,11 @@ directory:
 }
 ```
 
+In Claude's restricted mode, also allow the server or tool with
+`BOT_PERMISSION_ALLOW`. On Codex, MCP access requires a compatible mode and
+configuration; restricted runs have no MCP servers. Follow
+[tool setup by runtime](usage.md#connecting-tools-mcp).
+
 Restart (`npm restart`), then confirm it actually connected rather than assuming —
 ask the bot directly: *"list the tables in the database"*. A misconfigured MCP
 server doesn't error loudly; the tool is simply absent.
@@ -279,8 +317,8 @@ again, then add servers back one at a time.
 
 ## 9. Let it do more (optional)
 
-By default the bot can read and search, but not write files or run commands. To
-let it act:
+By default the bot has restricted access. Capabilities differ by runtime;
+restricted Codex runs have no network or web search. To grant broad tool access:
 
 ```env
 BOT_PERMISSION_MODE=bypass
@@ -290,13 +328,17 @@ BOT_PERMISSION_MODE=bypass
 reach the bot can run commands on your machine. The bot warns about this on every
 start.
 
-To widen more narrowly instead, keep `restricted` and add tools:
+On Claude Code, to widen more narrowly, keep `restricted` and add tools:
 
 ```env
 BOT_ALLOWED_TOOLS=Read,Glob,Grep,WebFetch,WebSearch,TodoWrite,Edit,Write
 ```
 
 ---
+
+The Claude tool-list setting above is refused on Codex. See the
+[runtime guide](runtimes.md#settings-codex-cannot-honor) for its supported settings.
+Board tasks have [separate execution settings](paperclip-board-execution.md).
 
 ## 10. Run a team
 
@@ -404,6 +446,9 @@ questions.
 
 ## Next
 
-- [README](../README.md#configuration) — the full configuration reference
+- [Documentation contents](../README.md#documentation-table-of-contents) — every guide
+- [Paperclip](paperclip.md) — board setup, task outcomes, and escalations
+- [Daily use](usage.md) — memory, schedules, tools, and operations
+- [Configuration](../README.md#configuration) — the full variable reference
 - [UPGRADING.md](../UPGRADING.md) — coming from 1.x
 - [SECURITY.md](../SECURITY.md) — hardening checklist

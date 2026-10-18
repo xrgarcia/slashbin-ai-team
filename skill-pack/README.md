@@ -1,5 +1,12 @@
 # Harness skill pack
 
+[README](../README.md) · [All documentation](../README.md#documentation-table-of-contents)
+
+## Contents
+
+- [The one rule: never hardcode a path](#the-one-rule-never-hardcode-a-path)
+- [Adding one](#adding-one)
+
 Skills that ship **with the harness** and load into every bot automatically, so
 they do not have to be copied into each bot's repo.
 

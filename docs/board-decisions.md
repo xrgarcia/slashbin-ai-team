@@ -1,5 +1,17 @@
 # Board decisions: who decided a card's status, and who owns an escalation
 
+[README](../README.md) · [All documentation](../README.md#documentation-table-of-contents)
+
+## Contents
+
+- [What the board records (the facts the model stands on)](#what-the-board-records-the-facts-the-model-stands-on)
+- [(a) Status decisions](#a-status-decisions)
+- [(b) The escalation lifecycle](#b-the-escalation-lifecycle)
+  - [Phases, in order](#phases-in-order)
+  - [Routing: the latest attempt's outcome decides the write](#routing-the-latest-attempts-outcome-decides-the-write)
+- [(c) Wakes and hand-offs: what the card says now wins](#c-wakes-and-hand-offs-what-the-card-says-now-wins)
+- [Known limits](#known-limits)
+
 The Paperclip poller (`lib/paperclip.js`) makes two judgements on every wake:
 
 1. **Whose decision is the card's status?** A stop the bot set itself, or one

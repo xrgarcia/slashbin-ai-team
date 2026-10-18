@@ -1,5 +1,18 @@
 # Contributing
 
+[README](README.md) · [All documentation](README.md#documentation-table-of-contents)
+
+## Contents
+
+- [Getting set up](#getting-set-up)
+- [Branches](#branches)
+- [Running the tests](#running-the-tests)
+- [The house style, such as it is](#the-house-style-such-as-it-is)
+- [Before you open a pull request](#before-you-open-a-pull-request)
+- [Backward compatibility is a hard rule](#backward-compatibility-is-a-hard-rule)
+- [Reporting bugs](#reporting-bugs)
+- [Security](#security)
+
 Thanks for looking. This is a small, sharp codebase — three source files and no
 build step — so contributing is mostly reading, changing, and running the tests.
 

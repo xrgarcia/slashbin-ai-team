@@ -1,5 +1,16 @@
 # Contributor Covenant Code of Conduct
 
+[README](README.md) · [All documentation](README.md#documentation-table-of-contents)
+
+## Contents
+
+- [Our Pledge](#our-pledge)
+- [Our Standards](#our-standards)
+- [Enforcement Responsibilities](#enforcement-responsibilities)
+- [Scope](#scope)
+- [Enforcement](#enforcement)
+- [Attribution](#attribution)
+
 ## Our Pledge
 
 We as members, contributors, and leaders pledge to make participation in our

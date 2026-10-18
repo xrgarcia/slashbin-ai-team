@@ -1,229 +1,236 @@
-# slashbin-ai-team
+# Slashbin AI Team
 
-**The AI engineering team behind [slashbin.io](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-team) — the webhook ETL gateway for engineers and AI agents. [Try slashbin.io free →](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-team)**
+**Give your AI agents work without babysitting every session.**
 
-*Product Owner, Engineering Manager, SRE — coordinating autonomously to ship software.*
+Run Claude Code or Codex as an agent with a role, your tools, and a place to receive
+work. Assign tasks through **Paperclip**, talk through **Discord**, or use both.
+**A Paperclip agent needs no Discord account or bot.**
 
-**Build AI employees for your business. Give each one a role, memory, your tools and a schedule; run it on Claude Code or Codex; talk to it on Discord, and optionally assign it work on a Paperclip board.**
+This is the harness behind the AI team building [Slashbin](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-team).
+We're sharing it so you can run your own. **Free, self-hosted, MIT licensed.**
 
 [![CI](https://github.com/xrgarcia/slashbin-ai-team/actions/workflows/ci.yml/badge.svg)](https://github.com/xrgarcia/slashbin-ai-team/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-- **Your choice of agent:** each bot runs on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or the [OpenAI Codex CLI](https://github.com/openai/codex), chosen per bot with `BOT_RUNTIME`. A bot uses only the CLI you pick — for replies, summaries, scheduled jobs and board tasks — billed however that CLI is signed in. [Runtimes →](docs/runtimes.md)
-- **Discord, a board, or both:** people reach a bot in Discord, on a [Paperclip](#paperclip) board — where it answers tasks assigned to it, read-only or with engineering tools, never with access to its Discord memory — or on both. A bot with a `DISCORD_TOKEN` is on Discord; one with only a board answers on its board alone. [Paperclip-only →](#paperclip-only)
-- **Focused context:** Each bot's `CLAUDE.md` is its job description. A PO bot loads product context, an SRE bot loads ops context. Separated context produces sharper output than one generalist juggling every role in one window.
-- **Async parallelism:** While you DM the PO, the EM bot can be reviewing a PR and the SRE bot can be watching a deploy. Multiple bots = multiple things happening at once, not role-play.
-- **Safe to leave running:** an agent that can merge a PR needs guarantees about what happens when it crashes. [See below.](#why-safe-to-leave-running)
+**[Start with Paperclip →](docs/paperclip.md)** ·
+**[Start with Discord →](docs/INSTALL.md)** ·
+**[Documentation →](#documentation-table-of-contents)**
 
-Each bot drives a real agent CLI against your codebase, MCP servers and tools — not a chatbot wrapper, but an AI teammate that can read code, query databases, create issues and ship work, as far as you allow it.
+## Contents
+
+- [The problem it solves](#the-problem-it-solves)
+- [How it works](#how-it-works)
+- [Use Paperclip, Discord, or both](#use-paperclip-discord-or-both)
+- [What changes in your day](#what-changes-in-your-day)
+- [Start with one agent](#start-with-one-agent)
+- [Why we built it](#why-we-built-it)
+- [Documentation table of contents](#documentation-table-of-contents)
+- [Configuration](#configuration)
+- [Commands](#commands)
+- [Contributing](#contributing)
+- [License](#license)
+
+## The problem it solves
+
+You already have an agent that can read a repo, review a change, or investigate a
+problem. Keeping that work moving takes more than the prompt that started it.
+
+Someone has to receive the next assignment, preserve context between conversations,
+notice when a run stops, and follow up when a dependency finishes. If that someone
+is always you, every handoff becomes another terminal session to manage.
+
+Slashbin AI Team handles that connection between your agent and the people assigning
+it work. Each agent has its own working directory, role, permissions, and state.
+It receives work, runs the CLI you selected, and returns the answer to the place
+the work came from.
+
+On Discord, it also keeps conversation history and can schedule work and follow-ups.
+On Paperclip, work stays attached to its task, with a reply and an explicit outcome.
+
+## How it works
+
+```text
+Paperclip task and/or Discord message
+  → Slashbin AI Team
+  → your agent's role, working directory, and permissions
+  → Claude Code or Codex
+  → reply and task outcome on Paperclip, or reply in Discord
+```
+
+You supply the role, tools, and authority. The harness connects the agent to its
+work and manages its runs. A role file describes what an agent should do; the
+runtime's permissions determine what it can actually do.
+
+| You choose | What it controls |
+|---|---|
+| Runtime | Claude Code or Codex, selected per agent with `BOT_RUNTIME` |
+| Working directory | The agent's own repo, set with `CLAUDE_CWD` on either runtime |
+| Role | `CLAUDE.md` for Claude Code; `AGENTS.md` for Codex |
+| Tools and permissions | What the agent may read, change, or access through MCP |
+| Where work arrives | Paperclip, Discord, or both |
+
+Runtime capabilities differ. For example, restricted Codex runs have no network or
+MCP access; isolated Codex board runs cannot push to GitHub. Read the
+[runtime comparison](docs/runtimes.md#what-differs-on-codex) before choosing the
+permissions for a role.
+
+## Use Paperclip, Discord, or both
+
+Both connections are optional individually. **At least one must be configured.**
+
+| Where you work | What the agent does | What you need |
+|---|---|---|
+| **Paperclip only** | Receives tasks assigned to its board seat, works within its permissions, and posts the answer on the task | A Paperclip board and the agent's own key; no Discord setup |
+| **Discord only** | Answers DMs, mentions, or monitored channels; supports conversation memory, files, schedules, and follow-ups | A Discord bot token and your access rules; no Paperclip setup |
+| **Both** | Accepts board assignments and Discord conversations through the same agent runtime | Both connections configured; board access is controlled separately |
+
+### Paperclip-only
+
+**Already using Paperclip? Give an agent a seat on your board and point this
+harness at it.** The connector picks up assigned tasks, runs the agent, and posts
+its answer under the task's run. A task the agent cannot complete is reported as
+blocked. Dependencies and escalations can carry the work to its next owner.
+
+Board runs are read-only by default. Choose `engineering` for scoped code work, or
+`parity` when the board should grant the same access as the agent's Discord
+sessions. The isolated modes keep Discord memory out of board runs; `parity`
+opens the session's files and tools and needs the same trusted audience.
+
+**[Paperclip setup and task lifecycle →](docs/paperclip.md)** ·
+[Board permissions and runtime limits →](docs/paperclip-board-execution.md)
+
+### Discord
+
+Talk to an agent from your laptop or phone. Send it a file, ask what you decided
+earlier, or ask it to post a recurring report. While it works, a status line shows
+activity; the answer arrives when the run finishes.
+
+Schedules, follow-up wake-ups, and background conversation summaries use Discord.
+They are off on a Paperclip-only agent. Board tasks keep their own sessions;
+connecting both surfaces does not create a shared conversation.
+
+**[Discord installation →](docs/INSTALL.md)** ·
+[Memory, files, schedules, and follow-ups →](docs/usage.md)
+
+## What changes in your day
+
+| The work you keep doing | What the harness provides |
+|---|---|
+| Opening a terminal to pass along the next board assignment | A connector that picks up tasks assigned to the agent and posts its answer back |
+| Reconstructing earlier Discord conversations | Saved sessions, a conversation buffer, summaries, and a recall skill that names the sources it searched |
+| Remembering to ask whether something finished | On Discord, stored follow-ups that can wake on a timer or a named signal |
+| Guessing whether an agent is connected or stuck | Connection checks, logs, a diagnostic command, and progress shown during Discord runs |
+| Deciding whether a failed run already acted before retrying | Resume checks that refuse a blind fresh retry after activity; board attempts have durable recovery |
+| Coordinating different responsibilities in one context | Separate agents with their own roles, tools, state, and permissions |
+
+These are controls around an agent's work. Review and verification still belong in
+the role and workflow you give it. A failed run can leave partial work; a reply is
+not proof that a deploy succeeded.
+
+## Start with one agent
+
+You need Node.js 18 or newer, an installed and authenticated Claude Code or Codex
+CLI, and a machine to run the harness. The runtime guide lists
+[additional sandbox prerequisites](docs/runtimes.md).
 
 ```bash
 git clone https://github.com/xrgarcia/slashbin-ai-team.git
-cd slashbin-ai-team && npm install
-npm run setup     # asks a handful of questions, validates every answer
+cd slashbin-ai-team
+npm install
+```
+
+Then take the path that matches where you work:
+
+- **Paperclip:** follow the [Paperclip guide](docs/paperclip.md). Configure the board,
+  the agent's key, and its working directory in `.env`. Leave `DISCORD_TOKEN` unset.
+- **Discord:** follow the [install guide](docs/INSTALL.md). Create the Discord bot,
+  then run `npm run setup` to configure and check it.
+- **Both:** configure Discord, then add the [Paperclip connector](docs/paperclip.md).
+
+Give the agent a role in its project repo: `CLAUDE.md` for Claude Code or
+`AGENTS.md` for Codex. Describe its responsibility, the sources it should use,
+and what it may decide. Use an existing role file if the repo already has one.
+
+```bash
+npm run doctor
 npm start
+npm run status
 ```
 
-Full walkthrough including the Discord side: **[docs/INSTALL.md](docs/INSTALL.md)**.
+For a first useful task, ask it to read your project's README and explain how to
+run the project, naming the files it used. Assign that task on Paperclip or send
+it in Discord. That checks whether the agent can find and use its own context.
 
-## Who this is for
+Once that works, add the tools the role needs and check their permissions.
+The default is restricted access. [Tool setup →](docs/usage.md#connecting-tools-mcp)
 
-Three patterns where an AI team beats a single generalist agent:
+Start with one role. Add an Engineering Manager, Product Owner, SRE, or another
+role when you have distinct work to give it. Each can use a different runtime.
+[Running a team →](docs/usage.md#running-a-team)
 
-**1. Consulting / agency operators** — one PO bot fields asks across multiple clients and routes work into per-client EM and SRE bots. Each client gets a dedicated `CLAUDE.md` and its own Discord channels. Strategy stays with you; coordination stays with the bots.
+**The code is free to use and modify under the [MIT license](LICENSE).**
+You supply the host and the agent CLI account; usage is billed according to how
+that CLI is signed in.
 
-**2. Multi-business operators** — you run several companies, each with its own PO/EM/SRE team. One Discord server, separated channels per business, separated context per bot. Bots from different businesses don't cross-talk unless you whitelist them.
+## Why we built it
 
-**3. Single business, many service owners** — role-based bots (PO, EM, SRE, Support) coordinating on one product. The PO writes issues, the EM decomposes and approves, the [Foreman](https://github.com/xrgarcia/slashbin-ai-foreman) implements, the EM bot reviews, you ship.
+We use this harness to run the agents building Slashbin. Giving agents real work
+made the gaps concrete: a process could be running while disconnected, a promised
+follow-up could disappear with the conversation, and a failed run could have
+already taken an action before anyone noticed.
 
-**Also useful for:**
+The connection checks, stored follow-ups, resume checks, and task outcomes address
+those failures. We're sharing the harness so other developers can use it, adapt
+it, and contribute what they learn.
 
-- **Vibe coders** — your AI builds the pipeline, you never touch webhook plumbing
-- **Developers** — replace boilerplate with AI employees that handle ops, reviews, and coordination
-- **Small business owners & solopreneurs** — run a team of AI employees without hiring, from product owner to SRE
+[Slashbin](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-team)
+is the webhook ETL and programmable gateway our team builds. It gives applications
+and agents a way to receive, transform, and deliver business events. If your next
+project involves connecting those systems, that's where it fits.
 
-> **Why separate bots if you're solo?** Each bot has a focused context window — a PO bot loaded with product context produces sharper product output than a generalist juggling product, ops, and code in one session. And bots run in parallel: while you're talking to one, the others are working. Async, not role-play.
+The implementation part of our engineering workflow is also open source:
+[Slashbin AI Foreman](https://github.com/xrgarcia/slashbin-ai-foreman) picks up
+approved issues and opens pull requests. Connect the roles and workflow you need.
 
-## Why "safe to leave running"
+## Documentation table of contents
 
-Plenty of projects put an LLM in Discord. The hard part isn't answering — it's what happens when an agent that can **merge a PR** crashes halfway through. These guarantees each exist because the failure happened here first:
+Each guide has its own table of contents. Start with installation or Paperclip,
+then follow the reference that matches your task.
 
-- **A crashed run is never blindly retried.** If a resumed session already started, called a tool, or produced text, the harness refuses to re-run it and tells you to check what landed. Re-running a prompt that merged a PR merges it twice. At-most-once, by construction.
-- **A step-cap is reported as a step-cap.** Hitting the limit means the work so far landed — you get "reply to continue", not a bare exit code that reads as total failure.
-- **A bot that can't reach Discord dies.** It doesn't sit there reporting healthy while ignoring every message. `npm run status` tells you *connected*, not just *running*.
-- **A scheduled run survives a reconnect.** Jobs aren't marked "ran" until their channel actually resolves, so a gateway blip doesn't silently burn the day's run.
-- **A dropped attachment says so.** The bot will never claim nothing was attached when something was.
-- **Bots can't spiral.** Bot-to-bot exchanges stop after a limit, and any human message resets it — you are always the circuit breaker.
-
-## What you can build
-
-- A **Product Owner** that manages your backlog, writes issues, and talks to customers
-- An **Engineering Manager** that decomposes epics, reviews PRs, and coordinates deploys
-- An **SRE bot** that monitors services, picks up approved issues, and ships fixes
-- A **Support agent** that answers questions using your docs and database
-- Any role you can describe in a `CLAUDE.md` file
-
-Each bot is defined by its context — a `CLAUDE.md` that describes who it is, what it knows, and what it can do. Change the context, change the employee.
-
-**What to include:**
-
-| Section | Purpose | Example |
-|---|---|---|
-| **Role** | Who the bot is | "You are a product owner for Acme Corp" |
-| **Quick lookups** | What it can query | "Query Postgres via MCP, check Stripe billing" |
-| **Actions** | What it's allowed to do | "Create GitHub issues, commit and push" |
-| **Terminology** | Domain terms | "Golden Model = canonical output schema" |
-| **Repos** | Where to find code and file issues | "acme/backend — main API server" |
-
-Keep it under 100 lines. Claude loads the full `CLAUDE.md` on every message — lean context means faster responses. Start from `CLAUDE.md.example`.
-
-## Features
-
-**Agent runtime** — spawns the `claude` CLI per message. Serialized send queue, automatic message splitting, per-request step and time caps, and a concurrency guard that refuses politely rather than thrashing.
-
-**Live progress** — while a request runs, the bot posts one status line that is edited in place as it works (`⚙️ working — 6 steps · Read bot.js`), then removed when the answer arrives.
-
-> It reports **activity, never prose**. The answer is still delivered exactly once, at the end, unsplit. That distinction is the whole design: an earlier version streamed the reply text itself, so a preamble like "Let me check…" landed as its own message and the bot looked like it answered twice. Tool *inputs* are never shown either — a Bash command routinely carries a connection string.
->
-> Turn it off with `BOT_PROGRESS_ENABLED=false`.
-
-**Harness skills, one golden source** — skills that operate on harness-owned data ship *with the harness* in `skill-pack/` and load into every bot automatically, namespaced as `/slashbin-harness:<name>`. No copying into each bot's repo.
-
-> The harness publishes its **resolved** paths — `$BOT_STATE_DIR`, `$BOT_SUMMARIES_DIR`, `$BOT_BUFFER_FILE` and friends — into every run. Pack skills read those and never name a file, which is what stops them going stale when a bot is renamed or a directory moves. Disable with `BOT_SKILL_PACK=`; add your own with `BOT_EXTRA_SKILL_PACKS`.
-
-**Roles and identity** — one bot = one `CLAUDE_CWD`. That directory's `CLAUDE.md` is its role, its `.mcp.json` its tools, its skills its procedures.
-
-**Memory and continuity** — each channel keeps its own Claude session, persisted across restarts. A rolling buffer records everything; when it fills, the oldest slice is summarized rather than dropped. A background summarizer writes daily summaries, and the last 48 hours are injected into new sessions.
-
-**Recall** — `/slashbin-harness:remember <question>` searches everything the bot has: **every** daily summary (not just the injected window), the live conversation buffer, files people sent, live sessions and scheduled runs.
-
-> It reports **which sources it actually searched**, so "searched and found nothing" is never confused with "never searched". That distinction is the feature: the version this replaces read three paths that had been dead for months, reported it had checked them, and answered confidently from the fraction it happened to find.
->
-> Works mid-conversation on a resumed session, where the harness does not re-inject context — so a long conversation no longer *loses* memory as it goes.
-
-**Multiple employees, one install** — N bots from one clone, each with its own token, role, channels and state. Manage them individually (`--name`) or see them all (`npm run list`). Bots can @mention each other, with loop prevention built in.
-
-**Access control** — allowlists for users, channels and peer bots. Humans are gated by `ALLOWED_USERS`, bots by `ALLOWED_BOTS`; neither list has to name the other's members.
-
-**Work that happens without you** — *"every weekday at 7am, post the customer reach numbers"*. Just ask; the bot schedules it, reads the job back, and tells you when it will next fire. Times are in **your** timezone, not the server's. Runs missed during a restart are recovered rather than skipped.
-
-**Follow-ups it keeps** — *"I'll check back in twenty minutes"* is a job on disk, not an intention. A bot can set its own one-shot wake-up, carry forward what it already knows, and keep watching something across as many looks as it needs — choosing the gap each time, staying silent while nothing changes, and stopping the moment it has an answer. Nothing survives on hope: the run that promises the follow-up schedules it in the same breath.
-
-**Tell it the moment something happens** — a follow-up can name a signal alongside its timeout: *wake when `dev-deploy-done` fires, or in 30 minutes, whichever comes first.* Anything that can run a command fires one (`npm run signal dev-deploy-done`) — a CI step, a git hook, the last line of a deploy script. The sender passes a **name**, never a prompt: the words that run are the bot's own, written when it made the promise. The timeout is always there, so a signal that never arrives costs nothing.
-
-**Triggers** — a DM, an @mention, any message in a monitored channel, or an emoji reaction.
-
-**Files, any type, both directions** — attach anything and the bot opens it; reply to a message that has one and ask about it. Bots hand files back via an outbox or a marker. Oversized files are reported, never silently dropped.
-
-**Operations** — `start`/`stop`/`restart`/`status`/`list`/`logs`, structured logging, graceful shutdown, duplicate-instance guard, and `npm run doctor` (plus `doctor:fleet` for every bot at once).
-
-## Commands
-
-In Discord:
-
-| Command | What it does |
+| Page | What you will find |
 |---|---|
-| `/fresh` | Clear this channel's session; the next message starts a new conversation |
-| `/stop` | Kill the running request in this channel |
-| `/status` | Buffer size, message count, attachments, whether a request is running |
-
-> **These names are reserved.** The harness answers them before your bot ever sees
-> the message, so a command of your own with one of these names — including any
-> `BOT_STOP_WORDS` — **can never run**. Nothing errors; it silently does nothing
-> while still appearing in the bot's own list of what it can do. `npm run doctor`
-> fails if it finds one, and the bot warns at startup.
-
-In your shell (add `-- --name <bot>` to target one instance):
-
-| Command | What it does |
-|---|---|
-| `npm run setup` | Interactive configuration, validated as you go |
-| `npm run doctor` | Check an existing install; exits non-zero on failure |
-| `npm run doctor:fleet` | Check **every** bot in `ecosystem.config.js` in one pass — tokens, Paperclip board keys, schedules, stale processes |
-| `npm run signal <name>` | Tell a bot something happened, waking any follow-up that was waiting for it |
-| `npm run advise` | Read an existing install and list what to do **before** upgrading. `--json` for an agent; `--dir` to point at any checkout |
-| `npm start` / `stop` / `restart` | Manage the bot |
-| `npm run status` | Is it running — and is it *connected*? |
-| `npm run list` | Every bot instance in this checkout |
-| `npm run logs [N]` | Tail the log |
-| `npm run summarize` | Summarize now rather than on the interval |
-| `npm test` | The suite |
-
-## Connecting tools (MCP)
-
-Put a `.mcp.json` in your project directory:
-
-```json
-{
-  "mcpServers": {
-    "stripe": { "command": "npx", "args": ["-y", "@stripe/mcp"] },
-    "db": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://..."] }
-  }
-}
-```
-
-Any MCP server works. In `restricted` mode an MCP tool runs only if `BOT_PERMISSION_ALLOW` names it (`mcp__server` for a whole server, `mcp__server__tool` for one tool). Set `MCP_CONFIG_STRICT=true` to load only the servers in `MCP_CONFIG` and none of the host's.
-
-## Tool exposure
-
-| `BOT_PERMISSION_MODE` | Behaviour |
-|---|---|
-| `restricted` *(default)* | Only `BOT_ALLOWED_TOOLS` — read-only built-ins by default. Runs in `dontAsk` mode: anything else, MCP tools included, is denied unless `BOT_PERMISSION_ALLOW` pre-approves it. No user or repo settings file is read, so none can approve a tool; put the bot's own settings in `BOT_SETTINGS`. CLAUDE.md still loads |
-| `bypass` | Every tool, no permission prompts. `BOT_PERMISSION_DENY` still applies; pair it with a `BOT_SETTINGS` sandbox to keep the shell off the rest of the machine |
-
-**Use `bypass` only for a bot you intend to let write code and run commands, and only alongside a real `ALLOWED_USERS`.** In that configuration anyone who can reach the bot can run commands on your machine. It warns on every start.
-
-Running several bots? Set `BOT_PERMISSION_MODE_DEFAULT` once in the host environment instead of repeating `BOT_PERMISSION_MODE` in every app entry. Resolution order:
-
-1. `BOT_PERMISSION_MODE` — this bot. Always wins.
-2. `BOT_PERMISSION_MODE_DEFAULT` — every bot on this host that sets no mode of its own.
-3. `restricted` — the built-in default.
-
-The startup log names which of the three the value came from, so one bot behaving differently from its siblings is a question you can answer.
-
-Upgrading from 1.x? `BOT_PERMISSION_MODE=bypass` restores the old behaviour — see [UPGRADING.md](UPGRADING.md).
-
-## Running a team
-
-```bash
-cp ecosystem.config.example.js ecosystem.config.js   # edit the three paths at the top
-npm install -g pm2
-pm2 start ecosystem.config.js && pm2 save
-```
-
-Secrets are referenced by name and read from the environment — never written into that file. Supply them via `.env` or a secrets manager:
-
-```bash
-doppler run --project my-project --config prd -- pm2 start ecosystem.config.js
-```
-
-`npm run doctor` fails if it finds a literal credential in the config.
-
-**Which supervisor?** PM2 or systemd for production; the built-in manager is for development and single-bot installs.
-
-### Bot-to-bot coordination
-
-Both bots must whitelist each other:
-
-```env
-# Product Owner's env — allow the EM to talk to it
-ALLOWED_BOTS=<em-bot-user-id>
-# Engineering Manager's env — allow the PO to talk to it
-ALLOWED_BOTS=<po-bot-user-id>
-```
-
-Exchanges stop after `MAX_BOT_EXCHANGES` (default 2). Any human message resets the counter.
+| [Install guide](docs/INSTALL.md) | Prerequisites, Discord setup, role files, starting an agent, and checking the first reply |
+| [Paperclip guide](docs/paperclip.md) | Board-only setup, both surfaces, task pickup, outcomes, dependencies, and escalations |
+| [Daily use and operations](docs/usage.md) | Tools, memory, files, schedules, signals, stopping work, and running a team |
+| [Runtime guide](docs/runtimes.md) | Claude Code and Codex layouts, capabilities, switching, and limitations |
+| [Configuration reference](#configuration) | Environment variables and their defaults |
+| [Command reference](#commands) | Discord commands and shell commands |
+| [Board execution](docs/paperclip-board-execution.md) | Read-only, engineering, and parity access; prerequisites and troubleshooting |
+| [Run environment](docs/run-environment.md) | How credentials and environment variables reach each runtime |
+| [Board decisions](docs/board-decisions.md) | Status ownership, escalation routing, and handling concurrent changes |
+| [Landing](docs/landing.md) | Rules for committing and pushing only the changes an agent owns |
+| [Harness skill pack](skill-pack/README.md) | Shared skills and the environment paths they use |
+| [Upgrading](UPGRADING.md) | Upgrade advice and changes existing operators need to make |
+| [Security](SECURITY.md) | Access controls, hardening, and private vulnerability reporting |
+| [Contributing](CONTRIBUTING.md) | Development workflow, checks, and compatibility expectations |
+| [Changelog](CHANGELOG.md) | Release history |
+| [Code of conduct](CODE_OF_CONDUCT.md) | Community expectations |
 
 ## Configuration
 
-`BOT_SURFACES` declares where a bot answers. Unset, its configuration decides: Discord if it has a `DISCORD_TOKEN`, plus any [Paperclip](#paperclip) board it is given — a bot with a board and no token answers on its board alone, and one with neither refuses to start. `paperclip` declares it on its board alone, which needs the Paperclip connector enabled first. Every setting below is read by the code — CI fails if this table and the source disagree. **Resolution order: environment variable → default.**
+The tables below are the canonical environment-variable reference, checked against
+the code by `test/config-docs.test.js`. For a first install, use the guides above.
+For Claude and Codex differences, read [runtimes.md](docs/runtimes.md).
+
+<details>
+<summary>Expand the full configuration reference</summary>
 
 ### Identity
 | Variable | Default | Description |
 |---|---|---|
-| `BOT_SURFACES` | *(Discord)* | Where the bot answers: `discord`, `paperclip`, or `discord,paperclip`. Unset: Discord if `DISCORD_TOKEN` is set, plus any Paperclip board configured; with neither the bot exits `78`. A declared surface is a prerequisite: `paperclip` needs the Paperclip connector enabled first (`PAPERCLIP_URL` and `PAPERCLIP_API_KEY`, or `PAPERCLIP_EXTRA_BOARDS`), and the bot refuses to start (exit `78`) without it |
+| `BOT_SURFACES` | *(from configuration)* | Where the bot answers: `discord`, `paperclip`, or `discord,paperclip`. Unset: Discord if `DISCORD_TOKEN` is set, plus any Paperclip board configured; with neither the bot exits `78`. A declared surface is a prerequisite: `paperclip` needs the Paperclip connector enabled first (`PAPERCLIP_URL` and `PAPERCLIP_API_KEY`, or `PAPERCLIP_EXTRA_BOARDS`), and the bot refuses to start (exit `78`) without it |
 | `DISCORD_TOKEN` | — | Bot token from the Developer Portal. Required when `BOT_SURFACES` names `discord`. Unset with `BOT_SURFACES` unset, the bot answers on its Paperclip board alone (`Discord off — Paperclip-only`), and refuses to start (exit `78`) if it has no usable board either |
-| `CLAUDE_CWD` | current dir | **Your** project repo — its `CLAUDE.md` is the bot's role |
+| `CLAUDE_CWD` | current dir | **Your** project repo — `CLAUDE.md` gives Claude its role; `AGENTS.md` gives Codex its role |
 | `BOT_NAME` | `bot` | Instance name; scopes pid, log and session files |
 | `MCP_CONFIG` | *(none)* | Path to `.mcp.json` if not in `CLAUDE_CWD` |
 | `MCP_CONFIG_STRICT` | `false` | `true` loads ONLY the servers in `MCP_CONFIG` (`--strict-mcp-config`), or in `CLAUDE_CWD`'s own config when `MCP_CONFIG` is unset |
@@ -278,25 +285,10 @@ Exchanges stop after `MAX_BOT_EXCHANGES` (default 2). Any human message resets t
 | `BOT_TIMEZONE` | host zone | IANA name; the bot's sense of "today" |
 
 #### Prompt layering
-
-Two optional files under the bot's `CLAUDE_CWD` are added to the front of every
-request's system prompt. Both are read per message, so an edit lands on the next
-message with no restart, and a missing file simply contributes nothing. A Codex
-bot reads the same two files from `.codex/` instead ([runtimes.md](docs/runtimes.md#the-bots-repository-per-runtime)).
-
 | File | Scope | For |
 |---|---|---|
 | `.claude/system-prompt-overrides.md` | the whole repo | Instructions that must beat the harness defaults they contradict |
 | `.claude/channel-prompts/<channel-id>.md` | one channel | What changes per audience — who the bot is addressing, what that person needs, what it must not say to them |
-
-A channel file may be named for the channel instead (`<channel-name>.md`), but
-the ID is preferred and wins if both exist: renaming a channel in Discord must
-not silently detach it from its instructions.
-
-They layer in that order — repo first, channel second — so the narrower file is
-the later word on anything both touch. Both ride at the **head** of the prompt,
-never the tail: the whole prompt is one argv string against a kernel size
-ceiling, and the clamp that keeps it under cuts from the end.
 
 ### Memory
 | Variable | Default | Description |
@@ -317,20 +309,6 @@ ceiling, and the clamp that keeps it under cuts from the end.
 | `BUFFER_MAX_BYTES` | `32768` | Buffer size before rotation |
 | `BUFFER_ROTATE_PERCENT` | `40` | Oldest N% summarized away on rotation |
 | `BUFFER_TRUNCATE_RESPONSE` | `500` | Chars of each reply kept in the buffer |
-
-**How much a bot carries into a new conversation.** Starting fresh, a bot brings
-its recent daily summaries and the conversation buffer along — up to
-`CONTEXT_MAX_BYTES`. Past that, the oldest days are left out, and the prompt says
-so, so the bot knows to go and read them rather than assume nothing happened.
-Nothing is deleted: the summaries stay on disk and `/slashbin-harness:remember`
-reaches all of them regardless of this setting. A continuing conversation carries
-none of it — it resumes the live session, which already has the history.
-
-Why there is a ceiling at all: this context travels to Claude as a **single
-command-line argument**, and Linux rejects any argument over 128KB outright, with
-a `spawn E2BIG` that names nothing useful. Values above ~120000 bring that back.
-Two busy weeks of summaries will reach it. The default is also a cost decision —
-64KB is roughly 16,000 tokens attached to every new conversation.
 
 ### Files
 | Variable | Default | Description |
@@ -370,25 +348,6 @@ Two busy weeks of summaries will reach it. The default is also a cost decision �
 | `BRIDGE_SIGNAL_DATA_MAX` | `2000` | Characters of signal text kept before truncation |
 
 ### Paperclip
-Answer tasks assigned to this bot on a [Paperclip](https://paperclip.ing) board. A task Paperclip hands to an agent is checked out to the run it opened, and writes to a checked-out task must come from that run, so the agent's command on the board must hold its run open until a comment lands under it; the bot polls its inbox, answers through the same run path as Discord, and posts the reply under the run. A board is read by people outside the bot's Discord channels, so a board run gets least privilege in every permission mode, `bypass` included: by default (`BOT_BOARD_EXECUTION=readonly`, see [Engineering board runs](#engineering-board-runs)) only `BOT_BOARD_TOOLS` (read-only built-ins), in `dontAsk` mode, which confines the read tools to `CLAUDE_CWD`, plus whatever `BOT_BOARD_PERMISSION_ALLOW` pre-approves. A Paperclip run cannot reach Discord memory — the buffer, summaries, uploads, sessions, scheduled jobs, the state folder and the outbox of files already sent are kept out of its prompt and environment, denied to the read tools, and unreadable to any shell it is allowed, which always runs in Claude Code's sandbox confined to `CLAUDE_CWD` (the host needs it: `bwrap` and `socat` on Linux; without it the task gets the fallback reply; besides `CLAUDE_CWD` it reads only the system folders — `/usr`, `/bin`, `/lib`, `/etc` and the like — so a tool kept anywhere else, such as the home folder, needs an `allowRead` in `BOT_SETTINGS`; nothing else in `BOT_SETTINGS` can loosen a board run's sandbox). No settings file — user, project or local — is read for a board run, and of `BOT_SETTINGS` it takes only the model and those sandbox rules, so no approval made for Discord sessions carries over; the `CLAUDE_CWD` CLAUDE.md still loads. Claude Code's project auto-memory, which the Discord sessions in the same `CLAUDE_CWD` write and the CLI loads at startup, is off for a board run. Its environment carries none of the bot's own configuration — every `BOT_*` variable except the few the skill pack's hooks read (the mail and calendar gates among them), `MCP_CONFIG*`, anything naming Paperclip, `DISCORD_TOKEN` and `BRIDGE_TOKEN` — since a credential inside, say, an inline `BOT_SETTINGS` could otherwise be printed into a reply; other host variables, such as one an MCP server needs, still reach it, so give a board run a shell only if those can be read by every board reader. The whole harness folder is withheld too (its `.env`, logs and default state), so set `CLAUDE_CWD` to the folder board tasks should read: a bot whose `CLAUDE_CWD` is the harness or state folder, or inside one, keeps the connector off and logs why, since Claude Code's sandbox always opens its working directory. Each task keeps its own session.
-
-This connector is the inbound half only. For a bot to create, assign or comment on tasks itself, add Paperclip's own MCP server (`@paperclipai/mcp-server`) to that bot's MCP config and allow its tools. Give every agent its own key, used by both halves, and never share it between bots — the board's record of who did what is only as true as that. The bot hides `PAPERCLIP_API_KEY` from Claude, so hand the MCP server its key under another name: set it in the bot's `env` (pm2 passes only what the ecosystem lists) and reference it from the MCP config as `${THAT_NAME}`.
-
-#### Paperclip-only
-
-Discord and Paperclip are peer surfaces, and a bot says which it is on. `BOT_SURFACES=paperclip` runs it on its board alone, and needs the Paperclip connector enabled first: a board configured, and its connector on (see above). It logs `Discord off — Paperclip-only`, never builds or logs in a Discord client, and refuses at load (with a log line) any scheduled job, which posts to a Discord channel; the background summarizer, which reads Discord, is off. Without the connector it exits `78`, saying the Paperclip connector must be enabled first. A bot with a board and no `DISCORD_TOKEN` is Paperclip-only without declaring it, and says so in the same log line; its connector must then come up, or it exits `78`. A bot with neither a token nor a usable board exits `78`, naming both. The ready marker is written once every surface is up — Discord when it connects (if on), each board on its first successful poll (if on) — and `npm run doctor:fleet` reports them separately (`Discord: off · board paperclip: ready`).
-
-```bash
-CLAUDE_CWD=/srv/code/tech-lead-repo
-BOT_NAME=tech-lead
-WS_PORT=9803
-BOT_SURFACES=paperclip
-PAPERCLIP_URL=https://board.example.com
-PAPERCLIP_API_KEY=<this agent's own key>
-```
-
-An agent can sit on more than one board — the same bot as a seat in two companies, say — with a key per board. List the others in `PAPERCLIP_EXTRA_BOARDS` and give each the prompt channel whose audience matches that board's readers.
-
 | Variable | Default | Description |
 |---|---|---|
 | `PAPERCLIP_URL` | — | Board origin, e.g. `https://board.example.com`. Off unless this and the key are set |
@@ -396,13 +355,13 @@ An agent can sit on more than one board — the same bot as a seat in two compan
 | `PAPERCLIP_PROMPT_CHANNEL` | — | Channel id whose channel-prompt file (`.claude/channel-prompts/`, `.codex/` on Codex) applies to board replies — use the channel with the same audience as the board |
 | `PAPERCLIP_CONTRACT` | *(`HANDOFF_CONTRACT`)* | The handoff contract setting for the first board, in `HANDOFF_CONTRACT`'s form; a malformed value turns that board off |
 | `PAPERCLIP_POLICY` | *(none)* | The company task-completion policy the first board reads live for each run, as `<caseId>/<documentKey>` (extra boards: `policy`). Its text and revision go in the prompt and the run log; unreadable is said in the prompt as POLICY UNAVAILABLE. A malformed value turns that board off |
-| `PAPERCLIP_EXTRA_BOARDS` | — | More boards for the same bot, as a JSON array of `{ "id", "url", "keyEnv", "promptChannel", "events" }`. `keyEnv` names the variable holding that board's key, which is removed from the environment Claude runs in like `PAPERCLIP_API_KEY`. `events: false` keeps that one board on polling alone; unset, it follows `PAPERCLIP_EVENTS`. `escalationLabels` (array), `escalateTo`, `escalationReturnTo`, `escalationAuthority`, `escalationChannel` and `escalationMention` set that board's [escalations](#escalations); `contract` sets that board's handoff contract in `HANDOFF_CONTRACT`'s form, defaulting to `HANDOFF_CONTRACT`, and a malformed one skips the board; every one but `escalateTo` and `escalationReturnTo` falls back to the matching `PAPERCLIP_ESCALATION_*` variable, and those two are never inherited. Each board has its own state file and task sessions; a broken entry is logged and skipped |
-| `PAPERCLIP_EVENTS` | `on` | `off`: no board opens a live-event socket, and every board is polled at `PAPERCLIP_POLL_MS`. See [Live events](#live-events) |
+| `PAPERCLIP_EXTRA_BOARDS` | — | More boards for the same bot, as a JSON array of `{ "id", "url", "keyEnv", "promptChannel", "events" }`. `keyEnv` names the variable holding that board's key, which is removed from the environment Claude runs in like `PAPERCLIP_API_KEY`. `events: false` keeps that one board on polling alone; unset, it follows `PAPERCLIP_EVENTS`. `escalationLabels` (array), `escalateTo`, `escalationReturnTo`, `escalationAuthority`, `escalationChannel` and `escalationMention` set that board's [escalations](docs/paperclip.md#escalations); `contract` sets that board's handoff contract in `HANDOFF_CONTRACT`'s form, defaulting to `HANDOFF_CONTRACT`, and a malformed one skips the board; every one but `escalateTo` and `escalationReturnTo` falls back to the matching `PAPERCLIP_ESCALATION_*` variable, and those two are never inherited. Each board has its own state file and task sessions; a broken entry is logged and skipped |
+| `PAPERCLIP_EVENTS` | `on` | `off`: no board opens a live-event socket, and every board is polled at `PAPERCLIP_POLL_MS`. See [Live events](docs/paperclip.md#live-events) |
 | `PAPERCLIP_POLL_MS` | `15000` | How often the inbox is checked while a board's live events are off or down |
 | `PAPERCLIP_RECONCILE_MS` | `60000` | How often the inbox is still checked while a board's live events are up — the catch-all for anything the socket missed |
 | `PAPERCLIP_RESUME_INTERRUPTED` | off | Only for an attempt saved by a bot from before durable attempts. A board task's work now runs in a worker of its own that outlives a restart (`lib/attempts.js`, under `BOT_STATE_DIR/attempts/`): the restarted bot follows it and posts its answer, never runs it again, and a worker that died midway is answered blocked. For an older attempt, `1`: a task whose answer was cut off by a restart is run once more, under the run it started in, with a note to check what the first attempt already did before acting again — so its card is closed from the real result. Turn on only when the bot's work is safe to re-check (its jobs are idempotent). Off: the task gets the fallback reply and is left blocked |
 | `PAPERCLIP_EXTERNAL_WRITER` | — | Pattern for a task description's first line, e.g. `^source: \S+#\d+$`. A matching task's status belongs to another writer (a tracker mirror): the bot comments on it, and sets its status only to block it on an answer that waits (`PAPERCLIP-OUTCOME: blocked`, linking the tasks that answer names); it never moves it otherwise, nor changes its holder |
-| `PAPERCLIP_ESCALATION_LABELS` | `Needs EM ruling` | Comma-separated label names that mark a blocked card assigned to this bot as an [escalation](#escalations): it is worked, not refused, and stays blocked. Empty: no card is an escalation |
+| `PAPERCLIP_ESCALATION_LABELS` | `Needs EM ruling` | Comma-separated label names that mark a blocked card assigned to this bot as an [escalation](docs/paperclip.md#escalations): it is worked, not refused, and stays blocked. Empty: no card is an escalation |
 | `PAPERCLIP_ESCALATE_TO` | — | First board only: who an escalation goes to when this bot cannot resolve it — `agent:<seat name or id>` or `user:<Paperclip user id>`, optionally followed by `\|Name`. Unset: the bot resolves or notes, never hands on |
 | `PAPERCLIP_ESCALATION_RETURN_TO` | the holder below on the chain | First board only: who a resolved escalation goes back to, same form as `PAPERCLIP_ESCALATE_TO`. Set it on the bottom bot of a chain to the seat that first handed the card up (the Foreman's seat, say); unset, the card goes back to whoever handed it to this bot |
 | `PAPERCLIP_ESCALATE_URL` | — | The process MCP endpoint whose `escalate` action carries the served board's hand-offs (`PAPERCLIP_ESCALATE_BOARD`): a `return` goes up the reporting line, a worked escalation back down its recorded chain, each recorded on the card. Needs `PAPERCLIP_ESCALATE_BEARER_ENV`; unset, hand-offs are direct writes |
@@ -420,31 +379,6 @@ An agent can sit on more than one board — the same bot as a seat in two compan
 | `BOT_BOARD_DENY_FILES` | *(none)* | Board runs, either mode: comma-separated file-name patterns a board run may not read anywhere in `CLAUDE_CWD` or the read and write paths, added to the built-in list (`.mcp.json`, `.env`, `.env.*` except `.env.example`/`.sample`/`.template`, `.npmrc`, `.netrc`, `.git-credentials`, `.pgpass`, `.dev.vars`, `*.pem`, `*.key`, SSH keys, `credentials.json`, `service-account*.json`). `*` and `?` match; a leading `!` exempts a name |
 | `BOT_BOARD_NETWORK_ALLOW` | *(none)* | `engineering` only: comma-separated host names a board run's shell may reach, added to any `allowedDomains` in `BOT_SETTINGS`, e.g. `github.com,api.github.com` |
 
-#### Escalations
-
-A blocked card is normally the bot's cue to stand back: it says it is held and leaves it. Every wake ends its run with a note of its own — Paperclip keeps a run open until one lands under it — and the bot takes down its previous identical note, so the card shows one. A blocked card assigned to the bot that carries one of `PAPERCLIP_ESCALATION_LABELS` is different — another agent (the Foreman, say) gave up on it and handed it up. The bot works it and the card stays **blocked** the whole time; no bot ever moves it out of blocked. The run is told the card is an escalation and what is its to decide (`PAPERCLIP_ESCALATION_AUTHORITY`), reads the reason, acts on the work it points at (a mirrored card's first description line, `source: owner/repo#N`, names the GitHub issue), and posts a short note. It ends one of three ways:
-
-- **Resolved** — it acted within its authority and says what it did. The bot hands the card back down, inside its own run, to whoever handed it up: `PAPERCLIP_ESCALATION_RETURN_TO` if set, otherwise the holder below it on the chain.
-- **Escalated** — the decision is outside its authority, so the reply opens with a one-line ask, says what it tried and why it cannot resolve it, and ends with `PAPERCLIP-OUTCOME: escalate`. The bot reassigns the card to its `escalateTo` holder inside its own run, with that reply as the comment. When the holder is a person, it also posts the card link and the ask to `PAPERCLIP_ESCALATION_CHANNEL`, headed by `PAPERCLIP_ESCALATION_MENTION`.
-- **Stuck** — it can do neither; the reply ends with `PAPERCLIP-OUTCOME: blocked` and the card stays with it.
-
-The chain is read from the card's own assignment records since it last went blocked, never from comments: a hand-off to a holder already on the chain unwinds to them, any other climbs. A person at the top resolves by commenting on the card and reassigning it to the bot below; the bot is told the card came back down with a resolution and applies it at its level. An escalation is worked once per hand-off: the bot runs again only when someone comments or the card is handed to it again, and pings a person at most once per hand-off; a re-wake with nothing new ends its run on a short note that the card is still blocked with it. An answer never overwrites the card: if someone moved it or handed it on while the bot worked, the note is posted and the card is left as it is; if a person asked something newer while it worked, the card stays with the bot, blocked, and the next wake answers the newer question. A chain is just each bot's `escalateTo` — the engineering manager to the product owner, the product owner to a person — so a chain that points back at itself loops; end it with a person. The bottom bot's `PAPERCLIP_ESCALATION_RETURN_TO` names where the card lands when the chain unwinds, so whatever mirrors the card can move it on.
-
-#### Live events
-
-Each board seat also listens on Paperclip's live-event socket (`/api/companies/:companyId/events/ws`, authenticated with the same agent key). When Paperclip queues or starts a run for this agent, the bot checks its inbox at once instead of on the next poll; events for other agents in the company are ignored. The socket only decides *when* the inbox is checked — what is answered, and that nothing is answered twice, is decided exactly as on a poll, so a repeated event, a reconnect, or an event that races a poll is harmless. Paperclip does not replay events sent while a socket was down, so every connect — the first and each reconnect — checks the inbox before the stream is trusted, and polling stays on as recovery: every `PAPERCLIP_RECONCILE_MS` while the socket is up, every `PAPERCLIP_POLL_MS` while it is not. A dropped socket reconnects with backoff (1 s, doubling to 60 s); one that hears no ping from the board for 75 s is replaced. A board, or a proxy in front of it, that refuses the upgrade is logged with its status and keeps working on polls. The state of each board's socket — `live`, `reconnecting` or `off` — is logged on every change and written to the bot's surfaces file under `events`; it never holds back the ready marker. Turn it off for every board with `PAPERCLIP_EVENTS=off`, or for one extra board with `"events": false`.
-
-#### Engineering board runs
-`BOT_BOARD_EXECUTION=engineering` is for a bot whose board assigns it real work — edit its repo, run tests, `git`, `gh`. It is the same board run with more tools, never a different trust level: `dontAsk` still decides, no settings file is read, the shell runs in the sandbox or not at all, the Discord memory and the harness folder stay unreadable and unwritable, and the bot's own credentials stay out of the environment. It adds only what you name: the tools, the folders besides `CLAUDE_CWD` it may read and write, and the hosts its shell may reach. Each run gets a private temp folder, removed when it ends. A setting it cannot hold — a relative path, a path inside the bot's state or harness folder, `/` or the home folder, a read path that contains `CLAUDE_CWD`, a Discord memory folder (the summaries folder, say) inside `CLAUDE_CWD`, where a shell could read it back through `git` — keeps the connector off and logs why; Discord is unaffected. At startup the bot logs the board mode it runs with, and `npm run doctor:fleet` prints it for each bot.
-
-The shell's network goes through Claude Code's proxy and `socat`. If `socat` or `bwrap` lives outside the system folders (under a home folder, say), add its folder — and any folder a wrapper script loads from — to `BOT_BOARD_READ_PATHS`, or every request from the shell fails; `doctor:fleet` warns when it finds one.
-
-To turn it on, set `BOT_BOARD_EXECUTION=engineering` (and the paths and hosts the work needs) for that bot and restart it; to turn it off, remove the setting or set `readonly` and restart. Verify by assigning the bot a board task that edits a file in `CLAUDE_CWD`: in `engineering` the change lands and the task closes; in `readonly` the reply says it could not, and the task is left **blocked**. Full guide, prerequisites and symptom-to-fix: [docs/paperclip-board-execution.md](docs/paperclip-board-execution.md). A bot on Codex takes board tasks in the same two modes with no network; [what differs](docs/paperclip-board-execution.md#on-codex).
-
-`BOT_BOARD_EXECUTION=parity` lifts the least-privilege board run for a bot whose board readers are the same people as its Discord channels: on Claude or Codex, the run gets the Discord session's tools, MCP servers, settings, files, network and environment, in the bot's `BOT_PERMISSION_MODE`. Two things stay out — other channels' conversation and the Discord credentials (`DISCORD_TOKEN`, `BRIDGE_TOKEN`) — and the startup log names both.
-
-A run that could not do what was asked ends its reply with `PAPERCLIP-OUTCOME: blocked`; the bot removes that line and leaves the task **blocked** with the reply as its comment, instead of **done**. A person's comment on it reopens it. A run whose remaining step belongs to whoever gave it the task, and that they can take, ends with `PAPERCLIP-OUTCOME: return` instead: the task is blocked and handed back to them in the same write, inside the bot's run, with the reply saying what is left. Who gave it is read from the board's own record: the holder it was last assigned from, else the task's creator. When that is nobody but the bot, or the board refuses the hand-off, it stays with the bot, blocked, and the comment says why. A run that is waiting on other tasks ends with `PAPERCLIP-OUTCOME: blocked on ACME-12, ACME-13`: the task is blocked by those tasks on the board, so it shows what it waits on; when the last of them is done Paperclip wakes the bot, which moves the task back in progress, says which task it waited on, and resumes the work; while only some are done, its blockers and wait are trimmed to the open ones. A run that waits on a person — their decision, approval or action — ends with `PAPERCLIP-OUTCOME: blocked on Avery`: the task is blocked and handed to that person as its assignee in the same write, so it waits with them; the bot stays the unblock owner (the board refuses an agent naming anyone else) and the unblock note names the person. The name is matched against the board's people; one the board does not have leaves the task with the bot, blocked, and the comment says so. A re-wake on an ask answered as waiting runs the model once more (SLA-1775): it is told what it said, why it woke (Paperclip's disposition repair, say), and what the board shows now of each task it waits on — status, holder, last change, recent comments — and posts exactly one comment: progress on a blocker being worked (who is on it, what changed, and the next step once it lands), still blocked on it; or an escalation when nothing changed and nobody works the blocker. An answer that only repeats the last one, Paperclip's last repair attempt, or more than three such wakes on one ask is escalated by the bot whatever the model says. Only when the model gives nothing does the bot post the mechanical note instead, repeating the answer's first line and who it waits on, the card left as it was; an answer that finished its ask always gets that note. No note ever deletes an earlier one, since the board shows a deleted comment as a blank one. A block the bot set, or one Paperclip set when it lost the run the bot was answering under (its waiter dropped, say), is the bot's to update: if Paperclip blocks the task while the answer is still running, the bot moves it back in progress with a note, and the answer closes it. A task another agent blocks and hands to the bot — `return` from that agent, in one write or as its next hand-off — is the bot's to work, and the answer closes it. Any other blocked or cancelled set by a person or another agent is never moved, and a reply never closes or hands back a task that was given to someone else while it ran. A refused board request is logged with Paperclip's reason code, e.g. `HTTP 403 cross_issue_influence_run_context_required`.
-
 ### Misc
 | Variable | Default | Description |
 |---|---|---|
@@ -460,224 +394,50 @@ A run that could not do what was asked ends its reply with `PAPERCLIP-OUTCOME: b
 | `BOT_START_CONFIRM_MS` | `2000` | How long `npm start` waits before judging the start |
 | `BOT_STOP_TIMEOUT_MS` | `5000` | Graceful-shutdown wait before `npm stop` force-kills |
 
-### Stopping a run
-
-Say any of `BOT_STOP_WORDS` to halt what a bot is doing. **Both forms work:**
-
-- **`stop` on its own** — halts the run in every bot in the channel. Only a bot that
-  actually had something running replies, so idle bots stay quiet.
-- **`stop x, y, z`** — a message that *opens* with a stop word also halts, but only
-  when a run is in flight. With nothing running it is an ordinary message, so
-  "stop sending the Friday digest" is still a request the bot thinks about.
-
-`@TheBot stop` targets one bot. Stopping also clears that channel's session, since
-a killed run leaves one mid-thought.
-
-These words are configurable because "stop" is a vocabulary choice, not a protocol
-constant — a non-English channel needs its own.
-
-## Scheduled jobs
-
-**Ask for it.**
-
-> *"every weekday at 7am, post a summary of yesterday's merged PRs"*
-
-The bot creates the job, reads it back, and confirms what it understood:
-
-```
-Scheduled job-msm37m2z — every weekday at 07:00 America/Chicago
-Next run: 2026-08-10 12:00 UTC. Posts here.
-```
-
-Then *"list my scheduled jobs"* or *"remove job-msm37m2z"*. Ask what ran with
-*"did the standup job fire?"*.
-
-**A follow-up is the other half.** When a bot says it will check back, it books a
-one-shot wake-up for that instant — not a clock time, and not a background sleep
-that dies when the reply is sent:
-
-```
-Wake-up wake-mtfyyczy set for 2026-08-30 15:53 UTC — in 20 minutes.
-It continues this conversation if the session is still warm.
-```
-
-**Or the moment a job finishes.** Give the follow-up `--wait-for <name>` and make
-`scripts/signal.mjs <name>` the last step of a detached job: the bot wakes when it
-ends, like a task notification in the Claude Code terminal. A plain
-`run_in_background` call would die with the reply, so the skill pack's hook blocks
-it and prints this path instead.
-
-It fires once. If the answer is not final, the run that wakes up books the next
-look itself and decides how long to wait, so a slow deploy is checked patiently
-and a nearly-done one closely. It stays silent while nothing changes, and stops
-as soon as it has an answer or hits something you need to decide. Twelve looks
-and an optional deadline are the backstops.
-
-A job is a **stored prompt** that runs unattended with the bot's normal tool
-access, so write it to stand alone — *"post the reach numbers with the change
-since last week"*, not *"tell me the reach"*. The bot will ask before scheduling
-something vague, because a bad prompt scheduled daily is a bad answer delivered
-daily.
-
-**Times are interpreted in `BOT_TIMEZONE`**, so 7am means 7am where you are, not
-where the server is.
-
-<details>
-<summary>Writing <code>schedules.json</code> by hand</summary>
-
-Jobs live in `<BOT_STATE_DIR>/schedules.json`. You rarely need to touch it, but:
-
-```json
-[
-  {
-    "id": "standup",
-    "cron": "0 9 * * 1,2,3,4,5",
-    "channel": "123456789012345678",
-    "prompt": "Post a short summary of yesterday's merged PRs.",
-    "tz": "America/Chicago"
-  }
-]
-```
-
-Five fields: `minute hour day month weekday`, weekday `0` = Sunday. **Only `*` and
-comma-separated numbers** — write `1,2,3,4,5`, never `1-5`, which parses as `1` and
-would fire on Mondays alone. The tooling rejects a range rather than accepting one.
-
-Add `"expires": "2026-12-31T00:00:00Z"` for a one-shot. Every run is appended to
-`job-history.jsonl`. A run missed during a restart or a gateway blip is recovered.
-
-A **wake-up** lives in the same file and carries `runAt` instead of `cron`:
-
-```json
-{
-  "id": "wake-mtfyyczy",
-  "runAt": "2026-08-30T15:53:20.590Z",
-  "channel": "123456789012345678",
-  "prompt": "Check whether the promotion PR merged. Report only if it changed.",
-  "note": "PR #218 approved at 10:04",
-  "carry": true,
-  "attempt": 1,
-  "maxAttempts": 12,
-  "chainStartedAt": "2026-08-30T15:33:20.590Z"
-}
-```
-
-It is deleted before it runs, so it fires **at most once** — a follow-up that
-crashed is never silently repeated, and a watch continues only because the run
-booked the next one.
-
 </details>
 
-<details>
-<summary>Waking a bot the moment something finishes</summary>
+## Commands
 
-Polling a deploy every minute is wasteful and slow. Give the follow-up a signal
-name as well as its time:
+In Discord:
 
-> *"check back when the deploy finishes, or in 30 minutes"*
-
-```bash
-# at the end of your deploy script, CI job, git hook — anything that already knows
-npm run signal dev-deploy-done
-npm run signal ci:build -- --data "exit 0, 4m12s"
-```
-
-The name is **yours**. The harness never interprets it — `nightly-etl`,
-`invoice-run-finished`, whatever the sender and the bot agree on. There are no
-built-in integrations to configure and nothing to register.
-
-What a sender can and cannot do:
-
-- It sends a **name**, never a prompt. The words that run were written by the bot
-  when it promised to look, so a signal cannot put instructions in its context.
-- It can only release a follow-up **that bot already booked**, in the channel that
-  follow-up already named. A signal nobody is waiting for does nothing (it is
-  remembered for five minutes, in case the follow-up is booked a second later).
-- Attached `--data` reaches the bot fenced and labelled as untrusted text —
-  evidence to read, never instructions to obey.
-- The **timeout still applies.** A signal that never arrives means the follow-up
-  fires when it always would have. Nothing new can fail.
-
-Signals are the one bridge message that needs a credential, because they start a
-run rather than posting text: on loopback (the default) they are accepted, and a
-bridge bound anywhere else must set `BRIDGE_TOKEN`. Each bot has its own bridge
-port, so signal the bot you mean — `npm run signal <name> -- --port 9801`.
-
-</details>
-
-## Reaction triggers
-
-With `REACTION_HANDLER_ENABLED=true` and a non-empty `ALLOWED_USERS`, reacting to one of the bot's messages with the trigger emoji invokes Claude with a labeled context block naming the emoji, the reactor, and the message reacted to.
-
-The harness is dumb transport here — **what the emoji means is yours to define in your `CLAUDE.md`.** The bot's own ✅ never retriggers, double-taps fire once, and failures get both a ❌ and a reply.
-
-## Files
-
-**Sending to a bot:** attach a file, or reply to a message that has one and ask about it. Any type. The bot is told the name, size, type and local path, and opens it. If a file can't be downloaded, it says so and names the reason.
-
-**Getting files back:** anything the bot writes into its outbox during a reply is attached automatically, or it emits `[[attach: /path]]`, which is stripped before the message is sent. Both routes are explicit on purpose — a bot that merely *mentions* a path doesn't upload it. Files over the size limit are reported with their path rather than silently failing.
-
-## Architecture
-
-```
-Discord message, or a Paperclip task
-  → bot.js (discord.js)
-  → spawn the bot's runtime: `claude` (stream-json) or `codex exec` (--json)
-  → events normalized, progress shown, one reply posted
-  → session id saved for continuity, tagged with its runtime
-```
-
-- **CLI spawn, not SDK** — inherits every built-in tool and MCP support for free
-- **stdin ignored** — the CLI can never hang waiting for consent
-- **Streamed** — progress as it happens
-- **Serialized sends** — no rate-limit races
-
-## Prerequisites
-
-- Node.js 18+
-- One agent CLI per bot, installed and signed in: Claude Code (the default), or the Codex CLI for a bot with `BOT_RUNTIME=codex`. See [docs/runtimes.md](docs/runtimes.md)
-
-## Troubleshooting
-
-Run **`npm run doctor`** first — it checks most of this and prints no secrets.
-
-| Symptom | Likely cause |
+| Command | What it does |
 |---|---|
-| Online but ignores everything | Message Content Intent is off — `doctor` catches this |
-| "Bot is not running" right after starting | Bad token; `doctor` or the log names it |
-| Ignores another bot | Both bots must list each other in `ALLOWED_BOTS` |
-| Ignores you | `ALLOWED_USERS` is set and you're not in it |
-| Won't write files or run commands | `BOT_PERMISSION_MODE=restricted` — that's the default |
-| Hangs, then exit code 143 | Timeout — raise `CLAUDE_TIMEOUT_MS`, or an MCP server is unreachable |
-| `Error: spawn E2BIG`, usually on the first message after a restart | Too much remembered context for one command line — lower `CONTEXT_MAX_BYTES` or `SUMMARY_LOOKBACK_HOURS`. See [Memory](#memory) |
-| Second bot crashes at startup | `WS_PORT` collision — one port per bot |
-| Exits at startup naming a setting "Claude Code syntax" | A Claude-only setting on a `BOT_RUNTIME=codex` bot — see [docs/runtimes.md](docs/runtimes.md) |
+| `/fresh` | Clear this channel's session; the next message starts a new conversation |
+| `/stop` | Kill the running request in this channel |
+| `/status` | Buffer size, message count, attachments, whether a request is running |
+
+> **These names are reserved.** The harness answers them before your bot ever sees
+> the message, so a command of your own with one of these names — including any
+> `BOT_STOP_WORDS` — **can never run**. Nothing errors; it silently does nothing
+> while still appearing in the bot's own list of what it can do. `npm run doctor`
+> fails if it finds one, and the bot warns at startup.
+
+In your shell (add `-- --name <bot>` to target one instance):
+
+| Command | What it does |
+|---|---|
+| `npm run setup` | Interactive configuration, validated as you go |
+| `npm run doctor` | Check an existing install; exits non-zero on failure |
+| `npm run doctor:fleet` | Check **every** bot in `ecosystem.config.js` in one pass — tokens, Paperclip board keys, schedules, stale processes |
+| `npm run signal <name>` | Tell a bot something happened, waking any follow-up that was waiting for it |
+| `npm run advise` | Read an existing install and list what to do **before** upgrading. `--json` for an agent; `--dir` to point at any checkout |
+| `npm start` / `stop` / `restart` | Manage the bot |
+| `npm run status` | Is it running — and is it *connected*? |
+| `npm run list` | Every bot instance in this checkout |
+| `npm run logs [N]` | Tail the log |
+| `npm run summarize` | Summarize now rather than on the interval |
+| `npm test` | The suite |
 
 ## Contributing
 
-[CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) · [UPGRADING.md](UPGRADING.md) · [CHANGELOG.md](CHANGELOG.md)
+Use the code, adapt it to your team, and share improvements. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.
 
-## Who builds this
-
-This is not a demo. **It is the harness running slashbin.io's own engineering
-team** — a Product Owner, an Engineering Manager and an SRE that file issues,
-review pull requests, and ship releases every day. Every guarantee in
-["safe to leave running"](#why-safe-to-leave-running) exists because that team hit
-the failure first.
-
-The work those bots ship is **[slashbin.io](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-team) — the webhook ETL gateway for
-engineers and AI agents.** Vendor webhooks in, transformed and delivered to every
-destination you own, with 100% delivery and retries that survive a destination
-being down for hours.
-
-If you are wiring up webhooks by hand, that is the problem it removes.
-
-**[Try slashbin.io free →](https://www.slashbin.io?utm_source=github&utm_medium=readme&utm_campaign=ai-team)**
-
-The implementer half of the team is open source too:
-[slashbin-ai-foreman](https://github.com/xrgarcia/slashbin-ai-foreman) picks up
-approved issues and opens the pull requests these bots review.
+For problems with an install, start with `npm run doctor` and the
+[troubleshooting guide](docs/INSTALL.md#troubleshooting).
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE).

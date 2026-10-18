@@ -1,5 +1,18 @@
 # Runtimes: Claude Code or Codex
 
+[README](../README.md) · [All documentation](../README.md#documentation-table-of-contents)
+
+## Contents
+
+- [Switch a bot](#switch-a-bot)
+- [What stays the same](#what-stays-the-same)
+- [The bot's repository, per runtime](#the-bots-repository-per-runtime)
+- [What differs on Codex](#what-differs-on-codex)
+- [Settings Codex cannot honor](#settings-codex-cannot-honor)
+- [Prerequisites for Codex](#prerequisites-for-codex)
+- [Verify a selected runtime](#verify-a-selected-runtime)
+- [Symptom → fix](#symptom--fix)
+
 Each bot runs on one agent CLI, chosen by `BOT_RUNTIME`:
 
 | `BOT_RUNTIME` | CLI | Sign-in |
