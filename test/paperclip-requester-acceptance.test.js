@@ -54,7 +54,10 @@ function board({ createdBy = { createdByAgentId: "agent-po" }, status = "in_prog
       const from = { a: card.assigneeAgentId, u: card.assigneeUserId };
       if (body.status === "in_review") {
         const [p] = body.executionPolicy?.stages?.[0]?.participants ?? [];
-        if (!p) return { ok: false, status: 422, text: async () => JSON.stringify({ error: "in_review needs a review path" }) };
+        // Paperclip gives an id-less stage a new id; a review state left on
+        // another stage id is orphaned, and the write has no reviewer (SLA-1871).
+        const orphaned = card.executionState?.currentStageId && body.executionPolicy?.stages?.[0]?.id !== card.executionState.currentStageId;
+        if (!p || orphaned) return { ok: false, status: 422, text: async () => JSON.stringify({ error: "invalid_issue_disposition: in_review needs a review path" }) };
         card.assigneeAgentId = p.agentId ?? null; card.assigneeUserId = p.userId ?? null;
       } else if (card.status === "in_review" && body.status && body.status !== "done" && returnTo) {
         card.assigneeAgentId = returnTo; card.assigneeUserId = null;
@@ -93,6 +96,17 @@ const seat = (b, answer, extra = {}) => createPaperclipPoller({ url: "https://bo
     assert.deepStrictEqual(w.body.executionPolicy, { maxReviewRounds: REVIEW_ROUNDS, stages: [{ type: "review", participants: [{ type: "agent", agentId: "agent-po" }] }] });
     assert.strictEqual(w.body.comment, "Done: the publish retries now.");
     assert.strictEqual(b.card.assigneeAgentId, "agent-po");
+  });
+
+  await check("a second answer after the requester's follow-up reuses the card's review stage, so it returns to review", async () => {
+    const b = board();
+    b.card.executionState = { status: "changes_requested", currentStageId: "st-1", changesRequestedCount: 1 };
+    await seat(b, async () => "Second answer: the limit is covered.").tick();
+    assert.strictEqual(b.writes.length, 1, JSON.stringify(b.writes));
+    assert.strictEqual(b.writes[0].body.executionPolicy.stages[0].id, "st-1");
+    assert.strictEqual(b.card.status, "in_review");
+    assert.strictEqual(b.card.assigneeAgentId, "agent-po");
+    assert.strictEqual(b.comments.at(-1).body, "Second answer: the limit is covered.");
   });
 
   await check("a task a person created waits for that person's review: no agent accepts for them", async () => {
