@@ -10,7 +10,7 @@ const { readFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
 const { createPaperclipPoller, buildTaskPrompt, outcomeOf, OUTCOME_MARK } = require("../lib/paperclip");
-const { latestRecord, openHandUps, processEscalateClient, MARKER_PREFIX } = require("../lib/process-escalate");
+const { latestRecord, openHandUps, processEscalateClient, escalateClientFor, escalateBoard, MARKER_PREFIX } = require("../lib/process-escalate");
 
 let pass = 0, fail = 0;
 async function check(label, fn) {
@@ -232,7 +232,7 @@ const RETURNED = `Only the Product Owner can rule on scope.\n${OUTCOME_MARK} ret
     assert.deepStrictEqual(await escalate({ operation: "hand_up", issue: "c-1" }), { ok: false, code: "escalate_unreachable", message: "ECONNREFUSED" });
   });
 
-  await check("the action's bearer never reaches a run, and only the first board uses it", () => {
+  await check("the action's bearer never reaches a run, and only the served board uses it", () => {
     const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
     // The bearer is a connector key to the one run-environment builder: no
     // run of any runtime has it, and no command can read it.
@@ -244,7 +244,45 @@ const RETURNED = `Only the Product Owner can rule on scope.\n${OUTCOME_MARK} ret
       assert.ok(built.env && !("ESCALATE_BEARER" in built.env), `${runtime}/${run}: the bearer leaves the run's environment`);
       assert.ok(built.shellExclude.includes("ESCALATE_BEARER"), `${runtime}/${run}: no command reads the bearer`);
     }
-    assert.match(bot, /escalate: !board\.id && process\.env\.PAPERCLIP_ESCALATE_URL/);
+    assert.match(bot, /const escalate = escalateClientFor\(board, \{ boards: PAPERCLIP_BOARDS \}\);/);
+    assert.match(bot, /^\s+escalate,$/m);
+  });
+
+  // The served board: a bot whose first board is another company's names the
+  // action's board by origin, and gets the client there, with that board's key.
+  const first = { id: null, url: "https://board.other.example", apiKey: "FIRST-KEY" };
+  const extra = { id: "home", url: "https://board.example.com", apiKey: "EXTRA-KEY" };
+  const boards = [first, extra];
+  const made = [];
+  const client = (opts) => { made[made.length] = opts; return { opts }; };
+  const env = { PAPERCLIP_ESCALATE_URL: "https://mcp.example.com/process/mcp", PAPERCLIP_ESCALATE_BEARER_ENV: "BOT_BEARER", BOT_BEARER: "B" };
+
+  await check("unset PAPERCLIP_ESCALATE_BOARD: the first board gets the client, an extra board gets none", () => {
+    made.length = 0;
+    assert.ok(escalateClientFor(first, { boards, env, client }));
+    assert.strictEqual(escalateClientFor(extra, { boards, env, client }), null);
+    assert.deepStrictEqual(made, [{ url: env.PAPERCLIP_ESCALATE_URL, bearer: "B", agentKey: "FIRST-KEY" }]);
+  });
+
+  await check("PAPERCLIP_ESCALATE_BOARD names an extra board: it gets the client with its own key, the first board gets null", () => {
+    made.length = 0;
+    const named = { ...env, PAPERCLIP_ESCALATE_BOARD: "https://Board.Example.com/" };
+    assert.strictEqual(escalateClientFor(first, { boards, env: named, client }), null);
+    assert.ok(escalateClientFor(extra, { boards, env: named, client }));
+    assert.deepStrictEqual(made, [{ url: env.PAPERCLIP_ESCALATE_URL, bearer: "B", agentKey: "EXTRA-KEY" }]);
+  });
+
+  await check("a served board matching none, or no URL or bearer, gives no board a client", () => {
+    made.length = 0;
+    const none = { ...env, PAPERCLIP_ESCALATE_BOARD: "https://elsewhere.example" };
+    assert.strictEqual(escalateBoard(boards, none), null);
+    for (const b of boards) {
+      assert.strictEqual(escalateClientFor(b, { boards, env: none, client }), null);
+      assert.strictEqual(escalateClientFor(b, { boards, env: { ...env, PAPERCLIP_ESCALATE_URL: "" }, client }), null);
+      assert.strictEqual(escalateClientFor(b, { boards, env: { ...env, BOT_BEARER: "" }, client }), null);
+      assert.strictEqual(escalateClientFor(b, { boards, env: { ...env, PAPERCLIP_ESCALATE_BEARER_ENV: undefined }, client }), null);
+    }
+    assert.strictEqual(made.length, 0);
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

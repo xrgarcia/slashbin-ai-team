@@ -15,7 +15,7 @@ const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
 const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector } = require("./lib/paperclip");
 const { parseContract, toolLine } = require("./lib/handoff-contract");
-const { processEscalateClient } = require("./lib/process-escalate");
+const { escalateClientFor, escalateBoard } = require("./lib/process-escalate");
 const { createAttempts } = require("./lib/attempts");
 const { createLiveEvents, eventsSetting, startBoard } = require("./lib/paperclip-events");
 const { botSurfaces, discordOffReason, PAPERCLIP_PREREQUISITE } = require("./lib/surfaces");
@@ -3299,6 +3299,9 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
     try { externalWriter = new RegExp(process.env.PAPERCLIP_EXTERNAL_WRITER); }
     catch (e) { log.error({ err: e.message }, "PAPERCLIP_EXTERNAL_WRITER is not a valid pattern; every task's status is the bot's to set"); }
   }
+  // A served board that names no configured board leaves every hand-off a direct write; say so.
+  if (process.env.PAPERCLIP_ESCALATE_URL && process.env.PAPERCLIP_ESCALATE_BOARD && !escalateBoard(PAPERCLIP_BOARDS))
+    log.warn({ board: process.env.PAPERCLIP_ESCALATE_BOARD }, "PAPERCLIP_ESCALATE_BOARD matches no board; hand-offs stay direct writes");
   for (const board of PAPERCLIP_BOARDS) {
     const pLog = log.child({ component: "paperclip", ...(board.id ? { board: board.id } : {}) });
     const { promptChannel, escalation } = board;
@@ -3306,6 +3309,8 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
     // and task sessions carry over; an extra board gets its own.
     const tag = board.id ? `paperclip-${board.id}` : "paperclip";
     setSurface("board", "not ready", tag);
+    const escalate = escalateClientFor(board, { boards: PAPERCLIP_BOARDS });
+    if (escalate) pLog.info({ escalateBoard: board.url }, "Paperclip hand-offs on this board go through the shared escalate action");
     const poller = createPaperclipPoller({
       url: board.url,
       apiKey: board.apiKey,
@@ -3321,10 +3326,8 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       escalateTo: escalation.escalateTo,
       escalationReturnTo: escalation.returnTo,
       escalationAuthority: escalation.authority,
-      // The action serves the Slashbin board, which is the first board only.
-      escalate: !board.id && process.env.PAPERCLIP_ESCALATE_URL && process.env[process.env.PAPERCLIP_ESCALATE_BEARER_ENV ?? ""]
-        ? processEscalateClient({ url: process.env.PAPERCLIP_ESCALATE_URL, bearer: process.env[process.env.PAPERCLIP_ESCALATE_BEARER_ENV], agentKey: board.apiKey })
-        : null,
+      // The action serves one board: PAPERCLIP_ESCALATE_BOARD's, else the first.
+      escalate,
       contract: board.contract,
       onEscalate: async ({ task, link, to, ask }) => {
         const channelId = escalation.channel ?? promptChannel;
