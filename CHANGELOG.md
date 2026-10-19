@@ -1,5 +1,26 @@
 # Changelog
 
+[README](README.md) · [All documentation](README.md#documentation-table-of-contents)
+
+## Contents
+
+- [[Unreleased]](#unreleased)
+- [[3.0.0] — 2026-10-19](#300--2026-10-19)
+- [[2.9.0] — 2026-10-14](#290--2026-10-14)
+- [[2.8.0] — 2026-10-09](#280--2026-10-09)
+- [[2.7.0] — 2026-10-08](#270--2026-10-08)
+- [[2.6.0] — 2026-10-02](#260--2026-10-02)
+- [[2.5.1] — 2026-08-31](#251--2026-08-31)
+- [[2.5.0] — 2026-08-30](#250--2026-08-30)
+- [[2.4.0] — 2026-08-18](#240--2026-08-18)
+- [[2.3.0] — 2026-08-18](#230--2026-08-18)
+- [[2.2.1] — 2026-08-18](#221--2026-08-18)
+- [[2.2.0] — 2026-08-17](#220--2026-08-17)
+- [[2.1.1] — 2026-08-12](#211--2026-08-12)
+- [[2.1.0] — 2026-08-12](#210--2026-08-12)
+- [[2.0.0] — 2026-08-09](#200--2026-08-09)
+- [[1.1.1] — 2026-05-20](#111--2026-05-20)
+
 All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -45,8 +66,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A blocked answer on a card in a review stage no longer loops. The board takes
+  the reviewer's write as changes requested, moves the card itself, and refuses
+  the block's unblock note (HTTP 422); the same write was retried every tick.
+  The answer now goes as a comment and the board's review keeps the status.
 - A held card's note is no longer repeated on each of Paperclip's re-wakes of
   an unchanged card.
+
+## [3.0.0] — 2026-10-19
+
+### Changed
+
+- **Breaking: which board wakes start the model is the operator's to set, and
+  the defaults are quiet.** See [Model-work triggers](docs/model-work-triggers.md).
+  - `PAPERCLIP_INTAKE` lists the card statuses a new ask starts the model in.
+    The default is every status but `backlog`. A card outside the list gets one
+    note, is put back in its status, and no model run. `all` keeps 2.x.
+  - `PAPERCLIP_REWAKE` replaces the fixed limit of re-looks at an ask answered
+    as waiting. The default is `off`: each such wake gets the mechanical note.
+    `N` allows up to `N` looks, the last told to escalate. `4` keeps 2.x.
+  - An unreadable value in either turns the board connector off.
+
+### Added
+
+- The effective trigger settings are logged at start, and each wake that does
+  not start the model logs the setting that decided it. A wake that starts it
+  logs why.
 
 ## [2.9.0] — 2026-10-14
 

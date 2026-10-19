@@ -1,5 +1,15 @@
 # Landing
 
+[README](../README.md) · [All documentation](../README.md#documentation-table-of-contents)
+
+## Contents
+
+- [Terms](#terms)
+- [Provenance](#provenance)
+- [Rules](#rules)
+- [Scenario language](#scenario-language)
+- [Matrix](#matrix)
+
 `skill-pack/bin/land.mjs` is a bot's only way to commit: it commits the files the
 bot names, only those `BOT_LAND_PATHS` allows, and pushes them to the checkout's
 upstream branch. The checkout is shared — a person, or another session, may hold

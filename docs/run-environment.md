@@ -1,5 +1,18 @@
 # The run environment
 
+[README](../README.md) · [All documentation](../README.md#documentation-table-of-contents)
+
+## Contents
+
+- [The writers](#the-writers)
+- [Run kinds](#run-kinds)
+- [What a command can see, by runtime](#what-a-command-can-see-by-runtime)
+- [Credentials: by name and by value](#credentials-by-name-and-by-value)
+- [Outcomes](#outcomes)
+- [The rules](#the-rules)
+- [Not covered](#not-covered)
+- [The matrix](#the-matrix)
+
 Every Claude or Codex process the bot spawns for a reply — a Discord session, a
 wake, a cron job, a Paperclip board task — gets an environment built by **one
 function**, `buildRunEnv` in `lib/permission-mode.js`. It runs over the

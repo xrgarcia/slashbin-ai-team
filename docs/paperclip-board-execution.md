@@ -1,5 +1,17 @@
 # Paperclip board execution
 
+[README](../README.md) · [All documentation](../README.md#documentation-table-of-contents)
+
+## Contents
+
+- [Prerequisites](#prerequisites)
+- [Enable](#enable)
+- [Disable](#disable)
+- [Verify](#verify)
+- [On Codex](#on-codex)
+- [Outcomes](#outcomes)
+- [Symptom → fix](#symptom--fix)
+
 A bot with `PAPERCLIP_URL` and `PAPERCLIP_API_KEY` set answers the tasks a
 [Paperclip](https://paperclip.ing) board assigns it. `BOT_BOARD_EXECUTION` decides
 what such a run may do. Discord behaviour does not change with it, in any mode.

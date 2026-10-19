@@ -7,9 +7,11 @@ const assert = require("assert");
 const { mkdtempSync, readFileSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, writerOf, decisionKind, lastDecision, personSince, markAt, handedWith, statusSetter, reconcilable, handedBack, movable, wakeStep, ESCALATION_KEPT, CARD_CHANGED, NEWER_ASK, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, HANDED_AWAY, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus, ESCALATION_LABELS, parseEscalateTo, paperclipBoards, UNBLOCK_ACTION, revisitNote, revisitAnswer, unchangedNote, isNote, REVISIT_MAX } = require("../lib/paperclip");
+const { createPaperclipPoller, writerOf, decisionKind, lastDecision, personSince, markAt, handedWith, statusSetter, reconcilable, handedBack, movable, wakeStep, ESCALATION_KEPT, CARD_CHANGED, NEWER_ASK, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, HANDED_AWAY, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus, ESCALATION_LABELS, parseEscalateTo, paperclipBoards, UNBLOCK_ACTION, revisitNote, revisitAnswer, unchangedNote, isNote, parseIntake, parseRewake, intakeStatus, DEFAULT_INTAKE, CARD_STATUSES } = require("../lib/paperclip");
 // How a re-wake on an ask answered as waiting opens its prompt (revisitNote, SLA-1775).
 const REVISIT_LEAD = revisitNote().slice(0, 24);
+// 2.x looked again on every re-wake and forced the escalation after the third; these tests keep that setup.
+const REVISIT_MAX = 3;
 const LOST_NOTE_START = "The board lost the run this work started under";
 
 let pass = 0, fail = 0;
@@ -878,12 +880,12 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     const replies = [`Need the spec.\n${OUTCOME_MARK} blocked`, `Still waiting on the spec from the PO, who has it.\n${OUTCOME_MARK} blocked`,
       `Still waiting on the spec from the PO, who has it.\n${OUTCOME_MARK} blocked`, "Did it."];
     const answer = async (p) => { prompts.push(p); return replies[prompts.length - 1]; };
-    await poller(b, answer, { stateFile, externalWriter: mirror }).tick();
+    await poller(b, answer, { stateFile, rewake: REVISIT_MAX + 1, externalWriter: mirror }).tick();
     assert.strictEqual(b.issues.get("t-1").status, "blocked", "a mirrored blocked answer left the card open");
     for (const r of ["r2", "r3"]) {
       b.runs.set("t-1", run(r));
       b.issues.get("t-1").status = "in_progress";      // the wake's checkout, unrecorded
-      await poller(b, answer, { stateFile, externalWriter: mirror }).tick();
+      await poller(b, answer, { stateFile, rewake: REVISIT_MAX + 1, externalWriter: mirror }).tick();
       const mine = b.comments.get("t-1").filter((c) => c.createdByRunId === r);
       assert.strictEqual(mine.length, 1, `${r}: ${mine.length} comments`);
       assert.ok(!/Nothing has changed since my last/.test(mine[0].body), mine[0].body);
@@ -898,7 +900,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     b.setStatus("t-1", "todo", PERSON);
     b.setStatus("t-1", "in_progress", PERSON);
     b.runs.set("t-1", run("r4"));
-    await poller(b, answer, { stateFile, externalWriter: mirror }).tick();
+    await poller(b, answer, { stateFile, rewake: REVISIT_MAX + 1, externalWriter: mirror }).tick();
     assert.strictEqual(prompts.length, 4, "a recorded reopening did not bring the ask back");
     assert.ok(!prompts[3].includes(REVISIT_LEAD));
   });
@@ -923,7 +925,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
   await check("SLA-1775: answered blocked on SLA-1783, the mirrored card is blocked on it after one comment — no open card for the repair to wake", async () => {
     const b = sla1775();
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
-    await poller(b, async () => WAITING, { stateFile, externalWriter: mirror1775 }).tick();
+    await poller(b, async () => WAITING, { stateFile, rewake: REVISIT_MAX + 1, externalWriter: mirror1775 }).tick();
     const t = b.issues.get("t-1");
     assert.strictEqual(t.status, "blocked");
     assert.deepStrictEqual(t.blockedByIssueIds, ["t-1783"]);
@@ -937,12 +939,12 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     const prompts = [];
     const progress = `The Foreman is building #638 (SLA-1783): PR #640 is open, CI green, review requested; not merged to develop yet. This card stays blocked on it — once #638 merges to develop I re-run dev verification, then carry #636 to prod.\n${OUTCOME_MARK} blocked on SLA-1783`;
     const answer = async (p) => { prompts.push(p); return prompts.length === 1 ? WAITING : progress; };
-    await poller(b, answer, { stateFile, externalWriter: mirror1775 }).tick();
+    await poller(b, answer, { stateFile, rewake: REVISIT_MAX + 1, externalWriter: mirror1775 }).tick();
     // The Foreman opens the blocker's PR and says so on its card.
     b.say("t-1783", FOREMAN_SEAT, "Opened PR #640 for #638: CI green, review requested.");
     b.issues.get("t-1783").updatedAt = b.now();
     rewakeOn(b, "r2", { wakeReason: "issue_commented" });
-    await poller(b, answer, { stateFile, externalWriter: mirror1775 }).tick();
+    await poller(b, answer, { stateFile, rewake: REVISIT_MAX + 1, externalWriter: mirror1775 }).tick();
     assert.strictEqual(prompts.length, 2);
     assert.ok(prompts[1].includes(REVISIT_LEAD), "the re-wake was not told it woke again");
     assert.match(prompts[1], /SLA-1783 "shop#638": in_progress, held by Foreman/);
@@ -960,7 +962,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     const b = sla1775();
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const pings = [], prompts = [];
-    const opts = { stateFile, externalWriter: mirror1775, escalateTo: parseEscalateTo("user:user-avery|Avery"), onEscalate: async (p) => pings.push(p) };
+    const opts = { stateFile, rewake: REVISIT_MAX + 1, externalWriter: mirror1775, escalateTo: parseEscalateTo("user:user-avery|Avery"), onEscalate: async (p) => pings.push(p) };
     const answer = async (p) => { prompts.push(p); return WAITING; };
     await poller(b, answer, opts).tick();
     rewakeOn(b, "r2", { wakeReason: "issue_disposition_repair", legacyDispositionEpisode: { attempt: 2, maxAttempts: 2 } });
@@ -983,12 +985,12 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     let stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     let prompts = [];
     const answer = async (p) => { prompts.push(p); return WAITING; };
-    await poller(b, answer, { stateFile, externalWriter: mirror1775 }).tick();
+    await poller(b, answer, { stateFile, rewake: REVISIT_MAX + 1, externalWriter: mirror1775 }).tick();
     rewakeOn(b, "r2");
-    await poller(b, answer, { stateFile, externalWriter: mirror1775 }).tick();
+    await poller(b, answer, { stateFile, rewake: REVISIT_MAX + 1, externalWriter: mirror1775 }).tick();
     assert.ok(!/Escalate this card now/.test(prompts[1]), "escalated on its first look");
     rewakeOn(b, "r3");
-    await poller(b, answer, { stateFile, externalWriter: mirror1775 }).tick();
+    await poller(b, answer, { stateFile, rewake: REVISIT_MAX + 1, externalWriter: mirror1775 }).tick();
     assert.match(prompts[2], /Escalate this card now: nothing changed since you last looked, and what it waits on is not being worked/);
     assert.match(b.comments.get("t-1").at(-1).body, /Escalating: nothing changed/);
     assert.strictEqual(b.issues.get("t-1").status, "blocked");
@@ -996,11 +998,11 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     b = sla1775();
     stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     prompts = [];
-    await poller(b, answer, { stateFile, externalWriter: mirror1775 }).tick();
+    await poller(b, answer, { stateFile, rewake: REVISIT_MAX + 1, externalWriter: mirror1775 }).tick();
     for (let n = 1; n <= REVISIT_MAX + 1; n++) {
       b.say("t-1783", FOREMAN_SEAT, `Progress ${n}.`);
       rewakeOn(b, `r${n + 1}`);
-      await poller(b, async (p) => { prompts.push(p); return `Progress ${n} on SLA-1783; still building.\n${OUTCOME_MARK} blocked on SLA-1783`; }, { stateFile, externalWriter: mirror1775 }).tick();
+      await poller(b, async (p) => { prompts.push(p); return `Progress ${n} on SLA-1783; still building.\n${OUTCOME_MARK} blocked on SLA-1783`; }, { stateFile, rewake: REVISIT_MAX + 1, externalWriter: mirror1775 }).tick();
       assert.strictEqual(b.comments.get("t-1").filter((c) => c.createdByRunId === `r${n + 1}`).length, 1);
     }
     assert.ok(prompts.slice(0, REVISIT_MAX).every((p) => !/Escalate this card now/.test(p)), "escalated a blocker being worked before the loop guard");
@@ -2960,6 +2962,117 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     for (const [id] of rowsOf("w")) {
       try { await W[id](); } catch (e) { e.message = `${id}: ${e.message}`; throw e; }
     }
+  });
+
+  await check("model-work triggers: PAPERCLIP_INTAKE and PAPERCLIP_REWAKE read as the README says, and refuse what they cannot read", () => {
+    assert.deepStrictEqual(parseIntake(undefined), DEFAULT_INTAKE);
+    assert.ok(!DEFAULT_INTAKE.includes("backlog") && DEFAULT_INTAKE.includes("todo"));
+    assert.deepStrictEqual(parseIntake("all"), CARD_STATUSES);
+    assert.deepStrictEqual(parseIntake(" Todo, in_progress ,todo"), ["todo", "in_progress"]);
+    assert.throws(() => parseIntake("todo,ready"), /ready/);
+    assert.throws(() => parseIntake(","), /no status/);
+    assert.strictEqual(parseRewake(undefined), 0);
+    assert.strictEqual(parseRewake("off"), 0);
+    assert.strictEqual(parseRewake("3"), 3);
+    for (const bad of ["0", "-1", "2.5", "on"]) assert.throws(() => parseRewake(bad), /PAPERCLIP_REWAKE/, bad);
+  });
+
+  await check("model-work triggers: a checked-out card is read as the status it was in before the wake", () => {
+    const created = { action: "issue.created", details: { status: "backlog" } };
+    assert.strictEqual(intakeStatus("in_progress", [created]), "backlog", "the wake's checkout leaves no record");
+    const moved = { action: "issue.updated", details: { changes: { status: { from: "backlog", to: "todo" } } } };
+    assert.strictEqual(intakeStatus("in_progress", [moved, created]), "todo");
+    assert.strictEqual(intakeStatus("blocked", [created]), "blocked", "a status the board shows is taken as shown");
+    assert.strictEqual(intakeStatus("in_progress", []), "in_progress");
+  });
+
+  const filedIn = (b, id, status) => b.activity.get(id).push({ action: "issue.created", createdAt: new Date(0).toISOString(), ...PERSON, details: { status } });
+
+  await check("model-work triggers: a card filed in Backlog is not started by default — one note, put back in Backlog, no model run", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    filedIn(b, "t-1", "backlog");
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const prompts = [];
+    const answer = async (p) => { prompts.push(p); return "Did it."; };
+    await poller(b, answer, { stateFile }).tick();
+    await poller(b, answer, { stateFile }).tick();
+    assert.strictEqual(prompts.length, 0, "the model ran on a Backlog card");
+    const mine = b.comments.get("t-1").filter((c) => c.createdByRunId === "r1");
+    assert.strictEqual(mine.length, 1, JSON.stringify(mine));
+    assert.match(mine[0].body, /^Not started: this card is in Backlog, and I start work only on cards in Todo, /);
+    assert.ok(isNote(mine[0].body), "the intake note is not read as a note");
+    assert.strictEqual(b.issues.get("t-1").status, "backlog", "the card was not put back where it was");
+  });
+
+  await check("model-work triggers: a card filed in Todo starts the model; PAPERCLIP_INTAKE=all starts a Backlog card", async () => {
+    for (const [status, intake] of [["todo", undefined], ["backlog", parseIntake("all")]]) {
+      const b = board([task("t-1", { runs: run("r1") })]);
+      filedIn(b, "t-1", status);
+      const prompts = [];
+      await poller(b, async (p) => { prompts.push(p); return "Did it."; }, intake ? { intake } : {}).tick();
+      assert.strictEqual(prompts.length, 1, `${status}: the model did not run`);
+      assert.strictEqual(b.issues.get("t-1").status, "done", status);
+    }
+  });
+
+  await check("model-work triggers: with PAPERCLIP_REWAKE off, a re-wake on an answered wait gets the note and no model run", async () => {
+    const mirror = /^source: \S+#\d+$/;
+    const b = board([task("t-1", { description: "source: acme/app#12\nstage review", runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const prompts = [];
+    const answer = async (p) => { prompts.push(p); return `Need the spec.\n${OUTCOME_MARK} blocked`; };
+    await poller(b, answer, { stateFile, externalWriter: mirror }).tick();
+    for (const r of ["r2", "r3"]) {
+      b.runs.set("t-1", run(r));
+      b.issues.get("t-1").status = "in_progress";
+      await poller(b, answer, { stateFile, externalWriter: mirror }).tick();
+      const mine = b.comments.get("t-1").filter((c) => c.createdByRunId === r);
+      assert.strictEqual(mine.length, 1, `${r}: ${mine.length} comments`);
+      assert.match(mine[0].body, /^Nothing has changed since my last answer: Need the spec\./);
+    }
+    assert.strictEqual(prompts.length, 1, "a re-wake started the model");
+  });
+
+  await check("model-work triggers: PAPERCLIP_REWAKE=2 looks again twice, the second told to escalate, then the note", async () => {
+    const mirror = /^source: \S+#\d+$/;
+    const b = board([task("t-1", { description: "source: acme/app#12\nstage review", runs: run("r1") })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const prompts = [];
+    const answer = async (p) => { prompts.push(p); return `Waiting on the spec, attempt ${prompts.length}.\n${OUTCOME_MARK} blocked`; };
+    await poller(b, answer, { stateFile, rewake: 2, externalWriter: mirror }).tick();
+    for (const r of ["r2", "r3", "r4"]) {
+      b.runs.set("t-1", run(r));
+      b.issues.get("t-1").status = "in_progress";
+      await poller(b, answer, { stateFile, rewake: 2, externalWriter: mirror }).tick();
+      assert.strictEqual(b.comments.get("t-1").filter((c) => c.createdByRunId === r).length, 1, `${r}: the run did not end on one comment`);
+    }
+    assert.strictEqual(prompts.length, 3, `the model ran ${prompts.length} times`);
+    assert.ok(!/Escalate this card now/.test(prompts[1]), "the first look was told to escalate");
+    assert.match(prompts[2], /Escalate this card now: it has been woken 2 times/);
+  });
+
+  await check("a card whose review stage takes a blocked answer's status gets the answer as a comment once, not the same refused write every tick", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const inner = b.fetch, refused = [];
+    // The board's review stage turns the write into changes requested, then refuses its unblock note.
+    b.fetch = async (u, init = {}) => {
+      if (init.method === "PATCH" && JSON.parse(init.body).unblockDescriptor) {
+        refused.push(JSON.parse(init.body));
+        return { ok: false, status: 422, text: async () => JSON.stringify({ error: "unblockDescriptor requires blocked status" }) };
+      }
+      return inner(u, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const prompts = [];
+    const answer = async (p) => { prompts.push(p); return `Need the spec.\n${OUTCOME_MARK} blocked`; };
+    await poller(b, answer, { stateFile }).tick();
+    await poller(b, answer, { stateFile }).tick();
+    await poller(b, answer, { stateFile }).tick();
+    assert.strictEqual(refused.length, 1, `the refused write was sent ${refused.length} times`);
+    assert.strictEqual(prompts.length, 1);
+    const mine = b.comments.get("t-1").filter((c) => c.createdByRunId === "r1");
+    assert.strictEqual(mine.length, 1, JSON.stringify(mine));
+    assert.match(mine[0].body, /^Need the spec\./);
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

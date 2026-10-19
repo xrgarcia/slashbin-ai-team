@@ -13,7 +13,7 @@ const { buildRunEnv, resolvePermissionMode, VALID_MODES, attachmentReadRule, sum
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
-const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector } = require("./lib/paperclip");
+const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector, parseIntake, parseRewake } = require("./lib/paperclip");
 const { parseContract, toolLine } = require("./lib/handoff-contract");
 const { escalateClientFor, escalateBoard } = require("./lib/process-escalate");
 const { createAttempts } = require("./lib/attempts");
@@ -3277,7 +3277,15 @@ if (SURFACES.paperclip) for (const warning of PAPERCLIP_WARNINGS) log.warn(`Pape
 // harness secrets file and the Discord stores to a board shell. Such a bot
 // answers no board.
 // A board policy that cannot be held turns board pickup off, never loosens it.
+// What lets a wake start the model: the card statuses a new ask starts it in,
+// and how often it looks again at an ask answered as waiting
+// (docs/model-work-triggers.md). A setting that cannot be read turns board
+// pickup off rather than guessing.
+const BOARD_TRIGGERS = { intake: undefined, rewake: 0, problems: [] };
+try { BOARD_TRIGGERS.intake = parseIntake(process.env.PAPERCLIP_INTAKE); } catch (err) { BOARD_TRIGGERS.problems.push(err.message); }
+try { BOARD_TRIGGERS.rewake = parseRewake(process.env.PAPERCLIP_REWAKE); } catch (err) { BOARD_TRIGGERS.problems.push(err.message); }
 const BOARD_POLICY_PROBLEMS = [
+  ...BOARD_TRIGGERS.problems,
   ...boardPolicyProblems(BOARD_POLICY, boardDeniedPaths(), CLAUDE_CWD),
   // A parity run on Codex is the session's argv, not the board profile.
   ...(CODEX && !BOARD_POLICY.parity ? codexRuntime.codexBoardProblems(BOARD_POLICY, RUNTIME) : []),
@@ -3287,6 +3295,11 @@ if (PAPERCLIP_BOARDS.length && PAPERCLIP_CWD_DENIED) {
   log.error({ cwd: CLAUDE_CWD }, "Paperclip connector off — CLAUDE_CWD is the harness or state folder, or inside one, which a board run cannot keep closed; point it at the folder board tasks should read");
 } else if (PAPERCLIP_BOARDS.length && BOARD_POLICY_PROBLEMS.length) {
   for (const problem of BOARD_POLICY_PROBLEMS) log.error(`Paperclip connector off — ${problem}`);
+}
+if (PAPERCLIP_BOARDS.length && !BOARD_TRIGGERS.problems.length) {
+  log.info({ intake: BOARD_TRIGGERS.intake, rewake: BOARD_TRIGGERS.rewake || "off",
+    intakeFrom: process.env.PAPERCLIP_INTAKE ? "PAPERCLIP_INTAKE" : "default",
+    rewakeFrom: process.env.PAPERCLIP_REWAKE ? "PAPERCLIP_REWAKE" : "default" }, "Paperclip model-work triggers");
 }
 // A bot that declares Paperclip, or has no other surface, needs its connector
 // on: off, it is not the bot it says it is (or answers nowhere), and no
@@ -3338,6 +3351,8 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       stateFile: join(STATE_DIR, `${tag}.json`),
       log: pLog,
       resumeInterrupted: process.env.PAPERCLIP_RESUME_INTERRUPTED === "1",
+      intake: BOARD_TRIGGERS.intake,
+      rewake: BOARD_TRIGGERS.rewake,
       externalWriter,
       // A blocked card held by this bot with an escalation label is worked and
       // left blocked; one it resolves goes back down (escalationReturnTo, else
