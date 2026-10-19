@@ -2518,6 +2518,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     });
 
     child.on("error", (err) => {
+      // An error can end a run with no close (a refused launch never has one),
+      // so the run gives its slot back here too, or it holds it for good.
+      if (activeProcesses.get(channelId) === child) activeProcesses.delete(channelId);
       dropTmp();
       // A launch the poller's preflight refused ran nothing: its own error, as it is.
       if (err?.launchRefused) { reqLog.info({ attempt: opts.attempt }, "Board attempt not launched — its card or a dependency changed first"); reject(err); return; }

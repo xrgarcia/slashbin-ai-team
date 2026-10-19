@@ -269,6 +269,17 @@ check("the shared outbox is only swept when nothing else is running", () => {
     "the shared-root fallback must be guarded on no other run being in flight");
 });
 
+check("a run that ends in an error gives its concurrency slot back", () => {
+  // A launch the board refuses ends with an error and never closes. Two of
+  // them held both default slots, and every chat request then got the busy reply.
+  const m = /child\.on\("error", \(err\) => \{([\s\S]*?)\n    \}\);/.exec(bot);
+  assert.ok(m, "the run's error handler was not found");
+  assert.ok(/activeProcesses\.get\(channelId\) === child\) activeProcesses\.delete\(channelId\)/.test(m[1]),
+    "the error handler must release this run's registration");
+  assert.ok(m[1].indexOf("activeProcesses.delete") < m[1].indexOf("launchRefused"),
+    "the slot must be released before the refused launch returns");
+});
+
 check("there is exactly ONE summarization implementation", () => {
   // It lived in four places across two files: two prompt-and-spawn copies in
   // bot.js, one in summarize.js, and writeSummary separately in both. Every
