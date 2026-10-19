@@ -78,10 +78,10 @@ function board({ description = "Ship the release." } = {}) {
   const wake = (id) => { runs[0] = { id, agentId: "agent-em", status: "running" }; };
   return { card, writes, comments, fetch, wake };
 }
-const seatOn = (b) => {
+const seatOn = (b, opts = {}) => {
   const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
   return (answer) => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch: b.fetch, answer,
-    externalWriter: /^source: \S+#\d+$/ });
+    externalWriter: /^source: \S+#\d+$/, ...opts });
 };
 const HELD = `Built and verified, but not releasing yet: Avery must approve the release window.\n${OUTCOME_MARK} blocked on Avery`;
 const visible = (b) => b.comments.filter((c) => !c.deletedAt);
@@ -135,8 +135,8 @@ const visible = (b) => b.comments.filter((c) => !c.deletedAt);
   // A mirrored card held on a person is blocked by the bot's answer, its holder
   // and links left to its writer; each re-wake is the model's to decide once,
   // and an answer that only repeats the last one escalates (SLA-1775).
-  await check("on a task another writer owns, a held answer blocks it in place, and a re-wake never restates it", async () => {
-    const b = board({ description: "source: org/docs#456\nShip the release." }), seat = seatOn(b);
+  await check("on a task another writer owns, a held answer blocks it in place, and a re-wake the model looks at never restates it", async () => {
+    const b = board({ description: "source: org/docs#456\nShip the release." }), seat = seatOn(b, { rewake: 4 });
     const answer = async () => HELD;
     await seat(answer).tick();
     assert.strictEqual(b.card.status, "blocked");

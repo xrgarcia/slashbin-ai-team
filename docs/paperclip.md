@@ -196,4 +196,5 @@ the task and attempt records decide what work is owed.
 - [All Paperclip settings](../README.md#paperclip)
 - [Board execution and troubleshooting](paperclip-board-execution.md)
 - [Board decisions and escalation ownership](board-decisions.md)
+- [Model-work triggers: which wakes start the model](model-work-triggers.md)
 - [Runtime differences](runtimes.md)

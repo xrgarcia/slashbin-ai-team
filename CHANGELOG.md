@@ -5,6 +5,7 @@
 ## Contents
 
 - [[Unreleased]](#unreleased)
+- [[3.0.0] — 2026-10-19](#300--2026-10-19)
 - [[2.9.0] — 2026-10-14](#290--2026-10-14)
 - [[2.8.0] — 2026-10-09](#280--2026-10-09)
 - [[2.7.0] — 2026-10-08](#270--2026-10-08)
@@ -67,6 +68,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A held card's note is no longer repeated on each of Paperclip's re-wakes of
   an unchanged card.
+
+## [3.0.0] — 2026-10-19
+
+### Changed
+
+- **Breaking: which board wakes start the model is the operator's to set, and
+  the defaults are quiet.** See [Model-work triggers](docs/model-work-triggers.md).
+  - `PAPERCLIP_INTAKE` lists the card statuses a new ask starts the model in.
+    The default is every status but `backlog`. A card outside the list gets one
+    note, is put back in its status, and no model run. `all` keeps 2.x.
+  - `PAPERCLIP_REWAKE` replaces the fixed limit of re-looks at an ask answered
+    as waiting. The default is `off`: each such wake gets the mechanical note.
+    `N` allows up to `N` looks, the last told to escalate. `4` keeps 2.x.
+  - An unreadable value in either turns the board connector off.
+
+### Added
+
+- The effective trigger settings are logged at start, and each wake that does
+  not start the model logs the setting that decided it. A wake that starts it
+  logs why.
 
 ## [2.9.0] — 2026-10-14
 
