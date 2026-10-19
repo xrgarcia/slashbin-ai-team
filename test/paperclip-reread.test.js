@@ -734,6 +734,146 @@ const wake = (b, id) => {
       `handed on with the answer from before the label: ${prompts.length} runs, ${JSON.stringify(on)}`);
   });
 
+  // ---- Round 8: only this attempt's own runs speak for it; the record is read last ----
+
+  // Each request the poller makes, in order, up to its first answer() call.
+  const requestsBeforeAnswer = async (make, answers, opts = {}) => {
+    const b = make();
+    const seen = [];
+    let answered = false;
+    const fetch = async (url, init = {}) => { if (!answered) seen.push(`${init.method ?? "GET"} ${url.replace(/^.*\/api/, "")}`); return b.fetch(url, init); };
+    const { answer } = model(b, answers.map((a) => (x, p) => { answered = true; return typeof a === "function" ? a(x, p) : a; }));
+    await poller(b, answer, { stateFile: stateFileOf(), fetch, ...opts }).tick();
+    return seen;
+  };
+  // How many times `req` was made before answer() in a clean run: the last one is the preflight's.
+  const countOf = (seen, req) => seen.filter((r) => r === req).length;
+  const savedState = (file) => JSON.parse(require("fs").readFileSync(file, "utf8"));
+  const unexecuted = (stateFile, row) => {
+    const s = savedState(stateFile);
+    assert.deepStrictEqual(s.pendingReplies, {}, `${row}: the attempt was not rolled back: ${JSON.stringify(s.pendingReplies)}`);
+    assert.deepStrictEqual(s.answeredAsks, [], `${row}: the ask was recorded answered`);
+  };
+  // Another run of this same seat (not the attempt's): r0.
+  const OTHER_RUN = { runId: "r0" };
+
+  // R1, R2, R19: after the first comments read, another run of this bot's own
+  // seat moves T-1 out of in_progress. A write by the seat is not the
+  // attempt's own: only one under the attempt's runs is. Nothing runs, the
+  // checkpoint is put back, and the status that run wrote stands.
+  for (const [row, to] of [["R1", "blocked"], ["R2", "todo"], ["R19", "blocked"]]) {
+    await check(`${row}: another run of this seat moves T-1 to ${to} after the first comments read: nothing runs, the checkpoint is restored, ${to} stands`, async () => {
+      if (row === "R19") {
+        // A board and no DISCORD_TOKEN or BOT_SURFACES: Paperclip-only, the board its one surface.
+        const { botSurfaces } = require("../lib/surfaces");
+        const s = botSurfaces({}, 1);
+        assert.ok(s.paperclip && !s.discord, `${row}: not Paperclip-only: ${JSON.stringify(s)}`);
+      }
+      const b = ordinary();
+      const stateFile = stateFileOf();
+      const fetch = after(b, GET("/issues/t-1/comments"), (x) => x.setStatus("t-1", to, BOT_SEAT, OTHER_RUN));
+      const { prompts, answer } = model(b, ["Done.", "Done."]);
+      await poller(b, answer, { stateFile, fetch }).tick();
+      neverRan(b, prompts, row);
+      unexecuted(stateFile, row);
+      assert.strictEqual(b.issues.get("t-1").status, to, `${row}: ${to} was written over`);
+    });
+  }
+  await check("R1 control: the attempt's own status write (under its run) is not a change", async () => {
+    const b = escalation();
+    const { prompts, answer } = model(b, ["Ruled: 30 s."]);
+    await poller(b, answer, { stateFile: stateFileOf(), ...ESC }).tick();
+    assert.strictEqual(prompts.length, 1, "the escalation's own keep-blocked write stopped its run");
+    assert.ok(b.activity.get("t-1").some((a) => a.runId === "r1" && a.details?.changes?.status?.to === "blocked"), "the case never wrote its own block");
+  });
+
+  // R4, R5: a comment lands after the preflight reads the comments and
+  // before it reads the record: the record, read last, shows it, whoever
+  // posted it — this bot's seat under another run, or the board.
+  for (const [row, what, make] of [
+    ["R4", "a comment from another run of this seat", (x) => { const c = x.say("t-1", BOT_SEAT, "A note from another run."); c.createdByRunId = "r0"; x.activity.get("t-1")[0].runId = "r0"; }],
+    ["R5", "a system notice", systemNotice],
+  ]) for (const kind of ["ordinary", "escalation"]) {
+    await check(`${row}: ${kind}, ${what} between the preflight's comments read and its record read: nothing runs or completes`, async () => {
+      const make0 = () => (kind === "ordinary" ? ordinary() : escalation());
+      const opts = kind === "escalation" ? ESC : {};
+      const n = countOf(await requestsBeforeAnswer(make0, ["Done."], opts), "GET /issues/t-1/comments");
+      const b = make0();
+      const stateFile = stateFileOf();
+      const fetch = after(b, GET("/issues/t-1/comments"), make, n);
+      const { prompts, answer } = model(b, ["Done.", "Done."]);
+      await poller(b, answer, { stateFile, fetch, ...opts }).tick();
+      neverRan(b, prompts, row);
+      unexecuted(stateFile, row);
+      assert.notStrictEqual(b.issues.get("t-1").status, "done", `${row}: completed over the comment`);
+    });
+  }
+
+  // R3: an escalation's answer is saved, the bot stops before routing it,
+  // and a label is added (the escalation label kept). The restarted bot
+  // checks the saved answer against the card that produced it, not against
+  // the card it first reads: the old ruling is not handed on.
+  await check("R3: a saved escalation answer, a restart before routing, a label added: the old ruling is not handed on", async () => {
+    const b = escalation();
+    const stateFile = stateFileOf();
+    let dead = false;
+    const dying = async (url, init) => { if (dead) throw new Error("the bot stopped"); return b.fetch(url, init); };
+    const { prompts, answer } = model(b, [() => { dead = true; return "Ruled: 30 s."; }, "Ruled again: 30 s."]);
+    await poller(b, answer, { stateFile, fetch: dying, ...ESC }).tick();
+    assert.strictEqual(prompts.length, 1);
+    assert.ok(Object.values(savedState(stateFile).pendingReplies).includes("Ruled: 30 s."), "the answer was not saved before the stop");
+    assert.ok(Object.keys(savedState(stateFile).builtOn ?? {}).length, "the card the answer was made from was not saved with it");
+    const i = b.issues.get("t-1");
+    const to = [...i.labels, { name: "Customer waiting" }];
+    b.record("t-1", PERSON, { changes: { labels: { from: i.labels, to } } });
+    i.labels = to;
+    wake(b, "r2");
+    await poller(b, answer, { stateFile, ...ESC }).tick();
+    const on = handOffs(b).filter((w) => w.body.assigneeAgentId === "agent-foreman");
+    assert.ok(on.every((w) => !/Ruled: 30 s\./.test(w.body.comment ?? "")), `the old ruling was handed on: ${JSON.stringify(on)}`);
+    assert.ok(on.length === 0 || (prompts.length === 2 && on.every((w) => /Ruled again/.test(w.body.comment ?? ""))), `${prompts.length} runs, ${JSON.stringify(on)}`);
+  });
+  await check("R3 control: a saved escalation answer, a restart, nothing changed: it is handed on without another run", async () => {
+    const b = escalation();
+    const stateFile = stateFileOf();
+    let dead = false;
+    const dying = async (url, init) => { if (dead) throw new Error("the bot stopped"); return b.fetch(url, init); };
+    const { prompts, answer } = model(b, [() => { dead = true; return "Ruled: 30 s."; }]);
+    await poller(b, answer, { stateFile, fetch: dying, ...ESC }).tick();
+    wake(b, "r2");
+    await poller(b, answer, { stateFile, ...ESC }).tick();
+    assert.strictEqual(prompts.length, 1);
+    assert.ok(handOffs(b).some((w) => w.body.assigneeAgentId === "agent-foreman" && /Ruled: 30 s\./.test(w.body.comment ?? "")), JSON.stringify(b.writes));
+  });
+
+  // R6: an ordinary card already links T-2; its answer blocks on T-3. A
+  // person edits the title during the T-3 lookup, the last call before the
+  // write: the card is read again after it, and the T-2 link stands.
+  const linkedToT2 = () => {
+    const b = ordinary();
+    b.issues.get("t-1").blockedByIssueIds = ["t-2"];
+    return b;
+  };
+  const ON_T3 = `Needs T-3.\n${OUTCOME_MARK} blocked on T-3`;
+  await check("R6 control: unchanged, the blocked answer links T-3", async () => {
+    const b = linkedToT2();
+    await poller(b, model(b, [ON_T3]).answer, { stateFile: stateFileOf() }).tick();
+    assert.deepStrictEqual(b.issues.get("t-1").blockedByIssueIds, ["t-3"]);
+  });
+  await check("R6: the title edited during the dependency lookup before the write: the rewrite stops, the T-2 link stands", async () => {
+    const b0 = linkedToT2();
+    const reads = [];
+    const spy = async (url, init = {}) => { const p = url.replace(/^.*\/api/, ""); if ((init.method ?? "GET") === "GET" && p === "/issues/T-3") reads.push(p); return b0.fetch(url, init); };
+    await poller(b0, model(b0, [ON_T3]).answer, { stateFile: stateFileOf(), fetch: spy }).tick();
+    assert.ok(reads.length > 0, "the case never looked T-3 up");
+    const b = linkedToT2();
+    const fetch = after(b, GET("/issues/T-3"), (x) => x.edit("t-1", PERSON, "title", "Make publishing reliable, revised"), reads.length);
+    await poller(b, model(b, [ON_T3, ON_T3]).answer, { stateFile: stateFileOf(), fetch }).tick();
+    const t = b.issues.get("t-1");
+    assert.deepStrictEqual(t.blockedByIssueIds, ["t-2"], `the T-2 link was replaced: ${JSON.stringify(b.writes)}`);
+    assert.ok(!b.writes.some((w) => "blockedByIssueIds" in w.body), JSON.stringify(b.writes));
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

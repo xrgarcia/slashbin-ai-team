@@ -250,8 +250,12 @@ the model, and routing the card to someone else.
   bot's own seat, the board), and the record since the wake's own read. If
   any of it differs from the snapshot the run was built on, or the card is
   cancelled, nothing runs and nothing is written. The status expected is the
-  one read, or one this bot itself recorded since; a status Paperclip's
-  recovery wrote is a change. A bare restatement of the status is not. The state the
+  one read, or one this attempt's own runs recorded since. "Own" means by run
+  id, never by seat: a write by this bot's seat under another run (another
+  instance, an earlier attempt) is a change, and so is a status Paperclip's
+  recovery wrote. A bare restatement of the status is not. The record is read
+  last, after the comments, so a comment or a board notice that lands between
+  the two reads still shows as a change. The state the
   attempt began is put back, and the run is left open for the next look, which
   decides from the card as it reads then (`cardNow`, `CardMoved`).
 - **Before every routing write** (a return, a hand-on, an unlink, a rewrite of
@@ -259,7 +263,13 @@ the model, and routing the card to someone else.
   write: the answer is posted as a comment with `CARD_CHANGED`, or an
   escalation is worked again from the card as it is. An escalation compares
   against the card its answer was built on, not only the round's own reads,
-  so a label added while it was worked is never routed past. Comments the
+  so a label added while it was worked is never routed past. That card is
+  saved with the answer in the state file (`builtOn`), so a bot restarted
+  between the answer and its routing still checks it against the card that
+  produced it. A rewrite of what the card waits on reads the card again
+  after the dependency lookup, and a fallback hand-up after a refused
+  `process.escalate` reads it again after its unblock step: no other awaited
+  call comes between the last read and the write it guards. Comments the
   attempt's own runs posted are its output, not a change. A routing write sends only the fields it changes (`holderWrite`):
   it clears the other kind of holder only when the card has one.
 - **A wait resumes** only when every task it waits on reads `done` on a fresh

@@ -78,6 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A card another run changed is not acted on.** Only this attempt's own runs count as its own (by run id, not seat); a comment or notice landing during the pre-run read is seen; a saved answer is checked against the card it was built from after a restart; a dependency rewrite and a fallback hand-up re-read the card immediately before writing.
 - **A harness policy setting set to a hidden server value now refuses the run configuration.** With `BOT_RUN_ENV` set, a policy setting such as `BOT_MAIL_SUBJECT_PREFIX` holding exactly the value of a hidden MCP server variable was accepted when that value was under 6 characters or a single path. It is refused whatever its length or shape; the diagnostic names the variables, never the value.
 - **An operating basic or a harness-published setting set to a hidden server value now refuses too.** `TERM`, `TZ`, `XDG_*` and `CLAUDE_PLUGIN_ROOT` equal to the whole value of a hidden MCP server variable of another name are refused at any length or path shape, on a Codex bypass session and parity run alike.
 - A blocked answer on a card in a review stage no longer loops. The board takes
