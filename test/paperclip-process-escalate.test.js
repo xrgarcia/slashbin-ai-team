@@ -138,6 +138,26 @@ const RETURNED = `Only the Product Owner can rule on scope.\n${OUTCOME_MARK} ret
     assert.match(step.body.unblockDescriptor.action, /process\.escalate resolve: paperclip_unavailable: EXACT_BOARD_REFUSAL/);
   });
 
+  // R7: the resolve is refused and the unblock step written; a person retitles
+  // the card before the fallback hand-up. The card is read again right before
+  // that hand-up, so the old answer is not handed up over the change.
+  await check("R7: a refused resolve, the card retitled after the unblock step: the fallback hand-up is not made", async () => {
+    const b = handedUp(), a = action({ resolve: { ok: false, code: "paperclip_unavailable", message: "EXACT_BOARD_REFUSAL" } });
+    const inner = b.fetch;
+    b.fetch = async (url, init = {}) => {
+      const r = await inner(url, init);
+      if (init.method === "PATCH" && JSON.parse(init.body).unblockDescriptor && !JSON.parse(init.body).status) {
+        b.card.title = "Publish the roadmap, revised";
+        b.activity.unshift({ id: "h-r7", action: "issue.updated", actorType: "user", actorId: "user-avery", createdAt: "2026-01-01T00:00:09Z",
+          details: { changes: { title: { from: "Publish the roadmap", to: b.card.title } } } });
+      }
+      return r;
+    };
+    await seat(b, async () => "Scope approved; resume the work.", a.escalate).tick();
+    assert.deepStrictEqual(a.calls.map((c) => c.args.operation), ["resolve"], JSON.stringify(a.calls));
+    assert.ok(b.writes.some((w) => /changed while I worked on it/.test(w.body.comment ?? "")), JSON.stringify(b.writes));
+  });
+
   await check("a person who blocks a handed-up card while it is being answered keeps it: the answer is said, nothing handed on", async () => {
     const b = handedUp(), a = action();
     await seat(b, async () => {
