@@ -54,14 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A bot can listen on Paperclip alone, with Discord off.** Discord and
   Paperclip are peer surfaces, and `BOT_SURFACES` declares which a bot is on:
-  unset, Discord (`DISCORD_TOKEN` required) plus any board it is given;
-  `paperclip`, its board alone. A declared surface is a prerequisite:
+  unset, the configuration decides (#89): Discord when there is a
+  `DISCORD_TOKEN`, plus any usable board it is given; `paperclip` declares the
+  board alone. A bot with a board and no `DISCORD_TOKEN` is Paperclip-only
+  without declaring it, and its connector must then come up or it exits 78. A
+  declared surface is a prerequisite:
   `BOT_SURFACES=paperclip` without the Paperclip connector enabled (a board,
   and its connector on) exits 78, saying the Paperclip connector must be
-  enabled first, and `doctor` / `doctor:fleet` fail it the same way.
-  Paperclip-only is never inferred: a bot with no `DISCORD_TOKEN` and no
-  `BOT_SURFACES=paperclip` exits 78, rather than come up deaf on Discord and
-  report ready. A Paperclip-only bot logs `Discord off — Paperclip-only` and
+  enabled first, and `doctor` / `doctor:fleet` fail it the same way. A bot with
+  neither a `DISCORD_TOKEN` nor a usable board exits 78, naming both, rather
+  than come up deaf and report ready. A Paperclip-only bot logs `Discord off — Paperclip-only` and
   never builds or logs in a Discord client; a scheduled job
   (which posts to a Discord channel) is refused when it is loaded, with a log
   line, and kept in its file; the background summarizer is off.
