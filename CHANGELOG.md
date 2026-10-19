@@ -84,6 +84,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The answer now goes as a comment and the board's review keeps the status.
 - A held card's note is no longer repeated on each of Paperclip's re-wakes of
   an unchanged card.
+- A person's move of a card stays the decision when the bot blocks the card
+  after it. The bot's own write no longer reads as the newest decision over
+  someone else's; the stop it put on the card is still its own to lift.
 
 ## [3.0.0] — 2026-10-19
 

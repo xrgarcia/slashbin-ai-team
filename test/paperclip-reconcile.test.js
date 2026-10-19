@@ -2484,6 +2484,15 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       for (let k = 0; k < all.length; k++) assert.deepStrictEqual(lastDecision(all, ME.id, k), lastDecision(all.slice(k), ME.id), `from ${k}`);
     });
 
+    await check("a person's move to todo stays the decision when the bot blocks the card after it", () => {
+      const b = ordinary({ status: "backlog" });
+      b.setStatus("t-1", "todo", PERSON);
+      b.setStatus("t-1", "blocked", BOT);
+      const all = activityOf(b);
+      assert.strictEqual(lastDecision(all, ME.id)?.w, all[1], "the bot's own block took the person's decision");
+      assert.strictEqual(lastDecision(all, ME.id).to, "todo");
+    });
+
     await check("R95: a cancel and a move back to blocked by one writer are each its decision; the newer one is in force", async () => {
       const b = mirrored();
       move(b);
