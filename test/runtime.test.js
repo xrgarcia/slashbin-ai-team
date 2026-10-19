@@ -51,6 +51,13 @@ check("on Claude, CLAUDE_MODEL still names the model, and BOT_MODEL wins over it
   assert.strictEqual(resolveRuntime({ CLAUDE_MODEL: "m-1" }).summaryModel, "m-1");
 });
 
+check("BOT_BOARD_MODEL and BOT_JOB_MODEL name their own runs, and default to the bot's model", () => {
+  const rt = resolveRuntime({ CLAUDE_MODEL: "m-1", BOT_BOARD_MODEL: "b-1", BOT_JOB_MODEL: "j-1" });
+  assert.deepStrictEqual([rt.model, rt.boardModel, rt.jobModel], ["m-1", "b-1", "j-1"]);
+  const plain = resolveRuntime({ CLAUDE_MODEL: "m-1" });
+  assert.deepStrictEqual([plain.boardModel, plain.jobModel], ["m-1", "m-1"]);
+});
+
 check("BOT_RUNTIME=codex runs CODEX_BIN (or codex) with BOT_MODEL", () => {
   const rt = resolveRuntime({ BOT_RUNTIME: "codex", BOT_MODEL: "gpt-x", CODEX_BIN: "/opt/codex" });
   assert.deepStrictEqual([rt.name, rt.source, rt.bin, rt.model, rt.problems], ["codex", "BOT_RUNTIME", "/opt/codex", "gpt-x", []]);
@@ -291,7 +298,7 @@ check("Claude's command line is the one it always was", () => {
       ...skillPackArgs(),
       "--verbose",
       ...(CLAUDE_MAX_TURNS ? ["--max-turns", String(CLAUDE_MAX_TURNS)] : []),
-      ...(RUNTIME.model ? ["--model", RUNTIME.model] : []),
+      ...(runModel ? ["--model", runModel] : []),
       ...mcpArgs(),
       ...settingsArgs({ board: narrowBoard, tmpDir: boardTmp }),
       "--append-system-prompt", systemPrompt,

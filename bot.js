@@ -2209,6 +2209,8 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     // is parity, which builds it as the Discord session.
     const runKind = opts.noBufferContext ? BOARD_KIND : "session";
     const narrowBoard = runKind === "board";
+    // Board tasks and scheduled jobs take their own model; the conversation keeps the bot's.
+    const runModel = opts.noBufferContext ? RUNTIME.boardModel : opts.ephemeral ? RUNTIME.jobModel : RUNTIME.model;
     const args = CODEX ? [] : [
       "--output-format", "stream-json",
       // A run whose reply lands outside Discord gets least privilege, unless
@@ -2217,7 +2219,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       ...skillPackArgs(),
       "--verbose",
       ...(CLAUDE_MAX_TURNS ? ["--max-turns", String(CLAUDE_MAX_TURNS)] : []),
-      ...(RUNTIME.model ? ["--model", RUNTIME.model] : []),
+      ...(runModel ? ["--model", runModel] : []),
       ...mcpArgs(),
       ...settingsArgs({ board: narrowBoard, tmpDir: boardTmp }),
       "--append-system-prompt", systemPrompt,

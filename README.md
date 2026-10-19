@@ -275,6 +275,8 @@ For Claude and Codex differences, read [runtimes.md](docs/runtimes.md).
 | `BOT_MODEL` | CLI default | The model, for whichever runtime is selected, e.g. `claude-opus-5` on Claude |
 | `CLAUDE_MODEL` | CLI default | Claude only: the model when `BOT_MODEL` is unset, as before. Set on a Codex bot, it stops the bot at startup |
 | `SUMMARIZE_MODEL` | the bot's model | A cheaper model is fine here; it must belong to the bot's runtime |
+| `BOT_BOARD_MODEL` | the bot's model | The model for Paperclip task runs; a cheaper one fits when judgement work forks to its own skill model |
+| `BOT_JOB_MODEL` | the bot's model | The model for scheduled-job runs |
 | `CLAUDE_BIN` | `claude` | Path to the Claude Code CLI |
 | `CODEX_BIN` | `codex` | Path to the Codex CLI, signed in with `codex login` |
 | `CLAUDE_MAX_TURNS` | `100` | Steps per request before a cap-out. `0` removes the cap; `CLAUDE_TIMEOUT_MS` then bounds a run |
