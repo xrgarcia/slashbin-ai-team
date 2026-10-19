@@ -1635,7 +1635,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     const resolves = [];
     const realFetch = b.fetch;
     const fetch = async (url, init) => {
-      if (url.endsWith("/issues/t-1/recovery-actions")) return { ok: true, text: async () => JSON.stringify({ active: { id: "ra-1", cause: "legacy_execution_requires_reconciliation", evidence: { runId: "r1" } } }) };
+      if (url.endsWith("/issues/t-1")) return { ok: true, text: async () => JSON.stringify({ ...JSON.parse(await (await realFetch(url, init)).text()), executionBlocker: resolves.length ? null : { recoveryActionId: "ra-1", runId: "r1", cause: "legacy_execution_requires_reconciliation" } }) };
       if (url.endsWith("/issues/t-1/recovery-actions/resolve")) { resolves.push({ body: JSON.parse(init.body), run: init.headers["x-paperclip-run-id"] }); return { ok: true, text: async () => "{}" }; }
       return realFetch(url, init);
     };
@@ -1695,6 +1695,41 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     await new Promise((r) => setTimeout(r, 80));
     assert.deepStrictEqual(att.stopped, [], "the board's own block is no one's hold");
   });
+
+  // The hold as the card carries it once the settle sweep has closed it: no active recovery action, replay still blocked (SLA-1482).
+  for (const [status, settles] of [["failed", true], ["cancelled", false]]) {
+    await check(`SLA-1482: a settled, replay-blocked hold whose owed run ${status} ${settles ? "is resolved under that run and the seat woken" : "is left to the board"}`, async () => {
+      const b = board([task("t-1", { runs: run("r1") })]);
+      const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+      const seen = [];
+      poller(b, (p, i, o) => { seen.push(o); return new Promise(() => {}); }, { stateFile, watchMs: 1e6, attempts: fakeAttempts() }).tick();
+      await new Promise((r) => setTimeout(r, 20));
+      const id = seen[0].attemptId;
+      b.runs.set("t-1", [{ id: "r1", agentId: ME.id, status }]);
+      b.issues.get("t-1").status = "blocked";
+      const resolves = [];
+      const realFetch = b.fetch;
+      const fetch = async (url, init) => {
+        if (url.endsWith("/issues/t-1/recovery-actions")) return { ok: true, text: async () => JSON.stringify({ active: null }) };
+        if (url.endsWith("/issues/t-1")) return { ok: true, text: async () => JSON.stringify({ ...JSON.parse(await (await realFetch(url, init)).text()), executionBlocker: { recoveryActionId: "ra-1", runId: "r1", cause: "legacy_execution_requires_reconciliation" } }) };
+        if (url.endsWith("/issues/t-1/recovery-actions/resolve")) { resolves.push({ body: JSON.parse(init.body), run: init.headers["x-paperclip-run-id"] }); return { ok: true, text: async () => "{}" }; }
+        return realFetch(url, init);
+      };
+      const att = fakeAttempts({ [id]: { phase: "finished", exit: { code: 0, cause: null, at: "2026-10-19T02:00:00Z" } } });
+      await poller({ ...b, fetch }, async () => assert.fail("ran"), { stateFile, attempts: att }).tick();
+      if (!settles) {
+        assert.strictEqual(resolves.length, 0, "a cancelled run's writes are refused: nothing sent");
+        assert.strictEqual(b.wakes.length, 0);
+        return;
+      }
+      assert.strictEqual(resolves.length, 1);
+      assert.strictEqual(resolves[0].run, "r1");
+      assert.strictEqual(resolves[0].body.actionId, "ra-1");
+      assert.strictEqual(resolves[0].body.executionReconciliation.runId, "r1");
+      assert.strictEqual(resolves[0].body.executionReconciliation.actionOutcome, "completed");
+      assert.strictEqual(b.wakes.length, 1, "the bot wakes itself on the task");
+    });
+  }
 
   await check("EM#626: the board loses a durable attempt's run mid-work — nothing said under it, its settlement is reconciled once the worker stops, the answer goes out once under the new run", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
