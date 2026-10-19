@@ -314,8 +314,20 @@ the model, and routing the card to someone else.
   a change; a cancel since is.
 - **A wait resumes** only when every task it waits on reads `done` on a fresh
   read. A task trimmed from the card, one that cannot be read, or one that
-  reopened keeps the wait (`linkedNow`, `allDone`). An escalation keeps every
+  reopened keeps the wait (`depsGate`, `allDone`). An escalation keeps every
   task its answer named, done or unknown when it answered, across restarts.
+- **Every dependency resume passes one gate (`depsGate`)**, immediately
+  before the model runs: the ordinary resume, an escalation's resume, going
+  on from a block on tasks already done (`goOn`, r7), and an interrupted
+  going-on run again. One dependency not done, unknown or unreadable, and
+  nothing runs; the status, links and unblock step are left as they are, and
+  the run ends as an unfinished-dependency recheck does. The prompt's
+  "dependency done" note is made from that read only. The answer's routing
+  writes carry the dependencies on the producing snapshot, and `routeGate`
+  reads them again before a write that leaves the wait (a close, a hand-off,
+  an escalation, a link cut): one open, and the write is a comment only. A
+  test scans the source: one model call, gated, and no other place says a
+  dependency is done.
 - **An ask is deduplicated** only against that task's own latest answered ask,
   kept per task in the state file and never trimmed by other tasks' traffic
   (`lastAnswered`). A hand-in to the bot from another holder since that answer

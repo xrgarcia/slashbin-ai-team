@@ -1264,6 +1264,66 @@ const wake = (b, id) => {
     assert.ok(posts.every((p) => /\/comments$|\/wakeup$|\/recovery-actions\/resolve$/.test(p)), `a POST that is not a comment, a wake or a reconciliation: ${posts}`);
   });
 
+  // The guard: every model run that resumes or goes on because its
+  // dependencies finished goes through the one dependency gate (depsGate, in
+  // run, just before the model), and is told they are done only from it.
+  await check("every dependency-resume model run goes through depsGate, and only it says a dependency is done", async () => {
+    const src = require("fs").readFileSync(require("path").join(__dirname, "../lib/paperclip.js"), "utf8");
+    const span = (at, open = "=>") => {
+      let depth = 0, i = src.indexOf("{", src.indexOf(open, at));
+      const start = i;
+      for (; i < src.length; i++) { if (src[i] === "{") depth++; else if (src[i] === "}" && --depth === 0) break; }
+      return [start, i];
+    };
+    const within = ([a, b]) => (i) => i > a && i < b;
+    // One model invocation, inside run, after the gate reads every ref and
+    // throws on one open, and after the note is made from that read.
+    const runAt = src.indexOf("const run = async (");
+    assert.ok(runAt >= 0, "no run()");
+    const inRun = within(span(runAt));
+    // (answer("", …) with an attemptId only follows a worker already
+    // launched to its end: it starts no model run.)
+    const answers = [...src.matchAll(/await answer\((?!"", )/g)].map((m) => m.index);
+    assert.ok([...src.matchAll(/await answer\("", /g)].every((m) => /attemptId: id \}/.test(src.slice(m.index, m.index + 120))), "an answer(\"\") that is not a worker followed");
+    assert.strictEqual(answers.length, 1, "more than one place invokes the model");
+    assert.ok(inRun(answers[0]), "the model is invoked outside run()");
+    for (const step of ["await depsGate(deps.refs, item.id)", "throw new DepsOpen(now)", "deps.say(", "deps: depIds"]) {
+      const at = src.indexOf(step, runAt);
+      assert.ok(at >= 0 && inRun(at) && at < answers[0], `run() does not ${step} before the model`);
+    }
+    // The routing writes of an answer built on that read check it again.
+    const gateAt = src.indexOf("async function routeGate(");
+    assert.ok(within(span(gateAt, ") {"))(src.indexOf("await depsGate(from.deps, taskId)", gateAt)), "routeGate does not re-check a resume's dependencies");
+    // The dependency-done words exist only in the two builders, and the
+    // builders are called only from a `deps.say`, which only run() calls.
+    const builders = [src.indexOf("const resumeText = ("), src.indexOf("const goOnText = (")].map((at) => span(at));
+    const inBuilder = (i) => builders.some(([a, b]) => i > a && i < b);
+    const claims = [...src.matchAll(/(waited|waiting) on,? \$\{|\$\{one \? "it is" : "they are"\} (now|already) done/g)].map((m) => m.index);
+    assert.ok(claims.length >= 4, `found ${claims.length} dependency-done templates`);
+    assert.deepStrictEqual(claims.filter((i) => !inBuilder(i)).map((i) => src.slice(i - 40, i + 40)), [], "a dependency-done note made outside resumeText/goOnText");
+    const contAt = src.indexOf("const contDeps = (");
+    const inCont = within([contAt, src.indexOf("} });", contAt)]);
+    const calls = [...src.matchAll(/\b(resumeText|goOnText)\(/g)].filter((m) => !src.slice(m.index - 6, m.index).includes("const "));
+    for (const m of calls) {
+      const ok = m[1] === "goOnText" ? inCont(m.index) : /say: \(names\) => $/.test(src.slice(m.index - 20, m.index));
+      assert.ok(ok, `${m[1]}() called outside a deps say: ${src.slice(m.index - 60, m.index + 30)}`);
+    }
+    // Each resume and going-on passes its deps to run(): the ordinary resume,
+    // goOn, r7, the escalation resume, and both interrupted re-runs.
+    const gated = [...src.matchAll(/\brun\(([^;]*?), (deps|cont \? contDeps\(cont, "(task|card)"\) : undefined)\)/g)];
+    assert.strictEqual(gated.length, 6, `found ${gated.length} gated run() calls: ${gated.map((m) => m[0])}`);
+    // Every eligibility lookup that admits a resume leads to one of them:
+    // no run() between it and the next gated run() goes ungated.
+    for (const look of ["doneBlockers(issue) : []", "await allDone(first.waitsOn, item.id)", "waits?.ready && !continued.has(goneOn)", "const deps = resumes ?"]) {
+      const at = src.indexOf(look);
+      assert.ok(at >= 0, `no ${look}`);
+      const next = gated.map((m) => m.index).filter((i) => i > at).sort((a, b) => a - b)[0];
+      assert.ok(next !== undefined, `nothing gated after ${look}`);
+      const between = [...src.slice(at, next).matchAll(/\bawait run\(/g)];
+      assert.deepStrictEqual(between.map((m) => m.index), [], `an ungated run() after ${look}`);
+    }
+  });
+
   // The validator itself: only a snapshot with its fields, its record mark and its runs authorizes routing.
   await check("routableSnapshot: no mark, no runs, legacy or nothing never authorizes routing", async () => {
     const { routableSnapshot } = require("../lib/paperclip");
@@ -1309,6 +1369,86 @@ const wake = (b, id) => {
       assert.ok(calls.length >= 1, `no ${name}() call found`);
       assert.ok(calls.every((a) => form.test(a[at] ?? "")), `${name}() called without a producing snapshot: ${JSON.stringify(calls.map((a) => a[at]))}`);
     }
+  });
+
+  // ---- Round 12: a dependency resume runs only on dependencies read done just before the model ----
+
+  // Every run that resumes or goes on because what it waited on finished
+  // reads each dependency afresh immediately before the model is invoked
+  // (depsGate), and builds the prompt's "done" from that read. T-2 reopens
+  // just after the eligibility lookup read it done; every later read shows
+  // it todo. Nothing runs, the wait stands, and nothing closes or is handed on.
+  const T2_READ = (p, init) => /^\/issues\/(t-2|T-2)$/.test(p) && (init.method ?? "GET") === "GET";
+  const reopensAfterLookup = (b) => after(b, T2_READ, (x) => x.setStatus("t-2", "todo", PERSON));
+  const waitKept = (b, m, row, { since = 0, step } = {}) => {
+    const t = b.issues.get("t-1"), mine = b.writes.slice(since);
+    assert.strictEqual(m.prompts.length, 1, `${row}: the model ran again: ${JSON.stringify(m.prompts.slice(1).map((p) => p.slice(0, 200)))}`);
+    assert.ok(!m.prompts.slice(1).some((p) => /T-2[^\n]*(now|already) done/.test(p)), `${row}: a prompt asserted T-2 done`);
+    assert.strictEqual(t.status, "blocked", `${row}: the card left its wait: ${JSON.stringify(mine)}`);
+    assert.deepStrictEqual(t.blockedByIssueIds, ["t-2"], `${row}: the wait's link was dropped`);
+    if (step) assert.deepStrictEqual(t.unblockDescriptor, step, `${row}: the unblock step was rewritten`);
+    assert.strictEqual(holderOf(t), ME.id, `${row}: handed on: ${JSON.stringify(handOffs(b))}`);
+    assert.deepStrictEqual(handOffs(b), [], `${row}: a hand-off went out`);
+    assert.ok(!mine.some((w) => w.body.status === "done"), `${row}: closed done: ${JSON.stringify(mine)}`);
+  };
+
+  // R1: an ordinary dependency resume.
+  await check("R1: an ordinary resume, T-2 reopens just after the eligibility lookup read it done: no model run, the wait kept, no done close", async () => {
+    const b = ordinary();
+    const stateFile = stateFileOf();
+    const m = model(b, [ON_T2, "Finished."]);
+    await poller(b, m.answer, { stateFile }).tick();
+    const step = structuredClone(b.issues.get("t-1").unblockDescriptor);
+    assert.deepStrictEqual(b.issues.get("t-1").blockedByIssueIds, ["t-2"]);
+    b.setStatus("t-2", "done", PERSON);
+    wake(b, "r2");
+    const since = b.writes.length;
+    await poller(b, m.answer, { stateFile, fetch: reopensAfterLookup(b) }).tick();
+    waitKept(b, m, "R1", { since, step });
+    assert.ok(b.writes.slice(since).some((w) => w.runId === "r2" && w.body.comment), "R1: r2 did not end on a comment of its own");
+    // Once T-2 is done again, the next wake resumes it.
+    b.setStatus("t-2", "done", PERSON);
+    wake(b, "r3");
+    await poller(b, m.answer, { stateFile }).tick();
+    assert.strictEqual(m.prompts.length, 2, "R1: not resumed once T-2 was done");
+    assert.match(m.prompts[1], /blocked waiting on T-2; it is now done/);
+  });
+
+  // R2: an escalation dependency resume.
+  await check("R2: an escalation resume, T-2 reopens just after linkedNow read it done: no model run, the wait kept, nothing handed on", async () => {
+    const b = escalation();
+    const stateFile = stateFileOf();
+    const m = model(b, [ON_T2, "Ruled: 30 s."]);
+    await poller(b, m.answer, { stateFile, ...ESC }).tick();
+    assert.deepStrictEqual(b.issues.get("t-1").blockedByIssueIds, ["t-2"]);
+    b.setStatus("t-2", "done", PERSON);
+    wake(b, "r2");
+    const since = b.writes.length;
+    await poller(b, m.answer, { stateFile, fetch: reopensAfterLookup(b), ...ESC }).tick();
+    waitKept(b, m, "R2", { since });
+    b.setStatus("t-2", "done", PERSON);
+    wake(b, "r3");
+    await poller(b, m.answer, { stateFile, ...ESC }).tick();
+    assert.strictEqual(m.prompts.length, 2, "R2: not resumed once T-2 was done");
+    assert.match(m.prompts[1], /This card waited on T-2; it is now done/);
+  });
+
+  // R3: an ordinary immediate continuation (goOn).
+  await check("R3: an ordinary go-on, T-2 reopens just after goOn's lookup read it done: no second model run, the wait linked, no done close", async () => {
+    const b = ordinary();
+    b.issues.get("t-2").status = "done";
+    const m = model(b, [ON_T2, "Finished."]);
+    await poller(b, m.answer, { stateFile: stateFileOf(), fetch: reopensAfterLookup(b) }).tick();
+    waitKept(b, m, "R3");
+  });
+
+  // R4: an escalation immediate continuation (resolveWaits, r7).
+  await check("R4: an escalation go-on, T-2 reopens just after resolveWaits read it done: no second model run, the wait linked, nothing handed on", async () => {
+    const b = escalation();
+    b.issues.get("t-2").status = "done";
+    const m = model(b, [ON_T2, "Ruled: 30 s."]);
+    await poller(b, m.answer, { stateFile: stateFileOf(), fetch: reopensAfterLookup(b), ...ESC }).tick();
+    waitKept(b, m, "R4");
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);
