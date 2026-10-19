@@ -116,6 +116,16 @@ function waitFor(cond, ms = 15000) {
     assert.match(botSurfaces({ BOT_SURFACES: "discord,paperclip", DISCORD_TOKEN: "t" }, 0).errors.join(), PREREQUISITE);
   });
 
+  await check("botSurfaces: no token, no board and BOT_SURFACES unset is a refusal naming both (README: exits 78)", () => {
+    const { botSurfaces, NO_SURFACE } = require("../lib/surfaces");
+    const none = botSurfaces({}, 0);
+    assert.deepStrictEqual([none.discord, none.paperclip, none.declared], [false, false, false]);
+    assert.deepStrictEqual(none.errors, [NO_SURFACE]);
+    assert.match(none.errors[0], /neither DISCORD_TOKEN nor a usable Paperclip board is configured/);
+    assert.match(none.errors[0], /PAPERCLIP_URL and PAPERCLIP_API_KEY/);
+    assert.strictEqual(botSurfaces({ BOT_SURFACES: "  " }, 0).errors.length, 1, "a blank BOT_SURFACES is unset");
+  });
+
   await check("no DISCORD_TOKEN and no board → exit EXIT_CONFIG (78), naming both", async () => {
     const { code, out } = await runBot(botEnv(dir, "pctest-none", base), run);
     assert.strictEqual(code, 78, `exit ${code}\n${out}`);
