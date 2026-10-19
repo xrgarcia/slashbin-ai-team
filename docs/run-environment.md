@@ -157,11 +157,15 @@ Evaluated over the final environment, for each variable:
    naming a folder on `PATH` must not take `PATH` away), and **refuses** the
    configuration when it holds a rule 2–4 identity or a whole value the server
    channel writes and hides.
-   Under rules 8 and 9 a server value counts when it is at least 6 characters
-   and either has a credential name or is not a single absolute path.
-   A harness **policy setting** set to exactly a hidden server value is
-   refused whatever that value's length or shape (a 5-character value, a
-   path): the setting holds the whole value, and every command reads it.
+   Under rules 8 and 9 a server value a setting merely *contains* counts when
+   it is at least 6 characters and either has a credential name or is not a
+   single absolute path.
+   A harness **policy setting**, a harness-published setting or path, or an
+   **operating basic** set to *exactly* a hidden server value of another name
+   is refused whatever that value's length or shape (`TERM=xterm`, `TZ=UTC`,
+   an `XDG_*` folder, `CLAUDE_PLUGIN_ROOT`): the setting holds the whole
+   value, and every command reads it. A server entry with the same name and
+   value as the setting is not a collision.
 10. A server-channel variable that would replace a harness policy setting with
     another value **refuses** the configuration.
 11. An MCP server's **command line** (its `command`, `args` or `cwd`) may
@@ -319,7 +323,7 @@ names the board key a board task's seat key is taken from (run id `run-1`).
 | D43 | claude | bypass | session | — | `PAPERCLIP_API_KEY=k1` | — | — | `PAPERCLIP_API_KEY` | refused | rule 13: a connector key, on every run (round 6 R15) |
 | D44 | claude | bypass | session | — | `DISCORD_TOKEN=abc` | — | — | `DISCORD_TOKEN` | kept | rule 13: a session keeps its Discord token, so it need not match |
 | D45 | codex | bypass | session | — | `XDG_CACHE_HOME=/srv/cache-{S}` | `SMTP_PASSWORD={S}` | — | `XDG_CACHE_HOME` | refused | rule 9: a basic holding a whole server value (round 6 R17) |
-| D46 | codex | bypass | session | — | `XDG_CONFIG_HOME=/srv/cfg` | `ROUTER_DIR=/srv/cfg` | — | `XDG_CONFIG_HOME` | kept | rule 9: a server path is not a credential |
+| D46 | codex | bypass | session | — | `XDG_CONFIG_HOME=/srv/cfg` | `ROUTER_DIR=/srv/cfg` | — | `XDG_CONFIG_HOME` | refused | rule 9 (Required 5): a basic set to a whole hidden server value, a path included |
 | D47 | codex | bypass | parity | `NOVA_BEARER` | `NOVA_BEARER={N}; BOT_MAIL_SUBJECT_PREFIX=[ops]` | `ROUTER_URL=https://router.example` | — | `BOT_MAIL_SUBJECT_PREFIX` | kept | rule 8 refuses a whole server value only |
 | E1 | codex | bypass | session | `ROUTER_BEARER` | `ROUTER_BEARER={R}` | `ROUTER_BEARER={X}` | — | `ROUTER_BEARER` | hidden | round 4 S1: an inline server value over a listed name |
 | E2 | codex | bypass | session | `ROUTER_BEARER` | — | `ROUTER_BEARER={X}` | — | `ROUTER_BEARER` | hidden | round 4 S1: inline, listed, never inherited |
@@ -376,3 +380,13 @@ names the board key a board task's seat key is taken from (run id `run-1`).
 | G15 | codex | bypass | parity | `SOURCE` | `SOURCE=abcde; BOT_MAIL_SUBJECT_PREFIX=abcde` | `ROUTER_BEARER=abcde` | — | `BOT_MAIL_SUBJECT_PREFIX` | refused | rule 8, parity (round 7 R1) |
 | G16 | codex | bypass | session | `SOURCE` | `SOURCE=/srv/private; BOT_MAIL_SUBJECT_PREFIX=/srv/private` | `ROUTER_HOME=/srv/private` | — | `BOT_MAIL_SUBJECT_PREFIX` | refused | rule 8: a whole hidden server value that is a path (round 7 R2) |
 | G17 | codex | bypass | parity | `SOURCE` | `SOURCE=/srv/private; BOT_MAIL_SUBJECT_PREFIX=/srv/private` | `ROUTER_HOME=/srv/private` | — | `BOT_MAIL_SUBJECT_PREFIX` | refused | rule 8, parity (round 7 R2) |
+| G18 | codex | bypass | session | `SOURCE` | `SOURCE=/srv/private; XDG_CONFIG_HOME=/srv/private` | `ROUTER_HOME=/srv/private` | — | `XDG_CONFIG_HOME` | refused | rule 9 (Required 5): a basic set to a whole hidden server path (round 8 R1) |
+| G19 | codex | bypass | parity | `SOURCE` | `SOURCE=/srv/private; XDG_CONFIG_HOME=/srv/private` | `ROUTER_HOME=/srv/private` | — | `XDG_CONFIG_HOME` | refused | rule 9 (Required 5): a basic set to a whole hidden server path, parity (round 8 R1) |
+| G20 | codex | bypass | session | `SOURCE` | `SOURCE=UTC; TZ=UTC` | `ROUTER_ZONE=UTC` | — | `TZ` | refused | rule 9 (Required 5): a basic set to a whole hidden server value of 3 characters (round 8 R2) |
+| G21 | codex | bypass | parity | `SOURCE` | `SOURCE=UTC; TZ=UTC` | `ROUTER_ZONE=UTC` | — | `TZ` | refused | rule 9 (Required 5): a basic set to a whole hidden server value of 3 characters, parity (round 8 R2) |
+| G22 | codex | bypass | session | `SOURCE` | `SOURCE=xterm; TERM=xterm` | `ROUTER_BEARER=xterm` | — | `TERM` | refused | rule 9 (Required 5): a basic set to a whole hidden server value of 5 characters (round 8 R4) |
+| G23 | codex | bypass | parity | `SOURCE` | `SOURCE=xterm; TERM=xterm` | `ROUTER_BEARER=xterm` | — | `TERM` | refused | rule 9 (Required 5): a basic set to a whole hidden server value of 5 characters, parity (round 8 R4) |
+| G24 | codex | bypass | session | `SOURCE` | `SOURCE=/srv/private; XDG_CACHE_HOME=/srv/private` | `ROUTER_HOME=/srv/private` | — | `XDG_CACHE_HOME` | refused | rule 9 (Required 5): path shape grants no exception (round 8 R5) |
+| G25 | codex | bypass | parity | `SOURCE` | `SOURCE=/srv/private; XDG_CACHE_HOME=/srv/private` | `ROUTER_HOME=/srv/private` | — | `XDG_CACHE_HOME` | refused | rule 9 (Required 5): path shape grants no exception, parity (round 8 R5) |
+| G26 | codex | bypass | session | — | `SOURCE=/srv/bot/skills` | `ROUTER_HOME=/srv/bot/skills` | — | `CLAUDE_PLUGIN_ROOT` | refused | rule 8 (Required 5): a published harness path equal to a whole hidden server value (round 8 R3, R6) |
+| G27 | codex | bypass | parity | — | `SOURCE=/srv/bot/skills` | `ROUTER_HOME=/srv/bot/skills` | — | `CLAUDE_PLUGIN_ROOT` | refused | rule 8 (Required 5): a published harness path equal to a whole hidden server value, parity (round 8 R3, R6) |

@@ -562,8 +562,8 @@ check("an operating basic or a policy setting holding a whole server value refus
   for (const p of [refusedFor({ XDG_CACHE_HOME: "/srv/cache-smtp-pass-value" }, { SMTP_PASSWORD: "smtp-pass-value" })]) {
     assert.ok(!p.join().includes("smtp-pass-value"), "the refusal prints the value");
   }
-  // Not a refusal: a server path that is no credential, a basic the server itself writes.
-  assert.deepStrictEqual(refusedFor({ XDG_CONFIG_HOME: "/srv/cfg" }, { ROUTER_DIR: "/srv/cfg" }), []);
+  // Not a refusal: a server value no kept setting holds, a basic the server itself writes.
+  assert.deepStrictEqual(refusedFor({ XDG_CONFIG_HOME: "/srv/cfg" }, { ROUTER_DIR: "/srv/other" }), []);
   assert.deepStrictEqual(refusedFor({ BOT_MAX_WAKE_ATTEMPTS: "3" }, { RETRIES: "4" }), []);
   // A policy setting holding a whole hidden server value is refused at any length or shape (round 7 R1, R2).
   for (const v of ["abcde", "3", "/srv/private"]) {
@@ -576,6 +576,34 @@ check("an operating basic or a policy setting holding a whole server value refus
   assert.match(refusedFor({ XDG_DATA_HOME: "/srv/keys/x" }, { SIGNING_KEY: "/srv/keys/x" }).join(), /^XDG_DATA_HOME holds the value of SIGNING_KEY/);
   // Claude has no server channel, so there is nothing to hold.
   assert.deepStrictEqual(build({ runtime: "claude", env: { XDG_CACHE_HOME: "/srv/cache-smtp-pass-value" }, mcpEnv: { SMTP_PASSWORD: "smtp-pass-value" } }).problems, []);
+});
+
+check("an operating basic or a harness setting equal to a whole hidden server value refuses, at any length or shape (Required 5, round 8 R1-R6)", () => {
+  const cases = [
+    // [id, BOT_RUN_ENV, process env, published, MCP env, kept setting, server variable, value]
+    ["R1", "SOURCE", { SOURCE: "/srv/private", XDG_CONFIG_HOME: "/srv/private" }, {}, { ROUTER_HOME: "/srv/private" }, "XDG_CONFIG_HOME", "ROUTER_HOME", "/srv/private"],
+    ["R2", "SOURCE", { SOURCE: "UTC", TZ: "UTC" }, {}, { ROUTER_ZONE: "UTC" }, "TZ", "ROUTER_ZONE", "UTC"],
+    ["R3/R6", undefined, { SOURCE: "/srv/private" }, { CLAUDE_PLUGIN_ROOT: "/srv/private" }, { ROUTER_HOME: "/srv/private" }, "CLAUDE_PLUGIN_ROOT", "ROUTER_HOME", "/srv/private"],
+    ["R4", "SOURCE", { SOURCE: "xterm", TERM: "xterm" }, {}, { ROUTER_BEARER: "xterm" }, "TERM", "ROUTER_BEARER", "xterm"],
+    ["R5", "SOURCE", { SOURCE: "/srv/private", XDG_CACHE_HOME: "/srv/private" }, {}, { ROUTER_HOME: "/srv/private" }, "XDG_CACHE_HOME", "ROUTER_HOME", "/srv/private"],
+  ];
+  for (const [id, spec, env, published, mcpEnv, kept, server, value] of cases) {
+    for (const run of ["session", "parity"]) {
+      const b = build({ runtime: "codex", run, spec, env: spec ? { ...env, BOT_RUN_ENV: spec } : env, published, mcpEnv });
+      assert.strictEqual(b.env, null, `${id} ${run}: refused, no environment`);
+      const text = b.problems.join(" | ");
+      assert.ok(b.problems.some((p) => p.startsWith(`${kept} holds the value of ${server} in the MCP servers' env`)), `${id} ${run}: names both, ${text}`);
+      assert.ok(!text.includes(value), `${id} ${run}: the refusal prints the value`);
+    }
+  }
+  // The structural exemption holds: the server writing a basic or a harness path under its own name, with its own value.
+  assert.deepStrictEqual(build({ runtime: "codex", env: { TZ: "UTC" }, mcpEnv: { TZ: "UTC" } }).problems, []);
+  assert.deepStrictEqual(build({ runtime: "codex", published: { CLAUDE_PLUGIN_ROOT: "/srv/p" }, mcpEnv: { CLAUDE_PLUGIN_ROOT: "/srv/p" } }).problems, []);
+  // A kept server value (a listed path) is not hidden, so a basic equal to it is not a collision.
+  assert.deepStrictEqual(build({ runtime: "codex", spec: "ROUTER_DIR", env: { BOT_RUN_ENV: "ROUTER_DIR", XDG_CONFIG_HOME: "/srv/cfg" }, mcpEnv: { ROUTER_DIR: "/srv/cfg" } }).problems, []);
+  // Claude and narrow runs have no server channel, so there is nothing to collide with.
+  assert.deepStrictEqual(build({ runtime: "claude", env: { TZ: "UTC" }, mcpEnv: { ROUTER_ZONE: "UTC" } }).problems, []);
+  assert.deepStrictEqual(build({ runtime: "codex", run: "board", env: { TZ: "UTC" }, mcpEnv: { ROUTER_ZONE: "UTC" } }).problems, []);
 });
 
 check("an MCP server's command line may expand only a variable the run's commands can read (rule 11)", () => {
