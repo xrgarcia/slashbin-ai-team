@@ -2729,6 +2729,30 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.match(prompts[2], /Escalate this card now: it has been woken 2 times/);
   });
 
+  await check("a card whose review stage takes a blocked answer's status gets the answer as a comment once, not the same refused write every tick", async () => {
+    const b = board([task("t-1", { runs: run("r1") })]);
+    const inner = b.fetch, refused = [];
+    // The board's review stage turns the write into changes requested, then refuses its unblock note.
+    b.fetch = async (u, init = {}) => {
+      if (init.method === "PATCH" && JSON.parse(init.body).unblockDescriptor) {
+        refused.push(JSON.parse(init.body));
+        return { ok: false, status: 422, text: async () => JSON.stringify({ error: "unblockDescriptor requires blocked status" }) };
+      }
+      return inner(u, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const prompts = [];
+    const answer = async (p) => { prompts.push(p); return `Need the spec.\n${OUTCOME_MARK} blocked`; };
+    await poller(b, answer, { stateFile }).tick();
+    await poller(b, answer, { stateFile }).tick();
+    await poller(b, answer, { stateFile }).tick();
+    assert.strictEqual(refused.length, 1, `the refused write was sent ${refused.length} times`);
+    assert.strictEqual(prompts.length, 1);
+    const mine = b.comments.get("t-1").filter((c) => c.createdByRunId === "r1");
+    assert.strictEqual(mine.length, 1, JSON.stringify(mine));
+    assert.match(mine[0].body, /^Need the spec\./);
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

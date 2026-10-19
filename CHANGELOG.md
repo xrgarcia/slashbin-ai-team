@@ -66,6 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A blocked answer on a card in a review stage no longer loops. The board takes
+  the reviewer's write as changes requested, moves the card itself, and refuses
+  the block's unblock note (HTTP 422); the same write was retried every tick.
+  The answer now goes as a comment and the board's review keeps the status.
 - A held card's note is no longer repeated on each of Paperclip's re-wakes of
   an unchanged card.
 
