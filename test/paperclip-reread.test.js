@@ -1147,6 +1147,123 @@ const wake = (b, id) => {
     });
   }
 
+  // ---- Round 11: one gate for every routing write, fallbacks and restorations included ----
+
+  // Every write that sets a status, holder, waits or unblock step goes through
+  // routeGate: the card read again just before it and compared with the
+  // snapshot that produced the write. Anything recorded since by anyone but
+  // this attempt's own runs — a newer ask included, never a reason to skip
+  // the comparison — turns the write into a comment only.
+
+  // R1, R5, R21: T-1 answered blocked on T-2; a person asks again just after
+  // quiet wake r2's first comments response. The ask is newer than the
+  // answer, so the note cannot close (close=false), and the block it would
+  // put back is decided from no card the wake read: a comment only.
+  for (const [row, ask, spy] of [["R1", "Any news on this?", false], ["R5", "And can it cover refunds too?", false], ["R21", "Is this still waiting on T-2?", true]]) {
+    await check(`${row}: quiet re-wake, a person asks again after r2's first comments read: the note is a comment only, nothing routed`, async () => {
+      const r = await answeredOnT2();
+      const patches = [];
+      const asked = after(r.b, GET("/issues/t-1/comments"), (x) => x.say("t-1", PERSON, ask), 1);
+      const fetch = async (url, init = {}) => { if (init.method === "PATCH") patches.push(JSON.parse(init.body)); return asked(url, init); };
+      await poller(r.b, r.m.answer, { stateFile: r.stateFile, fetch }).tick();
+      quietKept(r, row, { status: "in_progress" });
+      assert.deepStrictEqual([r.b.issues.get("t-1").assigneeAgentId, r.b.issues.get("t-1").assigneeUserId ?? null], [ME.id, null], `${row}: the holder changed`);
+      if (spy) assert.ok(patches.every((p) => !ROUTES({ body: p })), `${row}: a routing PATCH went out: ${JSON.stringify(patches)}`);
+    });
+  }
+
+  // R2: an ordinary `return`, the hand-back refused (403), and another run of
+  // this seat records todo before the refusal comes back. The fallback block
+  // is a routing write of its own: re-read, the todo seen, a comment only.
+  await check("R2: an ordinary return's hand-back refused, another run's todo lands first: todo stands, the refusal said as a comment", async () => {
+    const b = ordinary();
+    b.state.refuseHandOff = true;
+    const fetch = after(b, PATCHES("assigneeAgentId"), (x) => x.setStatus("t-1", "todo", BOT_SEAT, OTHER_RUN));
+    const { prompts, answer } = model(b, [RETURNED]);
+    await poller(b, answer, { stateFile: stateFileOf(), fetch }).tick();
+    const t = b.issues.get("t-1");
+    assert.strictEqual(prompts.length, 1, "the model ran again");
+    assert.strictEqual(t.status, "todo", `todo was written over: ${JSON.stringify(b.writes)}`);
+    assert.ok(!b.writes.some(ROUTES), `a routing write after the refusal: ${JSON.stringify(b.writes)}`);
+    assert.strictEqual(holderOf(t), ME.id);
+    assert.ok(b.writes.some((w) => /Only the Product Owner/.test(w.body.comment ?? "") && /could not hand this task back/.test(w.body.comment)), `the refusal was not said: ${JSON.stringify(b.writes)}`);
+  });
+
+  // R3: an ordinary `return` through process.escalate (the seat reports to
+  // the Product Owner). The hand_up records another run's todo, then refuses:
+  // the terminal refusal block is gated like any other, so todo stands and
+  // the refusal, with its code, is said as a comment.
+  await check("R3: an ordinary return through process.escalate, the hand_up records another run's todo and refuses: todo stands, the refusal said", async () => {
+    const b = ordinary();
+    const calls = [];
+    const escalate = async (args) => {
+      calls.push(args.operation);
+      b.setStatus("t-1", "todo", BOT_SEAT, OTHER_RUN);
+      return { ok: false, code: "not_holder", message: "the card is not with you" };
+    };
+    const reports = async (url, init = {}) => (url.endsWith("/api/agents/me") ? { ok: true, text: async () => JSON.stringify({ ...ME, reportsTo: "agent-po" }) } : b.fetch(url, init));
+    const { prompts, answer } = model(b, [RETURNED]);
+    await poller(b, answer, { stateFile: stateFileOf(), fetch: reports, escalate }).tick();
+    const t = b.issues.get("t-1");
+    assert.deepStrictEqual(calls, ["hand_up"], `the action was not asked: ${JSON.stringify(calls)}`);
+    assert.strictEqual(prompts.length, 1);
+    assert.strictEqual(t.status, "todo", `todo was written over: ${JSON.stringify(b.writes)}`);
+    assert.ok(!b.writes.some(ROUTES), `a routing write after the refusal: ${JSON.stringify(b.writes)}`);
+    assert.ok(b.writes.some((w) => /not_holder: the card is not with you/.test(w.body.comment ?? "")), `the refusal was not said: ${JSON.stringify(b.writes)}`);
+  });
+
+  // R4: an answered escalation waits on T-2. On quiet wake r2, another run of
+  // this seat records todo just after keepBlocked's card response: the
+  // checkout restoration is gated against the wake's snapshot, so todo
+  // stands, and r2 completes on a comment of its own with no model run.
+  await check("R4: an answered escalation on T-2, another run's todo after keepBlocked's card read on quiet wake r2: todo stands, r2 ends on a comment", async () => {
+    const b = escalation();
+    const stateFile = stateFileOf();
+    const { prompts, answer } = model(b, [ON_T2]);
+    await poller(b, answer, { stateFile, ...ESC }).tick();
+    assert.deepStrictEqual(b.issues.get("t-1").blockedByIssueIds, ["t-2"], `the wait was not linked: ${JSON.stringify(b.writes)}`);
+    assert.strictEqual(b.issues.get("t-1").status, "blocked");
+    wake(b, "r2");
+    const since = b.writes.length;
+    // The wake reads the card once; the next read of it is keepBlocked's.
+    const fetch = after(b, GET("/issues/t-1"), (x) => x.setStatus("t-1", "todo", BOT_SEAT, OTHER_RUN), 2);
+    await poller(b, answer, { stateFile, fetch, ...ESC }).tick();
+    const mine = b.writes.slice(since), t = b.issues.get("t-1");
+    assert.strictEqual(prompts.length, 1, "the model ran again");
+    assert.strictEqual(t.status, "todo", `todo was written over: ${JSON.stringify(mine)}`);
+    assert.ok(!mine.some(ROUTES), `a routing write: ${JSON.stringify(mine)}`);
+    assert.deepStrictEqual(t.blockedByIssueIds, ["t-2"]);
+    assert.ok(mine.some((w) => w.runId === "r2" && w.body.comment), `r2 did not end on a comment: ${JSON.stringify(mine)}`);
+  });
+
+  // The guard: every write that can change routing goes through routeGate.
+  // The only PATCH calls in the poller are the gate's and say()'s, which
+  // sends a comment and nothing else; process.escalate is called only from
+  // the gate; and every POST is a comment, a wake or a reconciliation.
+  await check("every routing write goes through routeGate: no other PATCH, no other process.escalate call", async () => {
+    const src = require("fs").readFileSync(require("path").join(__dirname, "../lib/paperclip.js"), "utf8");
+    const body = (name) => {
+      const at = src.indexOf(`function ${name}(`);
+      assert.ok(at >= 0, `no ${name}()`);
+      let depth = 0, i = src.indexOf("{", src.indexOf(")", at));
+      const start = i;
+      for (; i < src.length; i++) { if (src[i] === "{") depth++; else if (src[i] === "}" && --depth === 0) break; }
+      return [start, i];
+    };
+    const gate = body("routeGate");
+    const sayAt = src.match(/const say = \(([^)]*)\) => api\("PATCH", [^,]+, \{ comment(: [a-z]+)? \}, [a-zA-Z]+\);/);
+    assert.ok(sayAt, "say() is not a comment-only PATCH");
+    const inGate = (i) => i > gate[0] && i < gate[1];
+    const patches = [...src.matchAll(/api\("PATCH"/g)].map((m) => m.index);
+    const stray = patches.filter((i) => !inGate(i) && i !== sayAt.index + sayAt[0].indexOf('api("PATCH"'));
+    assert.deepStrictEqual(stray.map((i) => src.slice(i, i + 80)), [], "a PATCH outside routeGate and say()");
+    assert.strictEqual(patches.filter(inGate).length, 1, "routeGate makes more than one kind of PATCH");
+    const escalates = [...src.matchAll(/\bescalateClient\(/g)].map((m) => m.index);
+    assert.ok(escalates.length >= 1 && escalates.every(inGate), "process.escalate called outside routeGate");
+    const posts = [...src.matchAll(/api\("POST", `([^`]+)`/g)].map((m) => m[1]);
+    assert.ok(posts.every((p) => /\/comments$|\/wakeup$|\/recovery-actions\/resolve$/.test(p)), `a POST that is not a comment, a wake or a reconciliation: ${posts}`);
+  });
+
   // The validator itself: only a snapshot with its fields, its record mark and its runs authorizes routing.
   await check("routableSnapshot: no mark, no runs, legacy or nothing never authorizes routing", async () => {
     const { routableSnapshot } = require("../lib/paperclip");
@@ -1184,7 +1301,9 @@ const wake = (b, id) => {
       }
       return out;
     });
-    const want = [["acknowledge", 6, /^wakeSnap\(\)$/], ["handOn", 2, /^was$/], ["handOffVia", 6, /^(from|Array\.isArray\(was\.own\)[\s\S]+)$/]];
+    const want = [["acknowledge", 6, /^wakeSnap\(\)$/], ["handOn", 2, /^withOwn\(was\)$/], ["handOffVia", 6, /^(from|withOwn\(was\))$/]];
+    // withOwn only merges this attempt's runs into the producing snapshot's own.
+    assert.match(src, /const withOwn = \(w\) => Array\.isArray\(w\.own\) \? \{ \.\.\.w, own: \[\.\.\.new Set\(\[\.\.\.w\.own, \.\.\.ownRuns\(\)\]\)\] \} : w;/);
     for (const [name, at, form] of want) {
       const calls = argsOf(name);
       assert.ok(calls.length >= 1, `no ${name}() call found`);

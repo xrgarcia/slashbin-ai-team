@@ -1234,7 +1234,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
         steps: [["wake", "r1"], ["done", "t-2"], ["wake", "r2"]], ran: 2, status: "done" },
       { name: "a person reopens the card a person blocked as the bot closed it, before the bot's note on their hold: the ask resumes once, across restarts",
         race: { before: (b, i) => { b.setStatus("t-1", "blocked", PERSON); i.unblockDescriptor = { owner: { userId: PERSON.actorId }, action: "Hold for T-3." }; i.blockedByIssueIds = ["t-3"]; },
-          after: (b) => { b.state.afterRead = { of: "t-1", on: "comments", nth: 2, f: () => b.setStatus("t-1", "todo", PERSON) }; } },
+          after: (b) => { b.state.afterRead = { of: "t-1", on: "comments", nth: 4, f: () => b.setStatus("t-1", "todo", PERSON) }; } },
         replies: [blockedOn("T-2"), "Finished."], steps: [["wake", "r1"], ["wake", "r2"], ["wake", "r3"]], ran: 2, status: "done",
         check: (b) => assert.ok(b.comments.get("t-1").some((c) => c.body.startsWith("Someone blocked this task as I closed it"))) },
       { name: "a person reopens a blocked card in the blocked answer's millisecond: the ask resumes once",

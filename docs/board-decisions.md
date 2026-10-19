@@ -296,6 +296,22 @@ the model, and routing the card to someone else.
   only, the card left as it is, and nothing runs again. A call that passes no
   snapshot throws (`reply`, `acknowledge`) or posts the answer only
   (`handOn`, `handOffVia`); a test scans every call site.
+- **One gate for every routing write (`routeGate`).** Every write that
+  changes status, holder, what the card waits on, its unblock step, or hands
+  it on through `process.escalate` goes through one function: a close, a
+  return or transfer, the block a quiet wake's note puts back, the fallback
+  block after a refused hand-back or hand-off, `keepBlocked`, a link, an
+  unlink, a checkout put back, a resume, and a put-back of a person's status.
+  It reads the card again immediately before the write and compares it with
+  the producing snapshot (above). Anything recorded since by anyone but this
+  attempt's own runs (status, holder, waits, unblock step, labels, an edit,
+  a newer comment or any other activity), or no routable snapshot, and
+  nothing is routed: the comment goes alone, or nothing when a comment would
+  end the run. A newer ask is a change like any other, never a reason to skip
+  the comparison. The only other write is `say`, a comment and nothing else.
+  A test scans the source: no other `PATCH` and no other `process.escalate`
+  call. A snapshot read cancelled (a person's cancel put back) is not itself
+  a change; a cancel since is.
 - **A wait resumes** only when every task it waits on reads `done` on a fresh
   read. A task trimmed from the card, one that cannot be read, or one that
   reopened keeps the wait (`linkedNow`, `allDone`). An escalation keeps every
