@@ -8,7 +8,7 @@
  * permission system alone would have let through. Runs against a scratch
  * checkout and a local bare remote; no network.
  */
-const { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync, unlinkSync } = require("fs");
+const { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync, unlinkSync, symlinkSync } = require("fs");
 const { tmpdir } = require("os");
 const { join } = require("path");
 const { spawnSync, execFileSync } = require("child_process");
@@ -339,6 +339,21 @@ check("no message, no path, an unchanged path and an unknown option are refused"
   refused(land(f.repo, ["-m", "x"]), /name at least one file/);
   refused(land(f.repo, ["-m", "x", "skills/guarded/../new.md"]), /no change to land/);
   refused(land(f.repo, ["-m", "x", "--force", "notes/company.md"]), /unknown option --force/);
+  rmSync(f.dir, { recursive: true, force: true });
+});
+
+check("a path behind a symlinked parent directory is refused, and the outside file is not published", () => {
+  const f = fixture();
+  const outside = join(f.dir, "outside");
+  mkdirSync(outside);
+  writeFileSync(join(outside, "company.md"), "OUTSIDE-SECRET\n");
+  rmSync(join(f.repo, "notes"), { recursive: true });
+  symlinkSync(outside, join(f.repo, "notes"));
+  const before = remoteHead(f);
+  const r = land(f.repo, ["-m", "x", "notes/company.md"]);
+  refused(r, /behind a symlinked directory \(notes\)/);
+  assert.ok(!/OUTSIDE-SECRET/.test(r.out + r.err), "the outside content was echoed");
+  assert.strictEqual(remoteHead(f), before, "something was published");
   rmSync(f.dir, { recursive: true, force: true });
 });
 

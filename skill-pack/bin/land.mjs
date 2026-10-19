@@ -136,6 +136,26 @@ const isGitlink = (entry) => entry.startsWith("160000 ");
 const regularMode = (entry) => (/^100(644|755) /.test(entry || "") ? entry.slice(0, 6) : "");
 
 /**
+ * A path whose parent directory is a symlink reads, through the link, a file
+ * that is not in this checkout; hashing it would publish that file's contents
+ * under this path. Every ancestor between the root and the file must be a real
+ * directory (or absent). The file itself may be a symlink: that is a literal entry.
+ */
+function refuseSymlinkedParent(root, rel) {
+  const parts = rel.split("/").filter(Boolean);
+  let dir = root;
+  for (const part of parts.slice(0, -1)) {
+    dir = join(dir, part);
+    let st;
+    try { st = lstatSync(dir); } catch (e) {
+      if (e.code === "ENOENT" || e.code === "ENOTDIR") return;
+      throw e;
+    }
+    if (st.isSymbolicLink()) fail(`${rel} is behind a symlinked directory (${relative(root, dir)}), which leads outside this checkout's own files, so it is not landed`);
+  }
+}
+
+/**
  * The working tree's entry for each file, hashed now, once: the commit is built
  * from these ids, so a file rewritten after this cannot change what is pushed.
  * Regular files go through git's filters as `git add` would; with
@@ -147,6 +167,7 @@ function workingEntries(root, files, modeFrom) {
   const out = {};
   const regular = [];
   for (const rel of files) {
+    refuseSymlinkedParent(root, rel);
     let st;
     try { st = lstatSync(join(root, rel)); } catch (e) {
       if (e.code === "ENOENT" || e.code === "ENOTDIR") continue;
