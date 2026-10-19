@@ -159,6 +159,9 @@ Evaluated over the final environment, for each variable:
    channel writes and hides.
    Under rules 8 and 9 a server value counts when it is at least 6 characters
    and either has a credential name or is not a single absolute path.
+   A harness **policy setting** set to exactly a hidden server value is
+   refused whatever that value's length or shape (a 5-character value, a
+   path): the setting holds the whole value, and every command reads it.
 10. A server-channel variable that would replace a harness policy setting with
     another value **refuses** the configuration.
 11. An MCP server's **command line** (its `command`, `args` or `cwd`) may
@@ -369,3 +372,7 @@ names the board key a board task's seat key is taken from (run id `run-1`).
 | G11 | codex | bypass | parity | `ROUTER_URL` | `ROUTER_URL=https://router.example` | `@router=--url=${ROUTER_URL}` | — | `ROUTER_URL` | refused | rules 7, 11: a listed URL is hidden, so it may not be expanded |
 | G12 | codex | bypass | session | — | `EM_GITHUB_TOKEN={G}` | `@gh=--token=${EM_GITHUB_TOKEN}` | — | `EM_GITHUB_TOKEN` | kept | rule 11 under unset: the commands read it already (*Not covered*) |
 | G13 | codex | bypass | session | — | `GH_TOKEN={G}` | `GH_TOKEN={G}; @gh=--token=${GH_TOKEN}` | — | `GH_TOKEN` | kept | rules 6, 11: the same name and value as an inherited kept variable is kept, so it may be expanded |
+| G14 | codex | bypass | session | `SOURCE` | `SOURCE=abcde; BOT_MAIL_SUBJECT_PREFIX=abcde` | `ROUTER_BEARER=abcde` | — | `BOT_MAIL_SUBJECT_PREFIX` | refused | rule 8: a policy setting holding a whole hidden server value, under 6 characters (round 7 R1) |
+| G15 | codex | bypass | parity | `SOURCE` | `SOURCE=abcde; BOT_MAIL_SUBJECT_PREFIX=abcde` | `ROUTER_BEARER=abcde` | — | `BOT_MAIL_SUBJECT_PREFIX` | refused | rule 8, parity (round 7 R1) |
+| G16 | codex | bypass | session | `SOURCE` | `SOURCE=/srv/private; BOT_MAIL_SUBJECT_PREFIX=/srv/private` | `ROUTER_HOME=/srv/private` | — | `BOT_MAIL_SUBJECT_PREFIX` | refused | rule 8: a whole hidden server value that is a path (round 7 R2) |
+| G17 | codex | bypass | parity | `SOURCE` | `SOURCE=/srv/private; BOT_MAIL_SUBJECT_PREFIX=/srv/private` | `ROUTER_HOME=/srv/private` | — | `BOT_MAIL_SUBJECT_PREFIX` | refused | rule 8, parity (round 7 R2) |
