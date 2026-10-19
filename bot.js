@@ -699,8 +699,9 @@ for (const { name, reason } of CODEX_MCP?.skipped ?? []) log.warn({ server: name
 // differently from its operator, a policy setting or server env that could
 // only be held by handing a credential to commands — refuses to start, for
 // each kind of run this bot will make. A seat is added per task and only ever
-// as a hidden variable, so it cannot turn a startup pass into a refusal.
-for (const run of ["session", ...(PAPERCLIP_BOARDS.length ? [BOARD_KIND === "board" ? "board" : "parity"] : [])]) {
+// as a hidden variable, so it cannot turn a startup pass into a refusal. A
+// session run exists only on Discord, so a Paperclip-only bot does not check one.
+for (const run of [...(DISCORD_ON ? ["session"] : []), ...(PAPERCLIP_BOARDS.length ? [BOARD_KIND === "board" ? "board" : "parity"] : [])]) {
   const { problems } = runEnvFor(run);
   if (!problems.length) continue;
   for (const problem of problems) log.fatal(`Run environment refused (${run} run) — ${problem}`);

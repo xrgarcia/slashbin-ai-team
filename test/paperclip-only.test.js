@@ -323,6 +323,36 @@ for (const e of [{ type: "system", subtype: "init", session_id: "s-1" },
     board.close();
   }
 
+  console.log("\nStartup checks only the runs the enabled surfaces can make");
+
+  {
+    // Codex bypass, with an MCP server whose command line holds a credential's
+    // value. That is refused for a Discord session run; a Paperclip-only bot
+    // never makes one, so it must not be refused for it.
+    const cdir = join(dir, "codex-cwd");
+    mkdirSync(cdir);
+    const fake = join(dir, "fake-codex");
+    writeFileSync(fake, '#!/bin/sh\necho "codex-cli 0.162.0"\n');
+    chmodSync(fake, 0o755);
+    const secret = "sekrit-value-0123456789";
+    writeFileSync(join(cdir, ".mcp.json"), JSON.stringify({ mcpServers: { x: { command: "node", args: ["--token", secret] } } }));
+    const codexEnv = { BOT_RUNTIME: "codex", CODEX_BIN: fake, BOT_PERMISSION_MODE: "bypass", FOO_API_KEY: secret, CLAUDE_CWD: cdir,
+      PAPERCLIP_URL: "http://127.0.0.1:1", PAPERCLIP_API_KEY: "test-key" };
+
+    await check("Paperclip-only Codex bypass with a readonly board is not refused for the unused Discord session run", async () => {
+      const res = await runBot(botEnv(dir, "pctest-codexonly", base + 8, codexEnv), run, { until: (o) => /Paperclip connector on/.test(o) });
+      await stop(res.child);
+      assert.strictEqual(res.code, null, `exited ${res.code}\n${res.out}`);
+      assert.ok(!/Run environment refused/.test(res.out), res.out);
+    });
+
+    await check("the same configuration with a DISCORD_TOKEN is still refused for its session run", async () => {
+      const res = await runBot(botEnv(dir, "pctest-codexdiscord", base + 9, { ...codexEnv, DISCORD_TOKEN: "not-a-real-token" }), run);
+      assert.strictEqual(res.code, 78, `exit ${res.code}\n${res.out}`);
+      assert.match(res.out, /Run environment refused \(session run\) — MCP server x's command line holds the value of FOO_API_KEY/);
+    });
+  }
+
   console.log("\nDiscord on — unchanged");
 
   await check("with a DISCORD_TOKEN and no board, the bot goes to Discord and needs nothing new", async () => {
