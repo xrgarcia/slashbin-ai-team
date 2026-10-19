@@ -39,6 +39,13 @@ const log = pino({
  * config. Worse, for a value like a poll interval, a 0 that DID get through would
  * be a hot loop. Clamp explicitly and say something when the input was garbage.
  */
+// A Claude result reports fresh input apart from cache reads and writes; Codex
+// reports one total with cache included. Log the same total for both.
+function inputTotal(usage) {
+  if (!usage) return undefined;
+  return (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0);
+}
+
 function envInt(name, def, { min = 0 } = {}) {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return def;
@@ -2563,7 +2570,7 @@ function handleStreamEvent(event, reqLog, sendMessage, state) {
       // subtype tells a step-cap stop apart from a real crash — both exit non-zero
       state.resultSubtype = event.subtype;
       reqLog.info(
-        { subtype: event.subtype, isError: event.is_error, numTurns: event.num_turns, costUsd: event.cost_usd, durationMs: event.duration_ms, inputTokens: event.total_input_tokens, cachedInputTokens: event.total_cached_input_tokens ?? event.usage?.cache_read_input_tokens, outputTokens: event.total_output_tokens },
+        { subtype: event.subtype, isError: event.is_error, numTurns: event.num_turns, costUsd: event.cost_usd, durationMs: event.duration_ms, inputTokens: event.total_input_tokens ?? inputTotal(event.usage), cachedInputTokens: event.total_cached_input_tokens ?? event.usage?.cache_read_input_tokens, outputTokens: event.total_output_tokens ?? event.usage?.output_tokens },
         "Claude result summary"
       );
       break;
