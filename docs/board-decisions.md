@@ -282,6 +282,20 @@ the model, and routing the card to someone else.
   call comes between the last read and the write it guards. Comments the
   attempt's own runs posted are its output, not a change. A routing write sends only the fields it changes (`holderWrite`):
   it clears the other kind of holder only when the card has one.
+- **The snapshot is required, and only the producing one counts.** Every
+  routing write takes the snapshot the answer was produced from: the card a
+  saved answer was built on (`builtOn`), or, for a note written with no model
+  run (a quiet re-wake's acknowledgement, a saved answer for an older ask),
+  the wake's own read, taken before anything was decided, with its record
+  mark and this attempt's run ids. A read taken while the write is prepared
+  is only ever the "now" side of the comparison, so a change after the wake's
+  read (a status, a label, a comment, a relink, a move off a finished card)
+  stops a note's block or done close as it stops an answer's. A snapshot that
+  is legacy, or lacks its card fields, its record mark or its run ids,
+  authorizes nothing (`routableSnapshot`): the answer is said as a comment
+  only, the card left as it is, and nothing runs again. A call that passes no
+  snapshot throws (`reply`, `acknowledge`) or posts the answer only
+  (`handOn`, `handOffVia`); a test scans every call site.
 - **A wait resumes** only when every task it waits on reads `done` on a fresh
   read. A task trimmed from the card, one that cannot be read, or one that
   reopened keeps the wait (`linkedNow`, `allDone`). An escalation keeps every

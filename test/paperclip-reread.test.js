@@ -1026,6 +1026,172 @@ const wake = (b, id) => {
     assert.ok(on.length === 0 || (prompts.length === 2 && on.every((w) => /Ruled again/.test(w.body.comment ?? ""))), `${prompts.length} runs, ${JSON.stringify(on)}`);
   });
 
+  // ---- Round 10: every routing write takes the snapshot that produced it ----
+
+  // A quiet re-wake's acknowledgement routes from the card as the wake read it
+  // at its start (handleTask), with that read's record mark and the wake's own
+  // runs, never from a read taken inside reply(). Anything recorded since by
+  // anyone else stops the routing: the note goes as a comment only, and the
+  // run completes on it without another model run.
+  const ON_T2 = `Needs T-2.\n${OUTCOME_MARK} blocked on T-2`;
+  // T-1 answered blocked on T-2, then woken again under r2 (the checkout unrecorded).
+  const answeredOnT2 = async () => {
+    const b = ordinary();
+    const stateFile = stateFileOf();
+    const m = model(b, [ON_T2]);
+    await poller(b, m.answer, { stateFile }).tick();
+    const t = b.issues.get("t-1");
+    assert.strictEqual(t.status, "blocked", `the first answer did not block: ${JSON.stringify(b.writes)}`);
+    assert.deepStrictEqual(t.blockedByIssueIds, ["t-2"]);
+    const step = structuredClone(t.unblockDescriptor);
+    wake(b, "r2");
+    return { b, stateFile, m, step, since: b.writes.length };
+  };
+  // The acknowledgement under r2 is a comment only: no routing write, the card as the change left it.
+  const quietKept = (r, row, { status, waits = ["t-2"] }) => {
+    const t = r.b.issues.get("t-1"), mine = r.b.writes.slice(r.since);
+    assert.strictEqual(r.m.prompts.length, 1, `${row}: the model ran again`);
+    assert.ok(!mine.some(ROUTES), `${row}: a stale routing write: ${JSON.stringify(mine)}`);
+    assert.strictEqual(t.status, status, `${row}: the status was written over: ${JSON.stringify(mine)}`);
+    assert.deepStrictEqual(t.blockedByIssueIds, waits, `${row}: the waits were rewritten`);
+    assert.deepStrictEqual(t.unblockDescriptor, r.step, `${row}: the unblock step was rewritten`);
+    assert.ok(mine.some((w) => w.runId === "r2" && w.body.comment), `${row}: r2 did not complete on a comment of its own: ${JSON.stringify(mine)}`);
+  };
+  // The second read of T-1 on the quiet wake is reply()'s boardNow; the first, the wake's own.
+  const afterBoardNow = (b, f) => after(b, GET("/issues/t-1"), f, 2);
+  await check("R1 control: a quiet re-wake on an unchanged card puts the T-2 block back, with no model run", async () => {
+    const r = await answeredOnT2();
+    await poller(r.b, r.m.answer, { stateFile: r.stateFile }).tick();
+    const t = r.b.issues.get("t-1");
+    assert.strictEqual(r.m.prompts.length, 1);
+    assert.strictEqual(t.status, "blocked", JSON.stringify(r.b.writes.slice(r.since)));
+    assert.deepStrictEqual(t.blockedByIssueIds, ["t-2"]);
+    assert.ok(r.b.writes.slice(r.since).some((w) => w.runId === "r2" && w.body.comment));
+  });
+  for (const [row, what, make, status, waits] of [
+    ["R1", "another run of this seat moves T-1 to todo just after boardNow's card response", afterBoardNow, (x) => x.setStatus("t-1", "todo", BOT_SEAT, OTHER_RUN), "todo"],
+    ["R32", "the walkthrough: another run's todo lands after reply() reads the card", afterBoardNow, (x) => x.setStatus("t-1", "todo", BOT_SEAT, OTHER_RUN), "todo"],
+    ["R4", "a label is added just after boardNow's card response", afterBoardNow, addLabel("Customer waiting"), "in_progress"],
+    ["R5", "another run of this seat comments just after boardNow's card response", afterBoardNow, seatComment, "in_progress"],
+    ["R8", "another run of this seat relinks T-1 to T-3 after the wake's comments read", (b, f) => after(b, GET("/issues/t-1/comments"), f, 1),
+      (x) => x.relink("t-1", { ...BOT_SEAT, ...OTHER_RUN }, ["t-3"]), "in_progress", ["t-3"]],
+  ].map(([row, what, at, change, status, waits]) => [row, what, (b) => at(b, change), status, waits])) {
+    await check(`${row}: quiet re-wake, ${what}: the acknowledgement is a comment only, the change stands`, async () => {
+      const r = await answeredOnT2();
+      await poller(r.b, r.m.answer, { stateFile: r.stateFile, fetch: make(r.b) }).tick();
+      quietKept(r, row, { status, waits });
+    });
+  }
+  // R9: an answer that finished the ask; the quiet wake's checkout, then another run's todo.
+  const answeredDone = async () => {
+    const b = ordinary();
+    const stateFile = stateFileOf();
+    const m = model(b, ["Done."]);
+    await poller(b, m.answer, { stateFile }).tick();
+    assert.strictEqual(b.issues.get("t-1").status, "done", JSON.stringify(b.writes));
+    b.runs.set("t-1", run("r2"));
+    b.issues.get("t-1").status = "in_progress";   // the wake's checkout, unrecorded
+    return { b, stateFile, m, since: b.writes.length };
+  };
+  await check("R9 control: a quiet re-wake on an unchanged finished card closes it done again, with no model run", async () => {
+    const r = await answeredDone();
+    await poller(r.b, r.m.answer, { stateFile: r.stateFile }).tick();
+    assert.strictEqual(r.m.prompts.length, 1);
+    assert.strictEqual(r.b.issues.get("t-1").status, "done", JSON.stringify(r.b.writes.slice(r.since)));
+  });
+  await check("R9: quiet re-wake on a finished card, another run of this seat moves it to todo after the wake's comments read: done is not written over todo", async () => {
+    const r = await answeredDone();
+    const fetch = after(r.b, GET("/issues/t-1/comments"), (x) => x.setStatus("t-1", "todo", BOT_SEAT, OTHER_RUN), 1);
+    await poller(r.b, r.m.answer, { stateFile: r.stateFile, fetch }).tick();
+    const mine = r.b.writes.slice(r.since);
+    assert.strictEqual(r.m.prompts.length, 1, "the model ran again");
+    assert.strictEqual(r.b.issues.get("t-1").status, "todo", `done was written over todo: ${JSON.stringify(mine)}`);
+    assert.ok(!mine.some(ROUTES), `a stale routing write: ${JSON.stringify(mine)}`);
+    assert.ok(mine.some((w) => w.runId === "r2" && w.body.comment), `r2 did not complete on a comment: ${JSON.stringify(mine)}`);
+  });
+
+  // R2, R3, R6, R7: a saved answer whose builtOn has no record mark (or no
+  // runs) has nothing to place another run's write against: it never routes.
+  // Another run of this seat moves T-1 to todo, the restart's checkout shows
+  // in_progress again, and the saved answer goes out as a comment only.
+  const stripBuilt = (stateFile, keep) => {
+    const s = savedState(stateFile);
+    for (const k of Object.keys(s.builtOn ?? {})) s.builtOn[k] = Object.fromEntries(Object.entries(s.builtOn[k]).filter(([f]) => keep.includes(f)));
+    require("fs").writeFileSync(stateFile, JSON.stringify(s));
+  };
+  for (const [row, keep] of [["R2", ["snap", "own"]], ["R6", ["snap"]]]) {
+    await check(`${row}: a saved blocked-on-T-3 answer whose builtOn keeps only ${keep.join("+")}, another run's todo, a restart: nothing routed, T-2 stands`, async () => {
+      const b = onT2();
+      const { stateFile, prompts, answer } = await savedThenStopped(b, ON_T3);
+      stripBuilt(stateFile, keep);
+      b.setStatus("t-1", "todo", BOT_SEAT, OTHER_RUN);
+      wake(b, "r2");
+      await poller(b, answer, { stateFile }).tick();
+      assert.strictEqual(prompts.length, 1, `${row}: the model ran again`);
+      keptOnT2(b, row);
+    });
+  }
+  for (const [row, keep] of [["R3", ["snap", "own"]], ["R7", ["snap"]]]) {
+    await check(`${row}: a saved return whose builtOn keeps only ${keep.join("+")}, another run's todo, a restart: nothing handed back`, async () => {
+      const b = ordinary();
+      const { stateFile, prompts, answer } = await savedThenStopped(b, RETURNED);
+      stripBuilt(stateFile, keep);
+      b.setStatus("t-1", "todo", BOT_SEAT, OTHER_RUN);
+      wake(b, "r2");
+      const since = b.writes.length;
+      await poller(b, answer, { stateFile }).tick();
+      assert.strictEqual(prompts.length, 1, `${row}: the model ran again`);
+      assert.deepStrictEqual(handOffs(b), [], `${row}: handed back without provenance: ${JSON.stringify(b.writes)}`);
+      assert.ok(!b.writes.slice(since).some(ROUTES), `${row}: a routing write: ${JSON.stringify(b.writes.slice(since))}`);
+      assert.ok(b.writes.slice(since).some((w) => /Only the Product Owner/.test(w.body.comment ?? "")), `${row}: the answer was not said`);
+    });
+  }
+
+  // The validator itself: only a snapshot with its fields, its record mark and its runs authorizes routing.
+  await check("routableSnapshot: no mark, no runs, legacy or nothing never authorizes routing", async () => {
+    const { routableSnapshot } = require("../lib/paperclip");
+    assert.strictEqual(typeof routableSnapshot, "function", "routableSnapshot is not exported");
+    const snap = { status: "in_progress", assignees: [ME.id, null], labels: [], title: "", description: "", newest: null, ask: "" };
+    const mark = { at: "2026-01-01T00:00:00.000Z", seen: ["a1"] };
+    for (const [why, s] of [["nothing", undefined], ["null", null], ["empty", {}], ["legacy", { legacy: true }],
+      ["no mark", { snap, own: ["r1"] }], ["no runs", { snap, mark }], ["runs not a list", { snap, mark, own: "r1" }],
+      ["a bare time for a mark", { snap, mark: mark.at, own: ["r1"] }], ["no fields", { mark, own: ["r1"] }],
+      ["legacy with the rest", { legacy: true, snap, mark, own: ["r1"] }]]) {
+      assert.strictEqual(routableSnapshot(s), false, `${why} authorized routing`);
+    }
+    assert.strictEqual(routableSnapshot({ snap, mark, own: ["r1"] }), true, "a whole snapshot did not authorize routing");
+  });
+  // The guard: reply() takes the producing snapshot as its fourth argument at every call site.
+  await check("every reply() call site passes a producing snapshot", async () => {
+    const src = require("fs").readFileSync(require("path").join(__dirname, "../lib/paperclip.js"), "utf8");
+    const calls = [...src.matchAll(/\breply\(item,\s*[^,]+,\s*[^,]+,\s*([^,]+),/g)].map((m) => m[1].trim());
+    assert.ok(calls.length >= 6, `found ${calls.length} reply() calls`);
+    const bare = [...src.matchAll(/\breply\(/g)].length - [...src.matchAll(/async function reply\(/g)].length;
+    assert.strictEqual(calls.length, bare, `a reply() call not in the (item, run, key, snapshot, ...) form: ${calls}`);
+    assert.ok(calls.every((a) => /^(wakeSnap\(\)|producing\(.+\)|snapshot)$/.test(a)), `a call site passes no snapshot: ${calls}`);
+  });
+  // The same for the other routing helpers: acknowledge (7th), handOn (3rd), handOffVia (7th).
+  await check("every acknowledge(), handOn() and handOffVia() call site passes a producing snapshot", async () => {
+    const src = require("fs").readFileSync(require("path").join(__dirname, "../lib/paperclip.js"), "utf8");
+    const argsOf = (name) => [...src.matchAll(new RegExp(`(?<!function )\\b${name}\\(item,`, "g"))].map((m) => {
+      let depth = 0, i = m.index + name.length, arg = "", out = [];
+      for (; i < src.length; i++) {
+        const c = src[i];
+        if ("([{".includes(c)) { depth++; if (depth === 1) continue; }
+        if (")]}".includes(c)) { depth--; if (depth === 0) { out.push(arg.trim()); break; } }
+        if (c === "," && depth === 1) { out.push(arg.trim()); arg = ""; continue; }
+        arg += c;
+      }
+      return out;
+    });
+    const want = [["acknowledge", 6, /^wakeSnap\(\)$/], ["handOn", 2, /^was$/], ["handOffVia", 6, /^(from|Array\.isArray\(was\.own\)[\s\S]+)$/]];
+    for (const [name, at, form] of want) {
+      const calls = argsOf(name);
+      assert.ok(calls.length >= 1, `no ${name}() call found`);
+      assert.ok(calls.every((a) => form.test(a[at] ?? "")), `${name}() called without a producing snapshot: ${JSON.stringify(calls.map((a) => a[at]))}`);
+    }
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
