@@ -275,13 +275,13 @@ check("Codex events become the stream events the harness reads", () => {
     { type: "item.completed", item: { type: "mcp_tool_call", server: "db", tool: "query", arguments: { q: 1 } } },
     { type: "item.completed", item: { type: "agent_message", text: "Done." } },
     { type: "item.completed", item: { type: "agent_message", text: "More." } },
-    { type: "turn.completed", usage: { input_tokens: 5, output_tokens: 2 } },
+    { type: "turn.completed", usage: { input_tokens: 5, cached_input_tokens: 4, output_tokens: 2 } },
   ].flatMap(t);
   assert.deepStrictEqual(out[0], { type: "system", subtype: "init", session_id: "t-9" });
   const blocks = out.filter((e) => e.type === "assistant").map((e) => e.message.content[0]);
   assert.deepStrictEqual(blocks.map((b) => b.name || b.text), ["Checking.", "Bash", "Write", "Edit", "mcp__db__query", "Done.", "\n\nMore."],
     "a message after a tool starts clean; consecutive messages are separated");
-  assert.deepStrictEqual(out.at(-1), { type: "result", subtype: "success", is_error: false, total_input_tokens: 5, total_output_tokens: 2 });
+  assert.deepStrictEqual(out.at(-1), { type: "result", subtype: "success", is_error: false, total_input_tokens: 5, total_cached_input_tokens: 4, total_output_tokens: 2 });
   assert.strictEqual(cx.createCodexTranslator()({ type: "turn.failed", error: { message: "x" } })[0].is_error, true);
 });
 

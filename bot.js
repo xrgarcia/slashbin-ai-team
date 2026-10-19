@@ -2563,7 +2563,7 @@ function handleStreamEvent(event, reqLog, sendMessage, state) {
       // subtype tells a step-cap stop apart from a real crash — both exit non-zero
       state.resultSubtype = event.subtype;
       reqLog.info(
-        { subtype: event.subtype, isError: event.is_error, numTurns: event.num_turns, costUsd: event.cost_usd, durationMs: event.duration_ms, inputTokens: event.total_input_tokens, outputTokens: event.total_output_tokens },
+        { subtype: event.subtype, isError: event.is_error, numTurns: event.num_turns, costUsd: event.cost_usd, durationMs: event.duration_ms, inputTokens: event.total_input_tokens, cachedInputTokens: event.total_cached_input_tokens ?? event.usage?.cache_read_input_tokens, outputTokens: event.total_output_tokens },
         "Claude result summary"
       );
       break;
