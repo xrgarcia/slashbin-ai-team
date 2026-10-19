@@ -85,6 +85,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The answer now goes as a comment and the board's review keeps the status.
 - A held card's note is no longer repeated on each of Paperclip's re-wakes of
   an unchanged card.
+- A person's move of a card stays the decision when the bot blocks the card
+  after it. The bot's own write no longer reads as the newest decision over
+  someone else's; the stop it put on the card is still its own to lift.
+- The bot no longer works a card that changed after it read it. Before the
+  model runs, and before every hand-on, return, unlink or rewrite of a card's
+  waits, the card's status, holder, labels, title, description and newest
+  comment are compared with what the run was built on: a recovery block by
+  the board, a comment from the bot's own seat or the board, or an edit
+  during a wait-less look stops the act and leaves the card for its next
+  wake. An escalation whose labels change while it is worked is worked again
+  before it is handed on.
+- An escalation blocked on several tasks resumes only when every one it
+  named reads done, including one the board does not have and one that was
+  already done when it answered and reopened since, across restarts.
 
 ## [3.0.0] — 2026-10-19
 

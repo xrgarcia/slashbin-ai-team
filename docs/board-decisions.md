@@ -97,10 +97,13 @@ recorded, so a write that puts a stop back after the wake's unrecorded
 checkout is a restatement.
 
 **Which decision is in force.** The newest. This bot's own write never takes
-over a stop someone else chose that the bot may not move on from (`movable`):
-putting the card back to blocked after a checkout, closing over a hold, or
-trimming its waits leaves that stop the decision. Paperclip's settlement of a
-lost run is read the same way. A decision carries the status in force after
+over a decision someone else made: a person moving the card to todo is still
+the decision after the bot blocks it, and putting the card back to blocked
+after a checkout, closing over a hold, or trimming its waits leaves their stop
+the decision. Over a choice that is not a stop, the bot's own newest write is
+kept beside the decision (`own`), so a stop the bot put on the card is still
+its own to lift (`statusSetter`, `decidedStatus`). Paperclip's settlement of a
+lost run is read the way the bot's writes over a stop are. A decision carries the status in force after
 it; `decidedStatus` reads a card that a write which decided nothing put in
 `in_progress` or another stop as still in the decided stop.
 
@@ -243,19 +246,26 @@ and it covers the two acts that cost most when made on a stale card: running
 the model, and routing the card to someone else.
 
 - **Before the model runs**, the card is read again: status, holder, labels,
-  title, description, the newest ask, and the record since the wake's own
-  read. If any of it differs from the snapshot the run was built on, or the
-  card is cancelled, nothing runs and nothing is written. The state the
+  title, description, the newest comment (whoever wrote it: a person, this
+  bot's own seat, the board), and the record since the wake's own read. If
+  any of it differs from the snapshot the run was built on, or the card is
+  cancelled, nothing runs and nothing is written. The status expected is the
+  one read, or one this bot itself recorded since; a status Paperclip's
+  recovery wrote is a change. A bare restatement of the status is not. The state the
   attempt began is put back, and the run is left open for the next look, which
   decides from the card as it reads then (`cardNow`, `CardMoved`).
-- **Before every routing write** (a return, a hand-on, an unlink), the card is
-  read the same way. A change stops the write: the answer is posted as a
-  comment with `CARD_CHANGED`, or an escalation is worked again from the card
-  as it is. A routing write sends only the fields it changes (`holderWrite`):
+- **Before every routing write** (a return, a hand-on, an unlink, a rewrite of
+  what the card waits on), the card is read the same way. A change stops the
+  write: the answer is posted as a comment with `CARD_CHANGED`, or an
+  escalation is worked again from the card as it is. An escalation compares
+  against the card its answer was built on, not only the round's own reads,
+  so a label added while it was worked is never routed past. Comments the
+  attempt's own runs posted are its output, not a change. A routing write sends only the fields it changes (`holderWrite`):
   it clears the other kind of holder only when the card has one.
 - **A wait resumes** only when every task it waits on reads `done` on a fresh
   read. A task trimmed from the card, one that cannot be read, or one that
-  reopened keeps the wait (`linkedNow`, `allDone`).
+  reopened keeps the wait (`linkedNow`, `allDone`). An escalation keeps every
+  task its answer named, done or unknown when it answered, across restarts.
 - **An ask is deduplicated** only against that task's own latest answered ask,
   kept per task in the state file and never trimmed by other tasks' traffic
   (`lastAnswered`). A hand-in to the bot from another holder since that answer
