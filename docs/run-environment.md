@@ -122,8 +122,11 @@ Evaluated over the final environment, for each variable:
    settings, `MCP_CONFIG*`, and any `*PAPERCLIP*` name is **withheld** (the
    private Discord memory paths among them).
 6. A variable the **server channel** writes is **hidden** — an inherited one
-   of the same name included, whatever its value — unless it is an operating
-   basic, or a listed variable rule 7 keeps.
+   of the same name and another value included — unless it is an operating
+   basic, a listed variable rule 7 keeps, or the same name and the same value
+   as an inherited variable that would be **kept**. That last is a fact about
+   one name, not a search for copies: a different name holding the value is
+   never looked for.
 7. **`BOT_RUN_ENV` set, Codex `bypass` session or parity run**: a listed
    variable that is not an operating basic or a harness policy setting is
    **hidden** when its name is a credential's, **kept** when its whole value
@@ -237,7 +240,7 @@ names the board key a board task's seat key is taken from (run id `run-1`).
 | B11 | codex | bypass | parity | — | `DISCORD_TOKEN={D}` | `TOKEN={D}` | — | `TOKEN` | withheld | rule 2, `TOKEN=${DISCORD_TOKEN}` in the server env |
 | B12 | codex | bypass | parity | — | — | `DISCORD_TOKEN={D}` | — | `DISCORD_TOKEN` | withheld | rule 2, inline in the server env |
 | B13 | codex | bypass | parity | — | `OPS_RELAY={O}` | `DISCORD_TOKEN={O}` | — | `OPS_RELAY` | withheld | rule 2, a value the server env names as a Discord token |
-| B14 | codex | bypass | session | — | `DISCORD_TOKEN={D}` | `DISCORD_TOKEN={D}` | — | `DISCORD_TOKEN` | hidden | rule 6: the server writes it, whatever the inherited value (round 6 R1) |
+| B14 | codex | bypass | session | — | `DISCORD_TOKEN={D}` | `DISCORD_TOKEN={D}` | — | `DISCORD_TOKEN` | kept | rule 6: the same name and value as an inherited kept variable |
 | C1 | claude | bypass | session | — | `PAPERCLIP_API_KEY={P}` | — | — | `PAPERCLIP_API_KEY` | withheld | rule 4, Discord sessions included |
 | C2 | claude | bypass | session | — | `PAPERCLIP_API_KEY={P}; EM_PAPERCLIP_API_KEY={P}` | — | — | `EM_PAPERCLIP_API_KEY` | withheld | rule 4, the connector key under a second name |
 | C3 | claude | bypass | session | — | `PO_PAPERCLIP_API_KEY={Q}` | — | — | `PO_PAPERCLIP_API_KEY` | kept | another board's key is not this bot's connector |
@@ -247,7 +250,7 @@ names the board key a board task's seat key is taken from (run id `run-1`).
 | C7 | claude | bypass | board | — | `PO_PAPERCLIP_API_KEY={Q}; BOARD_AUTH=Bearer {Q}` | — | — | `BOARD_AUTH` | withheld | rule 3, a carrier on a narrow board |
 | C8 | codex | bypass | session | — | `BOT_SURFACES=discord; PAPERCLIP_URL=https://board.example.com; PAPERCLIP_EXTRA_BOARDS=[{"id":"acme","url":"https://acme.example.com","keyEnv":"ACME_BOARD_KEY"}]; ACME_BOARD_KEY={A}` | — | — | `ACME_BOARD_KEY` | withheld | round 2: boards off, keys still scrubbed |
 | C9 | codex | bypass | session | — | `BOT_SURFACES=discord; PAPERCLIP_EXTRA_BOARDS=[{"id":"two","url":"https://two.example.com","keyEnv":"BOARD_TWO"}]; BOARD_TWO={A}` | — | — | `BOARD_TWO` | withheld | a key variable with no credential name |
-| C10 | codex | bypass | session | — | `PAPERCLIP_API_KEY={P}` | `PAPERCLIP_API_KEY={P}` | — | `PAPERCLIP_API_KEY` | hidden | rule 6: the server that names it gets it |
+| C10 | codex | bypass | session | — | `PAPERCLIP_API_KEY={P}` | `PAPERCLIP_API_KEY={P}` | — | `PAPERCLIP_API_KEY` | hidden | rule 6: the inherited one is withheld (rule 4), so the server's is hidden |
 | C11 | codex | bypass | parity | — | `PAPERCLIP_API_KEY={P}` | — | `PAPERCLIP_API_KEY` | `PAPERCLIP_RUN_AGENT_KEY` | hidden | the seat key, for the escalate action only |
 | C12 | codex | bypass | parity | — | `PAPERCLIP_API_KEY={P}` | — | `PAPERCLIP_API_KEY` | `PAPERCLIP_API_KEY` | withheld | rule 4 |
 | C13 | codex | bypass | parity | — | `PAPERCLIP_API_KEY={P}` | — | `PAPERCLIP_API_KEY` | `PAPERCLIP_RUN_ID` | kept | a run id is not a credential |
@@ -310,7 +313,7 @@ names the board key a board task's seat key is taken from (run id `run-1`).
 | E6 | codex | bypass | session | — | — | `ROUTER_BEARER={X}` | — | `ROUTER_BEARER` | hidden | rule 6 under unset |
 | E7 | codex | bypass | session | — | `NOVA_BEARER={N}` | `ROUTER_BEARER={N}` | — | `ROUTER_BEARER` | hidden | rule 6 |
 | E8 | codex | bypass | session | — | `NOVA_BEARER={N}` | `ROUTER_BEARER={N}` | — | `NOVA_BEARER` | kept | unset: the shell already holds it, a server naming it changes nothing |
-| E9 | codex | bypass | session | — | `GH_TOKEN={G}` | `GH_TOKEN={G}` | — | `GH_TOKEN` | hidden | rule 6: the same name and value as an inherited variable is still the server's (round 6 R1) |
+| E9 | codex | bypass | session | — | `GH_TOKEN={G}` | `GH_TOKEN={G}` | — | `GH_TOKEN` | kept | rule 6: the same name and value as an inherited kept variable |
 | E10 | codex | bypass | session | — | `GH_TOKEN={G}` | `GITHUB_TOKEN={G}` | — | `GITHUB_TOKEN` | hidden | rule 6 |
 | E11 | codex | bypass | session | — | — | `ROUTER_URL=https://router.example` | — | `ROUTER_URL` | hidden | rule 6: a server-only value |
 | E12 | codex | bypass | parity | `ROUTER_BEARER` | — | `ROUTER_BEARER={X}` | — | `ROUTER_BEARER` | hidden | round 4 S1, parity |
@@ -349,6 +352,7 @@ names the board key a board task's seat key is taken from (run id `run-1`).
 | G7 | codex | bypass | session | `GH_CONFIG_DIR` | `GH_CONFIG_DIR=/srv/gh` | `@gh=--config=${GH_CONFIG_DIR}` | — | `GH_CONFIG_DIR` | kept | rule 11: a listed path is kept, so it may be expanded |
 | G8 | codex | bypass | session | `NOVA_URL` | `NOVA_BEARER={N}; NOVA_URL=/srv/nova` | `@router=--bearer=${NOVA_BEARER:-none}` | — | `NOVA_BEARER` | refused | rule 11: a default does not change what a set variable expands to |
 | G9 | codex | bypass | session | `NOVA_URL` | `NOVA_URL=/srv/nova` | `@router=--port=${ROUTER_PORT:-8080}` | — | `ROUTER_PORT` | withheld | rule 11: an unset variable expands to its literal default |
-| G10 | codex | bypass | session | — | `GH_TOKEN={G}` | `GH_TOKEN={G}; @gh=--token=${GH_TOKEN}` | — | `GH_TOKEN` | refused | rule 11: a variable the server channel hides |
+| G10 | codex | bypass | session | — | `GH_TOKEN={G}` | `GH_TOKEN={X}; @gh=--token=${GH_TOKEN}` | — | `GH_TOKEN` | refused | rules 6, 11: the server channel's own value is hidden, so it may not be expanded |
 | G11 | codex | bypass | parity | `ROUTER_URL` | `ROUTER_URL=https://router.example` | `@router=--url=${ROUTER_URL}` | — | `ROUTER_URL` | refused | rules 7, 11: a listed URL is hidden, so it may not be expanded |
 | G12 | codex | bypass | session | — | `EM_GITHUB_TOKEN={G}` | `@gh=--token=${EM_GITHUB_TOKEN}` | — | `EM_GITHUB_TOKEN` | kept | rule 11 under unset: the commands read it already (*Not covered*) |
+| G13 | codex | bypass | session | — | `GH_TOKEN={G}` | `GH_TOKEN={G}; @gh=--token=${GH_TOKEN}` | — | `GH_TOKEN` | kept | rules 6, 11: the same name and value as an inherited kept variable is kept, so it may be expanded |

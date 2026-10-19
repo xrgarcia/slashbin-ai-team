@@ -795,8 +795,13 @@ check("a listed variable is decided by its name and its value's shape, never by 
   }
   // Claude cannot hide: a listed variable is kept.
   assert.deepStrictEqual(build({ runtime: "claude", spec: "NOVA_URL", env: { NOVA_URL: "https://r/" } }).hidden, []);
-  // The server channel's copy is the server's, whatever the inherited one held (round 6 R1).
-  assert.ok(build({ runtime: "codex", env: { GH_TOKEN: "gh-token-value" }, mcpEnv: { GH_TOKEN: "gh-token-value" } }).shellExclude.includes("GH_TOKEN"));
+  // The server channel's variable under an inherited one's name: kept only when
+  // the value is the same and the inherited one would be kept (rule 6).
+  const same = (o) => build({ runtime: "codex", env: { GH_TOKEN: "gh-token-value" }, mcpEnv: { GH_TOKEN: "gh-token-value" }, ...o }).shellExclude.includes("GH_TOKEN");
+  assert.ok(!same({}), "unset: the same name and value stays kept");
+  assert.ok(same({ mcpEnv: { GH_TOKEN: "other-token-value" } }), "another value is the server's");
+  assert.ok(same({ spec: "GH_TOKEN" }), "listed, a credential name is hidden either way");
+  assert.ok(build({ runtime: "codex", spec: "NOVA_DIR", env: { NOVA_DIR: "/srv/n" }, mcpEnv: { NOVA_DIR: "/srv/n" } }).hidden.length === 0, "a listed path the server repeats");
   // The basics never are: a credential naming a folder on PATH must not take PATH from every command.
   const q = underList({ PATH: "/usr/bin:/opt/keys/bin", SIGNING_KEY_DIR: "/opt/keys/bin" }, "SIGNING_KEY_DIR");
   assert.deepStrictEqual(q.shellExclude, ["SIGNING_KEY_DIR"]);
