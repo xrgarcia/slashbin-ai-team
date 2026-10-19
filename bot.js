@@ -235,6 +235,14 @@ function botSettings() {
   return !SESSION_SETTINGS ? null
     : JSON.parse(SESSION_SETTINGS.startsWith("{") ? SESSION_SETTINGS : readFileSync(resolve(CLAUDE_CWD, SESSION_SETTINGS), "utf8"));
 }
+// The bot's settings for the run-environment check: "unreadable" when they cannot be read.
+function readableSettings() {
+  try {
+    return botSettings();
+  } catch {
+    return "unreadable";
+  }
+}
 function settingsArgs({ board = false, tmpDir = null } = {}) {
   if (!board) return SESSION_SETTINGS ? ["--settings", SESSION_SETTINGS] : [];
   // A board run sandboxes any shell it is allowed to the working directory, on
@@ -266,7 +274,11 @@ function runEnvFor(run, { channelId = "", runOutbox = OUTBOX_DIR, tmpDir = null,
     // calls it, never a run (SLA-1493).
     connectorKeys: [...boardKeyEnvs(process.env), ...escalateBearer()],
     mcpEnv: CODEX_MCP?.env ?? null,
-    mcpArgv: CODEX_MCP ? Object.fromEntries(Object.entries(CODEX_MCP.servers).map(([n, s]) => [n, [s.command, ...(s.args || []), s.cwd || ""]])) : null,
+    // Each server's `${VAR}`s expanded into its command line (rule 11).
+    mcpRefs: CODEX_MCP?.refs ?? null,
+    // A board task's run is refused on a settings env block (rule 14); one
+    // that cannot be read cannot be shown to have none.
+    settings: run === "session" ? null : readableSettings(),
     seat,
     tmpDir,
     // Publish the RESOLVED paths. This is what stops harness-owned skills from
@@ -327,11 +339,12 @@ function mcpArgs() {
  * the repo's .mcp.json, read once at startup. Codex runs local (stdio) servers
  * only, so any other kind is skipped and named in the log; their env values go
  * to the child process, never onto the command line (a server's command, args
- * and cwd do go there, so runEnvFor refuses a credential in them). Without MCP_CONFIG_STRICT
+ * and cwd do go there, so runEnvFor refuses a `${VAR}` in them that the run's
+ * commands cannot read — `refs` names them). Without MCP_CONFIG_STRICT
  * the operator's own Codex config adds its servers, as the host's do on Claude.
  */
 function codexMcp() {
-  const servers = {}, env = {}, skipped = [];
+  const servers = {}, env = {}, skipped = [], refs = {};
   const repoConfig = resolve(CLAUDE_CWD, ".mcp.json");
   const sources = [process.env.MCP_CONFIG || (existsSync(repoConfig) ? repoConfig : ""), process.env.MCP_CONFIG_EXTRA || ""];
   for (const source of sources.filter(Boolean)) {
@@ -347,9 +360,10 @@ function codexMcp() {
     const got = codexRuntime.mcpServers(config, process.env, env);
     Object.assign(servers, got.servers);
     Object.assign(env, got.env);
+    Object.assign(refs, got.refs);
     skipped.push(...got.skipped);
   }
-  return { servers, env, skipped, strict: process.env.MCP_CONFIG_STRICT === "true" };
+  return { servers, env, skipped, refs, strict: process.env.MCP_CONFIG_STRICT === "true" };
 }
 
 // How often the "typing…" indicator is refreshed while a request runs.
@@ -2272,6 +2286,12 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
         { argBytes: c.bytes, limit: c.limit, startsWith: c.preview },
         "An argument to Claude exceeded the OS limit and was truncated — this run saw an incomplete prompt. Lower CONTEXT_MAX_BYTES or SUMMARY_LOOKBACK_HOURS."
       );
+    }
+    // A cut shell policy is one Codex reads wrong or not at all, and then the
+    // run's commands see what it hides (rule 15): refused, never spawned.
+    if (CODEX && codexRuntime.policyClamped(args, clamped)) {
+      if (boardTmp) rmSync(boardTmp, { recursive: true, force: true });
+      throw new Error("Run environment refused — the Codex shell exclusion policy is longer than one argument may be, and a cut list would let the run's commands read what it hides: list fewer variables in BOT_RUN_ENV or the MCP servers' env");
     }
 
     const startTime = Date.now();

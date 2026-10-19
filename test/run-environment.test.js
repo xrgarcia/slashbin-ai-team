@@ -80,16 +80,23 @@ function shellPolicy(args) {
 function outcome(row) {
   const env = pairs(row.env);
   if (!unset(row.spec)) env.BOT_RUN_ENV = row.spec;
-  // An `@server` entry in the MCP column is that server's command line (rule 11).
+  // An `@server` entry in the MCP column is that server's args as written; the
+  // real reader expands its ${VAR}s against the process env, as the bot does
+  // at startup, and reports which it expanded (rule 11).
   const mcp = pairs(row.mcp);
-  const mcpEnv = Object.fromEntries(Object.entries(mcp).filter(([k]) => !k.startsWith("@")));
-  const mcpArgv = Object.fromEntries(Object.entries(mcp).filter(([k]) => k.startsWith("@")).map(([k, v]) => [k.slice(1), ["node", v]]));
+  const config = { mcpServers: {
+    env: { command: "node", env: Object.fromEntries(Object.entries(mcp).filter(([k]) => !k.startsWith("@"))) },
+    ...Object.fromEntries(Object.entries(mcp).filter(([k]) => k.startsWith("@")).map(([k, v]) => [k.slice(1), { command: "node", args: v.split(" ") }])),
+  } };
+  const read = codex.mcpServers(config, env);
   const secrets = [...new Set(Object.values({ ...env, ...mcp }).flatMap((v) => v.match(/s3cret-[^ ]*-value/g) || []))];
   const seat = unset(row.seat) ? null : { value: env[row.seat], runId: "run-1" };
+  // BOT_SETTINGS as runEnvFor reads it for a board task's run (rule 14).
+  const settings = row.run !== "session" && env.BOT_SETTINGS?.startsWith("{") ? JSON.parse(env.BOT_SETTINGS) : null;
   const built = buildRunEnv({
     env, spec: env.BOT_RUN_ENV, runtime: row.runtime, mode: row.mode, run: row.run,
-    connectorKeys: boardKeyEnvs(env), published: PUBLISHED, mcpEnv: unset(row.mcp) ? null : mcpEnv, mcpArgv, seat,
-    tmpDir: row.run === "board" ? "/tmp/bot-board-1" : null,
+    connectorKeys: boardKeyEnvs(env), published: PUBLISHED, mcpEnv: unset(row.mcp) ? null : read.env, mcpRefs: read.refs, seat,
+    tmpDir: row.run === "board" ? "/tmp/bot-board-1" : null, settings,
   });
   if (built.problems.length) {
     assert.strictEqual(built.env, null, "a refused environment is never handed to a run");
@@ -141,9 +148,29 @@ check("runEnvFor is the only caller of buildRunEnv, and startup checks every run
   assert.ok(/for \(const run of \["session", \.\.\.\(PAPERCLIP_BOARDS\.length/.test(BOT));
   assert.ok(/Run environment refused \(\$\{run\} run\)/.test(BOT));
 });
-check("the builder sees every Codex server's command line, as Codex is handed it (rule 11)", () => {
-  assert.ok(/mcpArgv: CODEX_MCP \? Object\.fromEntries\(Object\.entries\(CODEX_MCP\.servers\)\.map\(\(\[n, s\]\) => \[n, \[s\.command, \.\.\.\(s\.args \|\| \[\]\), s\.cwd \|\| ""\]\]\)\) : null,/.test(BOT));
+check("the builder sees what every Codex server's command line expands, from the servers Codex is handed (rule 11)", () => {
+  assert.ok(/mcpRefs: CODEX_MCP\?\.refs \?\? null,/.test(BOT));
+  assert.ok(/Object\.assign\(refs, got\.refs\);/.test(BOT), "every config's references, as its servers are");
   assert.ok(/mcp: CODEX_MCP\?\.servers,/.test(BOT), "the servers checked are the servers passed");
+});
+check("a board task's run sees the bot's settings (rule 14)", () => {
+  assert.ok(/settings: run === "session" \? null : readableSettings\(\),/.test(BOT));
+});
+check("a run whose shell policy clamping would cut is refused before spawn (rule 15)", () => {
+  const clampAt = spawnBody.indexOf("clampArgs(args)");
+  const refuse = spawnBody.indexOf("codexRuntime.policyClamped(args, clamped)");
+  assert.ok(clampAt > 0 && refuse > clampAt, "checked after clamping");
+  assert.ok(refuse < spawnBody.indexOf("attempts.run(") && refuse < spawnBody.indexOf("spawn(RUNTIME.bin"), "checked before any spawn");
+  assert.match(spawnBody.slice(refuse, refuse + 400), /throw new Error\("Run environment refused/);
+  // The policy, long enough to be cut, is what policyClamped finds.
+  const { clampArgs } = require("../lib/argv-budget");
+  const many = Array.from({ length: 9000 }, (_, i) => `SOME_LONG_VARIABLE_NAME_${i}`);
+  const args = codex.codexArgs({ kind: "session", mode: "bypass", shellExclude: many, prompt: "p" });
+  const { clamped } = clampArgs(args);
+  assert.ok(codex.policyClamped(args, clamped));
+  const short = codex.codexArgs({ kind: "session", mode: "bypass", shellExclude: ["A_TOKEN"], prompt: "x".repeat(200000) });
+  const cut = clampArgs(short).clamped;
+  assert.ok(cut.length > 0 && !codex.policyClamped(short, cut), "a cut prompt is not a cut policy");
 });
 
 console.log(`\n${passes} passed, ${failures} failed`);

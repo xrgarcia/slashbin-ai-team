@@ -248,6 +248,16 @@ check("MCP: local servers carry over with their keys in the child env only; othe
   assert.match(readFileSync(join(__dirname, "..", "bot.js"), "utf8"), /codexRuntime\.mcpServers\(config, process\.env, env\)/, "codexMcp must pass the env the earlier configs set");
 });
 
+check("MCP: the reader names every set variable a server's command line expands, never one only its env uses", () => {
+  const got = cx.mcpServers({ mcpServers: {
+    db: { command: "${NODE_BIN}", args: ["${ROOT_DIR}/db.js", "--port=${PORT:-8080}", "--x=${EMPTY_VAR}"], cwd: "${WORK_DIR}", env: { DB_URL: "${SECRET_URL}" } },
+    plain: { command: "node", args: ["s.js"] },
+  } }, { NODE_BIN: "/usr/bin/node", ROOT_DIR: "/srv", WORK_DIR: "/srv/w", SECRET_URL: "postgres://k", EMPTY_VAR: "" });
+  assert.deepStrictEqual(got.refs.db.slice().sort(), ["NODE_BIN", "ROOT_DIR", "WORK_DIR"]);
+  assert.ok(!got.refs.plain || got.refs.plain.length === 0);
+  assert.deepStrictEqual(got.servers.db.args, ["/srv/db.js", "--port=8080", "--x="]);
+});
+
 check("Codex events become the stream events the harness reads", () => {
   const t = cx.createCodexTranslator();
   const out = [
