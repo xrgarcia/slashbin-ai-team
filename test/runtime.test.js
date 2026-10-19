@@ -51,6 +51,13 @@ check("on Claude, CLAUDE_MODEL still names the model, and BOT_MODEL wins over it
   assert.strictEqual(resolveRuntime({ CLAUDE_MODEL: "m-1" }).summaryModel, "m-1");
 });
 
+check("BOT_BOARD_MODEL and BOT_JOB_MODEL name their own runs, and default to the bot's model", () => {
+  const rt = resolveRuntime({ CLAUDE_MODEL: "m-1", BOT_BOARD_MODEL: "b-1", BOT_JOB_MODEL: "j-1" });
+  assert.deepStrictEqual([rt.model, rt.boardModel, rt.jobModel], ["m-1", "b-1", "j-1"]);
+  const plain = resolveRuntime({ CLAUDE_MODEL: "m-1" });
+  assert.deepStrictEqual([plain.boardModel, plain.jobModel], ["m-1", "m-1"]);
+});
+
 check("BOT_RUNTIME=codex runs CODEX_BIN (or codex) with BOT_MODEL", () => {
   const rt = resolveRuntime({ BOT_RUNTIME: "codex", BOT_MODEL: "gpt-x", CODEX_BIN: "/opt/codex" });
   assert.deepStrictEqual([rt.name, rt.source, rt.bin, rt.model, rt.problems], ["codex", "BOT_RUNTIME", "/opt/codex", "gpt-x", []]);
@@ -248,6 +255,16 @@ check("MCP: local servers carry over with their keys in the child env only; othe
   assert.match(readFileSync(join(__dirname, "..", "bot.js"), "utf8"), /codexRuntime\.mcpServers\(config, process\.env, env\)/, "codexMcp must pass the env the earlier configs set");
 });
 
+check("MCP: the reader names every set variable a server's command line expands, never one only its env uses", () => {
+  const got = cx.mcpServers({ mcpServers: {
+    db: { command: "${NODE_BIN}", args: ["${ROOT_DIR}/db.js", "--port=${PORT:-8080}", "--x=${EMPTY_VAR}"], cwd: "${WORK_DIR}", env: { DB_URL: "${SECRET_URL}" } },
+    plain: { command: "node", args: ["s.js"] },
+  } }, { NODE_BIN: "/usr/bin/node", ROOT_DIR: "/srv", WORK_DIR: "/srv/w", SECRET_URL: "postgres://k", EMPTY_VAR: "" });
+  assert.deepStrictEqual(got.refs.db.slice().sort(), ["NODE_BIN", "ROOT_DIR", "WORK_DIR"]);
+  assert.ok(!got.refs.plain || got.refs.plain.length === 0);
+  assert.deepStrictEqual(got.servers.db.args, ["/srv/db.js", "--port=8080", "--x="]);
+});
+
 check("Codex events become the stream events the harness reads", () => {
   const t = cx.createCodexTranslator();
   const out = [
@@ -258,13 +275,13 @@ check("Codex events become the stream events the harness reads", () => {
     { type: "item.completed", item: { type: "mcp_tool_call", server: "db", tool: "query", arguments: { q: 1 } } },
     { type: "item.completed", item: { type: "agent_message", text: "Done." } },
     { type: "item.completed", item: { type: "agent_message", text: "More." } },
-    { type: "turn.completed", usage: { input_tokens: 5, output_tokens: 2 } },
+    { type: "turn.completed", usage: { input_tokens: 5, cached_input_tokens: 4, output_tokens: 2 } },
   ].flatMap(t);
   assert.deepStrictEqual(out[0], { type: "system", subtype: "init", session_id: "t-9" });
   const blocks = out.filter((e) => e.type === "assistant").map((e) => e.message.content[0]);
   assert.deepStrictEqual(blocks.map((b) => b.name || b.text), ["Checking.", "Bash", "Write", "Edit", "mcp__db__query", "Done.", "\n\nMore."],
     "a message after a tool starts clean; consecutive messages are separated");
-  assert.deepStrictEqual(out.at(-1), { type: "result", subtype: "success", is_error: false, total_input_tokens: 5, total_output_tokens: 2 });
+  assert.deepStrictEqual(out.at(-1), { type: "result", subtype: "success", is_error: false, total_input_tokens: 5, total_cached_input_tokens: 4, total_output_tokens: 2 });
   assert.strictEqual(cx.createCodexTranslator()({ type: "turn.failed", error: { message: "x" } })[0].is_error, true);
 });
 
@@ -281,7 +298,7 @@ check("Claude's command line is the one it always was", () => {
       ...skillPackArgs(),
       "--verbose",
       ...(CLAUDE_MAX_TURNS ? ["--max-turns", String(CLAUDE_MAX_TURNS)] : []),
-      ...(RUNTIME.model ? ["--model", RUNTIME.model] : []),
+      ...(runModel ? ["--model", runModel] : []),
       ...mcpArgs(),
       ...settingsArgs({ board: narrowBoard, tmpDir: boardTmp }),
       "--append-system-prompt", systemPrompt,

@@ -8,7 +8,7 @@
  * permission system alone would have let through. Runs against a scratch
  * checkout and a local bare remote; no network.
  */
-const { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync, unlinkSync } = require("fs");
+const { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync, unlinkSync, symlinkSync } = require("fs");
 const { tmpdir } = require("os");
 const { join } = require("path");
 const { spawnSync, execFileSync } = require("child_process");
@@ -173,13 +173,91 @@ check("the repo is CLAUDE_CWD, not the current directory", () => {
   rmSync(f.dir, { recursive: true, force: true }); rmSync(other.dir, { recursive: true, force: true });
 });
 
-check("unpushed commits in the checkout block landing, so they are not published", () => {
+/** The fixture with a person's unpushed commit to RULES.md in the checkout. */
+function aheadFixture() {
   const f = fixture();
-  const before = remoteHead(f);
   writeFileSync(join(f.repo, "RULES.md"), "local work\n");
   g(f.repo, "commit", "--quiet", "-am", "a person's local commit");
+  return { ...f, local: g(f.repo, "rev-parse", "HEAD") };
+}
+/** Push a commit to origin from a second clone. */
+function pushElsewhere(f, file, body) {
+  const peer = join(f.dir, `peer-${Math.random().toString(36).slice(2)}`);
+  g(f.dir, "clone", "--quiet", f.origin, peer);
+  writeFileSync(join(peer, file), body);
+  g(peer, "add", file); g(peer, "commit", "--quiet", "-m", `elsewhere: ${file}`); g(peer, "push", "--quiet");
+}
+
+check("an unpushed commit in the checkout is not published, and the named file still lands", () => {
+  // SLA-1497: a person's unpushed doc commit in the PO checkout refused the
+  // daily roadmap publish, though the commit is built from the upstream tip.
+  const f = aheadFixture();
+  const before = remoteHead(f);
   writeFileSync(join(f.repo, "notes", "company.md"), "v2\n");
-  refused(land(f.repo, ["-m", "x", "notes/company.md"]), /1 commit\(s\) not on origin\/main/);
+  const r = land(f.repo, ["-m", "x", "notes/company.md"]);
+  assert.strictEqual(r.code, 0, r.err);
+  assert.match(r.err, /1 commit\(s\) not on origin\/main\. They were not published.*must rebase/);
+  assert.strictEqual(g(f.repo, "rev-parse", `${remoteHead(f)}~1`), before, "the landed commit is not on the old upstream tip");
+  assert.strictEqual(g(f.repo, "diff", "--name-only", before, remoteHead(f)), "notes/company.md");
+  assert.throws(() => g(f.repo, "merge-base", "--is-ancestor", f.local, remoteHead(f)), "the local commit was published");
+  assert.strictEqual(g(f.repo, "rev-parse", "HEAD"), f.local, "HEAD moved off the local commit");
+  rmSync(f.dir, { recursive: true, force: true });
+});
+
+check("beside an unpushed commit, it lands again the next day over its own earlier landing", () => {
+  const f = aheadFixture();
+  writeFileSync(join(f.repo, "notes", "company.md"), "day 1\n");
+  assert.strictEqual(land(f.repo, ["-m", "day 1", "notes/company.md"]).code, 0);
+  pushElsewhere(f, "notes/other.md", "someone's push\n");
+  writeFileSync(join(f.repo, "notes", "company.md"), "day 2\n");
+  const r = land(f.repo, ["-m", "day 2", "notes/company.md"]);
+  assert.strictEqual(r.code, 0, r.err);
+  assert.strictEqual(g(f.repo, "show", `${remoteHead(f)}:notes/company.md`), "day 2");
+  assert.strictEqual(g(f.repo, "show", `${remoteHead(f)}:notes/other.md`), "someone's push");
+  assert.strictEqual(g(f.repo, "show", `${remoteHead(f)}:RULES.md`), "rules");
+  assert.strictEqual(g(f.repo, "rev-parse", "HEAD"), f.local);
+  rmSync(f.dir, { recursive: true, force: true });
+});
+
+check("beside an unpushed commit, a path that commit changed is refused", () => {
+  const f = fixture();
+  writeFileSync(join(f.repo, "notes", "company.md"), "unpublished line\n");
+  g(f.repo, "commit", "--quiet", "-am", "a person's local commit");
+  const before = remoteHead(f);
+  writeFileSync(join(f.repo, "notes", "company.md"), "unpublished line\nbot line\n");
+  refused(land(f.repo, ["-m", "x", "notes/company.md"]), /changed by a commit in this checkout that is not on origin\/main/);
+  assert.strictEqual(remoteHead(f), before);
+  rmSync(f.dir, { recursive: true, force: true });
+});
+
+check("beside an unpushed commit, a path someone else pushed meanwhile is refused, not overwritten", () => {
+  const f = aheadFixture();
+  pushElsewhere(f, "notes/company.md", "pushed elsewhere\n");
+  const before = remoteHead(f);
+  writeFileSync(join(f.repo, "notes", "company.md"), "v2\n");
+  refused(land(f.repo, ["-m", "x", "notes/company.md"]), /changed notes\/company\.md since .*rebased/);
+  assert.strictEqual(remoteHead(f), before);
+  rmSync(f.dir, { recursive: true, force: true });
+});
+
+check("beside an unpushed commit, someone's push over its own earlier landing is refused", () => {
+  const f = aheadFixture();
+  writeFileSync(join(f.repo, "notes", "company.md"), "day 1\n");
+  assert.strictEqual(land(f.repo, ["-m", "day 1", "notes/company.md"]).code, 0);
+  pushElsewhere(f, "notes/company.md", "a person's correction\n");
+  const before = remoteHead(f);
+  writeFileSync(join(f.repo, "notes", "company.md"), "day 2\n");
+  refused(land(f.repo, ["-m", "day 2", "notes/company.md"]), /changed notes\/company\.md since/);
+  assert.strictEqual(remoteHead(f), before);
+  rmSync(f.dir, { recursive: true, force: true });
+});
+
+check("beside an unpushed commit, a path already matching the upstream has nothing to land", () => {
+  const f = aheadFixture();
+  writeFileSync(join(f.repo, "notes", "company.md"), "day 1\n");
+  assert.strictEqual(land(f.repo, ["-m", "day 1", "notes/company.md"]).code, 0);
+  const before = remoteHead(f);
+  refused(land(f.repo, ["-m", "again", "notes/company.md"]), /already match origin\/main/);
   assert.strictEqual(remoteHead(f), before);
   rmSync(f.dir, { recursive: true, force: true });
 });
@@ -261,6 +339,21 @@ check("no message, no path, an unchanged path and an unknown option are refused"
   refused(land(f.repo, ["-m", "x"]), /name at least one file/);
   refused(land(f.repo, ["-m", "x", "skills/guarded/../new.md"]), /no change to land/);
   refused(land(f.repo, ["-m", "x", "--force", "notes/company.md"]), /unknown option --force/);
+  rmSync(f.dir, { recursive: true, force: true });
+});
+
+check("a path behind a symlinked parent directory is refused, and the outside file is not published", () => {
+  const f = fixture();
+  const outside = join(f.dir, "outside");
+  mkdirSync(outside);
+  writeFileSync(join(outside, "company.md"), "OUTSIDE-SECRET\n");
+  rmSync(join(f.repo, "notes"), { recursive: true });
+  symlinkSync(outside, join(f.repo, "notes"));
+  const before = remoteHead(f);
+  const r = land(f.repo, ["-m", "x", "notes/company.md"]);
+  refused(r, /behind a symlinked directory \(notes\)/);
+  assert.ok(!/OUTSIDE-SECRET/.test(r.out + r.err), "the outside content was echoed");
+  assert.strictEqual(remoteHead(f), before, "something was published");
   rmSync(f.dir, { recursive: true, force: true });
 });
 

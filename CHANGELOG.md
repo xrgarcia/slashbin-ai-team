@@ -1,5 +1,26 @@
 # Changelog
 
+[README](README.md) · [All documentation](README.md#documentation-table-of-contents)
+
+## Contents
+
+- [[Unreleased]](#unreleased)
+- [[3.0.0] — 2026-10-19](#300--2026-10-19)
+- [[2.9.0] — 2026-10-14](#290--2026-10-14)
+- [[2.8.0] — 2026-10-09](#280--2026-10-09)
+- [[2.7.0] — 2026-10-08](#270--2026-10-08)
+- [[2.6.0] — 2026-10-02](#260--2026-10-02)
+- [[2.5.1] — 2026-08-31](#251--2026-08-31)
+- [[2.5.0] — 2026-08-30](#250--2026-08-30)
+- [[2.4.0] — 2026-08-18](#240--2026-08-18)
+- [[2.3.0] — 2026-08-18](#230--2026-08-18)
+- [[2.2.1] — 2026-08-18](#221--2026-08-18)
+- [[2.2.0] — 2026-08-17](#220--2026-08-17)
+- [[2.1.1] — 2026-08-12](#211--2026-08-12)
+- [[2.1.0] — 2026-08-12](#210--2026-08-12)
+- [[2.0.0] — 2026-08-09](#200--2026-08-09)
+- [[1.1.1] — 2026-05-20](#111--2026-05-20)
+
 All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -8,6 +29,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+- **A hold that waits on a person ends with that person.** `PAPERCLIP-OUTCOME:
+  blocked on <Name>` hands the task to the named board user, still blocked, in
+  the run's own write, as its assignee; the bot stays the unblock owner, since
+  the board refuses an agent naming anyone else, and the unblock note names them. A name the board does
+  not have keeps the task with the bot, blocked, and the comment says so.
+- **Paperclip escalations are worked, and can be handed up a chain.** A blocked
+  card assigned to the bot that carries one of `PAPERCLIP_ESCALATION_LABELS`
+  (default `Needs EM ruling`) is worked instead of refused, and stays blocked:
+  the wake's checkout is put back, and the run is told it is an escalation and
+  what is its to decide (`PAPERCLIP_ESCALATION_AUTHORITY`). It resolves it, or
+  ends `PAPERCLIP-OUTCOME: escalate` and the card is reassigned, inside its
+  run, to `PAPERCLIP_ESCALATE_TO` (`agent:<seat>` or `user:<id>|Name`); a
+  person is also pinged once in `PAPERCLIP_ESCALATION_CHANNEL` with
+  `PAPERCLIP_ESCALATION_MENTION`. Each setting has a per-board key in
+  `PAPERCLIP_EXTRA_BOARDS`. An escalation runs once per hand-off or comment;
+  a re-wake on an unchanged card is left blocked and quiet.
+- **A resolved escalation unwinds back down its chain, still blocked.** The
+  chain is read from the card's assignment records since it last went
+  blocked. A bot that resolves hands the card back, inside its run, to whoever
+  handed it up — or to `PAPERCLIP_ESCALATION_RETURN_TO` (per board,
+  `escalationReturnTo`), for the bottom bot that returns it to the seat that
+  first raised it. A person resolves by commenting and reassigning down; the
+  bot is told the card came back with a resolution. `PAPERCLIP-OUTCOME:
+  blocked` keeps a card the bot can neither resolve nor escalate.
+
+### Changed
+
+- **A re-wake note never buries a held answer.** The note on an unchanged ask
+  now repeats the answer's first line and who the task waits on, in place of
+  "This was answered above. Add a comment with anything new". Earlier notes are
+  no longer deleted: the board lists a deleted comment as a blank one, which
+  read as the bot posting an empty reply. A blank answer is posted as the
+  fallback reply, never empty.
+- **Run environment.** `BOT_RUN_ENV` takes exact names only. A selected
+  variable is hidden from Codex commands unless it has a non-credential name
+  and its whole value is one absolute path. MCP command lines may expand only
+  variables the run can read. Short withheld credentials, a `BOT_SETTINGS` env
+  block on a board-running bot, and a cut shell policy now refuse startup.
+- **Board decisions are read structurally.** A status, holder or waits change,
+  by its credited writer, decides who holds a card, so no comment text does,
+  and an interrupted escalation is not resumed over someone's newer decision.
+- **The Paperclip poller re-reads the card before it acts.** It reads the card
+  again before running the model and before every return, hand-on or unlink,
+  resumes a wait only when every linked task reads done on a fresh read, and
+  treats a hand-back as a new ask.
+
+### Fixed
+
+- **A dependency that reopens just before a resume runs keeps the wait.** Every run that resumes or goes on because its dependencies finished (a resumed wait, an escalation's resume, going on from a block on tasks already done, and an interrupted going-on run again) reads each dependency afresh immediately before the model is invoked (`depsGate`). One not done, unknown or unreadable, and nothing runs: the card's status, links and unblock step stay as they were, and the run ends as an unfinished-dependency recheck does. The prompt's "now done" note is made from that same read. The resume's close or hand-off checks the dependencies again, and when one is open it puts the card back to blocked on that dependency instead, so the ask finishes once it is done again.
+- **No routing past a change made while the answer was worked.** Every routing write (blocked, return, transfer, review, a rewrite of what the card waits on, an escalation's hand-on) now compares a fresh read with the card the answer was built on, including after a restart; a changed card gets the answer as a comment only, and a saved answer with no record of its card never routes.
+- **A note or a done close no longer routes from a card it read itself.** Every routing write, a quiet re-wake's note included, is checked against the snapshot the answer was produced from (the wake's own read for a note, the saved card for an answer); a saved card missing its record mark or its run ids routes nothing and the answer is said as a comment only.
+- **Every routing write passes one gate (`routeGate`).** A quiet wake's put-back block, the fallback block after a refused hand-back or hand-off, `keepBlocked`, links and unlinks, closes, a resume and a put-back of a person's status all read the card again just before writing and compare it with the producing snapshot; any change by anyone but this attempt's own runs, a newer ask included, leaves the card as it is and posts the comment only. A source scan keeps any other routing write out.
+- **A resume reads the card last, and keeps its wait when a dependency reopens.** Before a resumed run and before its close or hand-off, every dependency is read first and the card after them, so a follow-up, cancel or hand-off that lands during a dependency read stops it. A close or hand-off refused because a dependency reopened puts the card back to blocked on it in the same write, and the ask stays owed, so it finishes when the dependency is done again. A restart before a resume's worker launched, an interrupted resume run again, and a restart inside a going-on's pre-run checks all pass the same dependency check; an unstarted going-on is run on the next wake, never dropped. The refusal is saved in the state file before the write that keeps the wait goes out, so a restart after that write, on the same run or a later wake, keeps the wait and answers once when the dependency is done. Every worker launch — the first, a claim mid-launch at a restart, and the relaunch of one that never started — passes the same preflight first, and a refused launch runs nothing. A continuation after an escalation ruling runs under its own attempt id, so a restart follows it rather than running it again.
+- **A card another run changed is not acted on.** Only this attempt's own runs count as its own (by run id, not seat); a comment or notice landing during the pre-run read is seen; a saved answer is checked against the card it was built from after a restart; a dependency rewrite and a fallback hand-up re-read the card immediately before writing.
+- **A harness policy setting set to a hidden server value now refuses the run configuration.** With `BOT_RUN_ENV` set, a policy setting such as `BOT_MAIL_SUBJECT_PREFIX` holding exactly the value of a hidden MCP server variable was accepted when that value was under 6 characters or a single path. It is refused whatever its length or shape; the diagnostic names the variables, never the value.
+- **An operating basic or a harness-published setting set to a hidden server value now refuses too.** `TERM`, `TZ`, `XDG_*` and `CLAUDE_PLUGIN_ROOT` equal to the whole value of a hidden MCP server variable of another name are refused at any length or path shape, on a Codex bypass session and parity run alike.
+- A blocked answer on a card in a review stage no longer loops. The board takes
+  the reviewer's write as changes requested, moves the card itself, and refuses
+  the block's unblock note (HTTP 422); the same write was retried every tick.
+  The answer now goes as a comment and the board's review keeps the status.
+- A held card's note is no longer repeated on each of Paperclip's re-wakes of
+  an unchanged card.
+- A person's move of a card stays the decision when the bot blocks the card
+  after it. The bot's own write no longer reads as the newest decision over
+  someone else's; the stop it put on the card is still its own to lift.
+- The bot no longer works a card that changed after it read it. Before the
+  model runs, and before every hand-on, return, unlink or rewrite of a card's
+  waits, the card's status, holder, labels, title, description and newest
+  comment are compared with what the run was built on: a recovery block by
+  the board, a comment from the bot's own seat or the board, or an edit
+  during a wait-less look stops the act and leaves the card for its next
+  wake. An escalation whose labels change while it is worked is worked again
+  before it is handed on.
+- An escalation blocked on several tasks resumes only when every one it
+  named reads done, including one the board does not have and one that was
+  already done when it answered and reopened since, across restarts.
+
+## [3.0.0] — 2026-10-19
+
+### Changed
+
+- **Breaking: which board wakes start the model is the operator's to set, and
+  the defaults are quiet.** See [Model-work triggers](docs/model-work-triggers.md).
+  - `PAPERCLIP_INTAKE` lists the card statuses a new ask starts the model in.
+    The default is every status but `backlog`. A card outside the list gets one
+    note, is put back in its status, and no model run. `all` keeps 2.x.
+  - `PAPERCLIP_REWAKE` replaces the fixed limit of re-looks at an ask answered
+    as waiting. The default is `off`: each such wake gets the mechanical note.
+    `N` allows up to `N` looks, the last told to escalate. `4` keeps 2.x.
+  - An unreadable value in either turns the board connector off.
+
+### Added
+
+- The effective trigger settings are logged at start, and each wake that does
+  not start the model logs the setting that decided it. A wake that starts it
+  logs why.
+
+## [2.9.0] — 2026-10-14
+
+### Added
+
+- **A bot can listen on Paperclip alone, with Discord off.** Discord and
+  Paperclip are peer surfaces, and `BOT_SURFACES` declares which a bot is on:
+  unset, the configuration decides (#89): Discord when there is a
+  `DISCORD_TOKEN`, plus any usable board it is given; `paperclip` declares the
+  board alone. A bot with a board and no `DISCORD_TOKEN` is Paperclip-only
+  without declaring it, and its connector must then come up or it exits 78. A
+  declared surface is a prerequisite:
+  `BOT_SURFACES=paperclip` without the Paperclip connector enabled (a board,
+  and its connector on) exits 78, saying the Paperclip connector must be
+  enabled first, and `doctor` / `doctor:fleet` fail it the same way. A bot with
+  neither a `DISCORD_TOKEN` nor a usable board exits 78, naming both, rather
+  than come up deaf and report ready. A Paperclip-only bot logs `Discord off — Paperclip-only` and
+  never builds or logs in a Discord client; a scheduled job
+  (which posts to a Discord channel) is refused when it is loaded, with a log
+  line, and kept in its file; the background summarizer is off.
+  Readiness is per surface: the ready marker is written once Discord is ready
+  (if on) and each board's first poll has succeeded (if on), each board is
+  polled once at startup rather than after the first interval, and
+  `doctor:fleet` reports each surface (`Discord: off · board paperclip:
+  ready`). A bot on both surfaces is now
+  ready only once its board has answered a poll too.
 
 - **One bot can answer on more than one Paperclip board.** `PAPERCLIP_EXTRA_BOARDS`
   lists the others as `{ id, url, keyEnv, promptChannel }`, so an agent seated
@@ -21,6 +165,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An answer owed by a run Paperclip cancelled waits for the task's next
+  run.** When a person blocked a task and stopped the bot mid-run, Paperclip
+  cancelled the run, and the bot retried the fallback under it every poll,
+  refused each time (403 `agent_run_cancelled`, SLA-1337). A cancelled run is
+  now never written under; the owed answer goes out under the task's next run.
 - **A run Paperclip loses after a resume, or a replacement run it loses
   too, is recovered like any other.** The wake that resumes a task checks it
   out with no record, so the bot's earlier block used to outrank Paperclip's
@@ -82,6 +231,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new work: the retry used to post only the "stopped by someone else" note,
   and the answer already made was never delivered. It goes out now as a
   comment only, and the card stays as the person set it.
+- **A card the Foreman blocks and hands to the bot is worked.** The Foreman's
+  sync writes with a board user's key, so its escalation (blocked, assigned to
+  the EM) read as a person's stop: the bot posted the "stopped by someone else"
+  note on each wake and Paperclip escalated the retries. On a mirrored card, a
+  stop whose write also assigns the card to the bot is now that hand-off; a
+  person's stop that does not hand it over still holds.
 - **A board run never keeps a Discord or bridge credential under another
   name.** Bots started from one shared environment hold every bot's token
   under its own name (`EM_DISCORD_TOKEN`, `PO_DISCORD_TOKEN`, `DISCORD_BOT_KEY`…);

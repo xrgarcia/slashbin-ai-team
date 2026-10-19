@@ -1,5 +1,16 @@
 # Upgrading
 
+[README](README.md) · [All documentation](README.md#documentation-table-of-contents)
+
+## Contents
+
+- [Before you upgrade, from any version](#before-you-upgrade-from-any-version)
+- [2.2.x → 2.3.0](#22x--230)
+- [2.2.0 → 2.2.1](#220--221)
+- [2.1.x → 2.2.0](#21x--220)
+- [1.x → 2.0.0](#1x--200)
+- [Checklist](#checklist)
+
 Newest first. Each entry says whether you have to do anything, and exactly what.
 
 ---

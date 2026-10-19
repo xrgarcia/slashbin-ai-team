@@ -1,5 +1,16 @@
 # Security Policy
 
+[README](README.md) · [All documentation](README.md#documentation-table-of-contents)
+
+## Contents
+
+- [Reporting a vulnerability](#reporting-a-vulnerability)
+- [What this software actually does — read this before reporting](#what-this-software-actually-does--read-this-before-reporting)
+  - [In scope — please report these](#in-scope--please-report-these)
+  - [Out of scope — these are configuration, not vulnerabilities](#out-of-scope--these-are-configuration-not-vulnerabilities)
+- [Supported versions](#supported-versions)
+- [Hardening checklist](#hardening-checklist)
+
 ## Reporting a vulnerability
 
 **Please do not open a public issue for a security problem.**

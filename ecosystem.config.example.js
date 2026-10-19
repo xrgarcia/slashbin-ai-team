@@ -68,7 +68,7 @@ module.exports = {
         BOT_HISTORY_DIR: `${PO_REPO}/bot-history`,     // summaries, attachments, outbox
 
         CLAUDE_MODEL: 'claude-opus-5',
-        SUMMARIZE_MODEL: 'claude-haiku-4-5-20251001',  // a cheaper model is fine here
+        SUMMARIZE_MODEL: 'claude-haiku-5-5',  // a cheaper model is fine here
         // 45 minutes. Node's child_process timeout sends SIGTERM at this mark
         // (bot.js spawn), which surfaces to the user as "exited with code 143".
         // Raised from 20m on 2026-09-23: adversarial spec passes and gate runs
@@ -109,7 +109,7 @@ module.exports = {
         BOT_HISTORY_DIR: `${EM_REPO}/bot-history`,
 
         CLAUDE_MODEL: 'claude-opus-5',
-        SUMMARIZE_MODEL: 'claude-haiku-4-5-20251001',
+        SUMMARIZE_MODEL: 'claude-haiku-5-5',
         // 45 minutes. Node's child_process timeout sends SIGTERM at this mark
         // (bot.js spawn), which surfaces to the user as "exited with code 143".
         // Raised from 20m on 2026-09-23: adversarial spec passes and gate runs

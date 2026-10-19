@@ -6,7 +6,7 @@ const assert = require("assert");
 const { readFileSync, readdirSync, writeFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { paperclipBoards, pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED, UNBLOCK_ACTION, OUTCOME_MARK, outcomeOf, refusal } = require("../lib/paperclip");
+const { paperclipBoards, pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED, unchangedNote, UNBLOCK_ACTION, OUTCOME_MARK, outcomeOf, refusal } = require("../lib/paperclip");
 
 const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
 let pass = 0, fail = 0;
@@ -27,7 +27,7 @@ function board({ runs, comments = [], wakeCommentId }) {
     "GET /agents/me": ME,
     "GET /agents/me/inbox-lite": [{ id: "iss-1" }],
     "GET /issues/iss-1/runs": runs,
-    "GET /issues/iss-1": { id: "iss-1", identifier: "T-1", title: "A question", createdAt: "2026-01-01T00:00:00Z" },
+    "GET /issues/iss-1": { id: "iss-1", identifier: "T-1", title: "A question", assigneeAgentId: ME.id, createdAt: "2026-01-01T00:00:00Z" },
     "GET /issues/iss-1/comments": comments,
     "GET /heartbeat-runs/run-1": { contextSnapshot: { wakeCommentId } },
   };
@@ -89,6 +89,14 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.match(p, /T-1: Q/); assert.match(p, /details/); assert.match(p, /first ask/);
   });
 
+  await check("an unchanged hold is answered blocked, never with a still-held comment", () => {
+    // A bot answered each "clear the hold" with "nothing has changed, the hold
+    // stays" and left the task open; the comment itself re-woke the asker, so
+    // the two looped.
+    const p = buildTaskPrompt({ identifier: "T-1", title: "Q" }, [{ authorAgentId: null, createdAt: "1", body: "clear the hold" }], ME, "u");
+    assert.match(p, new RegExp(`asked to clear a hold and it stays[^\\n]*end with ${OUTCOME_MARK} blocked`));
+  });
+
   await check("a long thread loses its oldest comments, never the latest ask", () => {
     // Second-pass review of 2.7.0: 36 older comments of 4,410 bytes pushed the
     // latest ask past the argument limit, whose clamp keeps only the head; the
@@ -144,7 +152,9 @@ const poller = (b, answer) => createPaperclipPoller({
     const small = Array.from({ length: 6 }, (_, i) => ({ id: `s${i}`, authorAgentId: i === 4 ? null : ME.id, createdAt: `${i}`, body: `é—${i} ${"ü".repeat(30 * i)}` }));
     const issue = { identifier: "T-1", title: "Tïtle ✓", description: "dé".repeat(40) };
     const full = buildTaskPrompt(issue, small, ME, "u", { maxBytes: 1e9 });
-    for (let max = Buffer.byteLength(full) + 5; max > 1600; max -= 7) {
+    // Down to just above the head and the ask, which are never shed.
+    const floor = Buffer.byteLength(buildTaskPrompt(issue, small, ME, "u", { maxBytes: 1 })) + 14;
+    for (let max = Buffer.byteLength(full) + 5; max > floor; max -= 7) {
       const q = buildTaskPrompt(issue, small, ME, "u", { maxBytes: max });
       assert.ok(Buffer.byteLength(q) <= max, `${Buffer.byteLength(q)} bytes over a budget of ${max}`);
       if (max >= Buffer.byteLength(full)) assert.strictEqual(q, full, "a prompt within budget was shed");
@@ -193,7 +203,7 @@ const poller = (b, answer) => createPaperclipPoller({
       await make().tick();
       const run = rewake ? "run-2" : "run-1";
       assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body]),
-        [[run, { status: "done", comment: rewake ? ALREADY_ANSWERED : "the answer" }], [run, { status: "todo" }]],
+        [[run, { status: "done", comment: rewake ? unchangedNote("the answer") : "the answer" }], [run, { status: "todo" }]],
         `${rewake ? "re-wake note" : "answer"}: the newer ask was left on a done task`);
     }
   });
@@ -203,7 +213,7 @@ const poller = (b, answer) => createPaperclipPoller({
     // so one failed reopen left the newer ask on a done task for good.
     for (const rewake of [false, true]) {
       const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "first ask" }];
-      const issue = { id: "iss-1", identifier: "T-1", title: "A question", status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
+      const issue = { id: "iss-1", identifier: "T-1", title: "A question", assigneeAgentId: ME.id, status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
       let runs = running, landing = false, reopenFails = 0;
       const writes = [];
       const fetch = async (url, init) => {
@@ -233,7 +243,7 @@ const poller = (b, answer) => createPaperclipPoller({
       await make().tick();          // and does nothing more once it is done
       const run = rewake ? "run-2" : "run-1";
       assert.strictEqual(calls, 1, "the answered ask ran again");
-      assert.deepStrictEqual(writes, [[run, { status: "done", comment: rewake ? ALREADY_ANSWERED : "the answer" }], [run, { status: "todo" }]],
+      assert.deepStrictEqual(writes, [[run, { status: "done", comment: rewake ? unchangedNote("the answer") : "the answer" }], [run, { status: "todo" }]],
         `${rewake ? "re-wake note" : "answer"}: the reopen was not retried`);
       assert.deepStrictEqual(JSON.parse(readFileSync(stateFile, "utf8")).closing, {});
     }
@@ -244,7 +254,7 @@ const poller = (b, answer) => createPaperclipPoller({
     // ask moved, so a comment-and-cancel came back as todo.
     for (const decided of ["cancelled", "blocked"]) {
       const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "first ask" }];
-      const issue = { id: "iss-1", identifier: "T-1", title: "A question", status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
+      const issue = { id: "iss-1", identifier: "T-1", title: "A question", assigneeAgentId: ME.id, status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
       const writes = [];
       const fetch = async (url, init) => {
         const path = url.replace(/^.*\/api/, "");
@@ -288,7 +298,7 @@ const poller = (b, answer) => createPaperclipPoller({
       } else {
         await make(async () => { b.setStatus(decided); return "the answer"; }).tick();
       }
-      assert.deepStrictEqual(b.writes.map((w) => w.body), [{ comment: rewake ? ALREADY_ANSWERED : "the answer" }],
+      assert.deepStrictEqual(b.writes.map((w) => w.body), [{ comment: rewake ? unchangedNote() : "the answer" }],
         `${decided}, ${rewake ? "re-wake" : "answer"}: the status was overwritten`);
     }
   });
@@ -412,7 +422,8 @@ const poller = (b, answer) => createPaperclipPoller({
 
   await check("a progress comment written during the run does not stop the saved answer being posted", async () => {
     // Second-pass review of 2.7.0: the progress note looked like an answer, so the
-    // run was marked handled and the real answer was never posted.
+    // run was marked handled and the real answer was never posted. The note is
+    // posted under the attempt's own run, so it is its output, not a change.
     const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
     const b = board({ runs: running, comments, wakeCommentId: "w" });
     let failPatch = 1;
@@ -421,7 +432,7 @@ const poller = (b, answer) => createPaperclipPoller({
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     let calls = 0;
     const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch: flaky,
-      answer: async () => { calls++; comments.push({ id: "p", authorAgentId: ME.id, createdAt: "2026-01-02T00:01:00Z", body: "working on it" }); return "the answer"; } });
+      answer: async () => { calls++; comments.push({ id: "p", authorAgentId: ME.id, createdByRunId: "run-1", createdAt: "2026-01-02T00:01:00Z", body: "working on it" }); return "the answer"; } });
     await make().tick();          // runs; writes a progress note; the post fails
     await make().tick();          // a restarted bot
     assert.strictEqual(calls, 1);
@@ -579,9 +590,61 @@ const poller = (b, answer) => createPaperclipPoller({
     assert.strictEqual(calls, 1, "a re-wake answered the same ask twice");
     // Second-pass review of 2.7.0: the re-wake was marked handled with nothing
     // under it, and a run is held open until a comment lands under it.
-    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer"], ["run-2", ALREADY_ANSWERED]]);
+    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer"], ["run-2", unchangedNote("the answer")]]);
     await make().tick();
     assert.strictEqual(b.writes.length, 2, "the re-wake was acknowledged twice");
+  });
+
+  await check("each re-wake of an answered card ends on a note that restates the answer, and nothing is taken down", async () => {
+    // A deleted comment stays on the thread as a blank tombstone, so a re-wake
+    // never deletes; its note repeats the answer's first line instead of burying it.
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    const b = board({ runs: running, comments, wakeCommentId: "w" });
+    let runs = running, n = 0;
+    const fetch = async (url, init) => {
+      const path = url.replace(/^.*\/api/, "");
+      if (path === "/issues/iss-1/runs") return { ok: true, text: async () => JSON.stringify(runs) };
+      if (/^\/heartbeat-runs\/run-[23]$/.test(path)) return { ok: true, text: async () => JSON.stringify({ contextSnapshot: {} }) };
+      if (init.method === "DELETE") assert.fail("a re-wake took a comment down");
+      if (init.method === "PATCH") comments.push({ id: `c${++n}`, authorAgentId: ME.id, createdByRunId: init.headers["x-paperclip-run-id"], createdAt: `2026-01-02T00:0${n}:00Z`, body: JSON.parse(init.body).comment });
+      return b.fetch(url, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: async () => "the answer\nmore detail" });
+    await make().tick();
+    runs = [{ id: "run-2", agentId: ME.id, status: "running" }];
+    await make().tick();
+    runs = [{ id: "run-3", agentId: ME.id, status: "running" }];
+    await make().tick();
+    const note = unchangedNote("the answer");
+    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer\nmore detail"], ["run-2", note], ["run-3", note]],
+      "every run still ends on a comment of its own, and each restates the answer");
+    assert.ok(b.writes.every((w) => w.body.comment.trim() && !/anything new/.test(w.body.comment)), "a note is never empty and never asks for anything new");
+  });
+
+  await check("a note is never taken down once someone has said something after it", async () => {
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    const b = board({ runs: running, comments, wakeCommentId: "w" });
+    let runs = running, n = 0;
+    const fetch = async (url, init) => {
+      const path = url.replace(/^.*\/api/, "");
+      if (path === "/issues/iss-1/runs") return { ok: true, text: async () => JSON.stringify(runs) };
+      if (/^\/heartbeat-runs\/run-[23]$/.test(path)) return { ok: true, text: async () => JSON.stringify({ contextSnapshot: {} }) };
+      if (init.method === "DELETE") assert.fail("took down a note someone had answered after");
+      if (init.method === "PATCH") comments.push({ id: `c${++n}`, authorAgentId: ME.id, createdByRunId: init.headers["x-paperclip-run-id"], createdAt: `2026-01-02T00:0${n}:00Z`, body: JSON.parse(init.body).comment });
+      return b.fetch(url, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: async () => "the answer" });
+    await make().tick();
+    runs = [{ id: "run-2", agentId: ME.id, status: "running" }];
+    await make().tick();
+    // Another agent's comment lands after the note: it is not an ask of this bot's to answer again.
+    comments.push({ id: "o", authorAgentId: "agent-other", createdAt: "2026-01-02T00:05:00Z", body: "noted" });
+    runs = [{ id: "run-3", agentId: ME.id, status: "running" }];
+    await make().tick();
   });
 
   await check("a bot that dies mid-answer does not run the ask again after a restart", async () => {
@@ -652,7 +715,7 @@ const poller = (b, answer) => createPaperclipPoller({
     await make().tick();          // a restarted bot retries it
     await make().tick();          // and does not send it again once it landed
     assert.strictEqual(calls, 1, "the task ran again");
-    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer"], ["run-2", ALREADY_ANSWERED]]);
+    assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-1", "the answer"], ["run-2", unchangedNote("the answer")]]);
   });
 
   await check("an answer is filed under the comment it answers, not the one that woke the run", async () => {
@@ -684,7 +747,7 @@ const poller = (b, answer) => createPaperclipPoller({
     // Second-pass review of 2.7.0: the key named the ask but not its content, so
     // a reopened task with a new description, or an edited ask, was never answered.
     const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
-    const issue = { id: "iss-1", identifier: "T-1", title: "A question", description: "v1", createdAt: "2026-01-01T00:00:00Z" };
+    const issue = { id: "iss-1", identifier: "T-1", title: "A question", assigneeAgentId: ME.id, description: "v1", createdAt: "2026-01-01T00:00:00Z" };
     let run = 0;
     const fetch = async (url, init) => {
       const path = url.replace(/^.*\/api/, "");
@@ -704,7 +767,7 @@ const poller = (b, answer) => createPaperclipPoller({
     await tick();                          // the ask was edited
     issue.description = "v2";
     await tick();                          // the task was revised and reopened
-    assert.deepStrictEqual(writes, ["answer 1", ALREADY_ANSWERED, "answer 2", "answer 3"]);
+    assert.deepStrictEqual(writes, ["answer 1", unchangedNote(), "answer 2", "answer 3"]);
   });
 
   await check("one task whose post keeps failing does not hold up the rest of the inbox", async () => {
@@ -714,7 +777,7 @@ const poller = (b, answer) => createPaperclipPoller({
     const routes = { "GET /agents/me": ME, "GET /agents/me/inbox-lite": [{ id: "iss-1" }, { id: "iss-2" }] };
     for (const n of [1, 2]) {
       routes[`GET /issues/iss-${n}/runs`] = [{ id: `run-${n}`, agentId: ME.id, status: "running" }];
-      routes[`GET /issues/iss-${n}`] = { id: `iss-${n}`, identifier: `T-${n}`, title: "Q", createdAt: "2026-01-01T00:00:00Z" };
+      routes[`GET /issues/iss-${n}`] = { id: `iss-${n}`, identifier: `T-${n}`, title: "Q", assigneeAgentId: ME.id, createdAt: "2026-01-01T00:00:00Z" };
       routes[`GET /issues/iss-${n}/comments`] = [];
       routes[`GET /issues/iss-${n}/activity`] = [];
       routes[`GET /heartbeat-runs/run-${n}`] = { contextSnapshot: {} };
@@ -738,6 +801,46 @@ const poller = (b, answer) => createPaperclipPoller({
       [askKey("iss-1", { id: "iss-1", identifier: "T-1", title: "Q", createdAt: "2026-01-01T00:00:00Z" }, null)]);
   });
 
+  await check("a card handed to the seat in review is worked while a run of the seat's is open on it", async () => {
+    // A merged card handed to the seat in review: the inbox lists only todo,
+    // in_progress and blocked, so its run sat open unworked.
+    const me = { ...ME, companyId: "co-1" };
+    const routes = { "GET /agents/me": me, "GET /agents/me/inbox-lite": [],
+      [`GET /companies/co-1/issues?assigneeAgentId=${ME.id}&status=in_review`]: [
+        { id: "iss-1", status: "in_review", assigneeAgentId: ME.id },
+        { id: "iss-2", status: "in_review", assigneeAgentId: ME.id },
+        { id: "iss-3", status: "in_review", assigneeAgentId: "other" }] };
+    routes["GET /issues/iss-1/runs"] = [{ id: "run-1", agentId: ME.id, status: "running" }];
+    routes["GET /issues/iss-2/runs"] = [{ id: "run-2", agentId: ME.id, status: "succeeded" }];
+    routes["GET /issues/iss-1"] = { id: "iss-1", identifier: "T-1", title: "Q", status: "in_review", assigneeAgentId: ME.id, createdAt: "2026-01-01T00:00:00Z" };
+    routes["GET /issues/iss-1/comments"] = [];
+    routes["GET /issues/iss-1/activity"] = [];
+    routes["GET /heartbeat-runs/run-1"] = { contextSnapshot: {} };
+    const read = [];
+    const fetch = async (url, init) => {
+      const key = `${init.method} ${url.replace(/^.*\/api/, "")}`;
+      read.push(key);
+      if (init.method !== "GET") return { ok: true, text: async () => "{}" };
+      return key in routes ? { ok: true, text: async () => JSON.stringify(routes[key]) } : { ok: false, status: 404, text: async () => "" };
+    };
+    const asked = [];
+    const p = createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile: join(mkdtempSync(join(tmpdir(), "pc-")), "s.json"),
+      answer: async (_, issue) => { asked.push(issue.identifier); return "a"; }, log: silent, fetch });
+    await p.tick();
+    assert.deepStrictEqual(asked, ["T-1"], "only the in-review card with an open run of the seat's is worked");
+    assert.ok(!read.includes("GET /issues/iss-3/runs"), "a card another seat holds is not looked at");
+  });
+
+  await check("a failed in-review read never stops the inbox", async () => {
+    const b = board({ runs: running });
+    const fetch = async (url, init) => (url.includes("/agents/me") && !url.includes("inbox")
+      ? { ok: true, text: async () => JSON.stringify({ ...ME, companyId: "co-1" }) } : b.fetch(url, init));
+    const asked = [];
+    await createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile: join(mkdtempSync(join(tmpdir(), "pc-")), "s.json"),
+      answer: async (_, issue) => { asked.push(issue.identifier); return "a"; }, log: silent, fetch }).tick();
+    assert.deepStrictEqual(asked, ["T-1"]);
+  });
+
   await check("no unposted answer is dropped, however many pile up across a restart", async () => {
     // Second-pass review of 2.7.0: only the last 50 unposted answers were saved,
     // so the 51st failure made a restarted bot run the oldest task again.
@@ -745,7 +848,7 @@ const poller = (b, answer) => createPaperclipPoller({
     for (let n = 1; n <= N; n++) {
       routes["GET /agents/me/inbox-lite"].push({ id: `iss-${n}` });
       routes[`GET /issues/iss-${n}/runs`] = [{ id: `run-${n}`, agentId: ME.id, status: "running" }];
-      routes[`GET /issues/iss-${n}`] = { id: `iss-${n}`, identifier: `T-${n}`, title: "Q", createdAt: "2026-01-01T00:00:00Z" };
+      routes[`GET /issues/iss-${n}`] = { id: `iss-${n}`, identifier: `T-${n}`, title: "Q", assigneeAgentId: ME.id, createdAt: "2026-01-01T00:00:00Z" };
       routes[`GET /issues/iss-${n}/comments`] = [];
       routes[`GET /issues/iss-${n}/activity`] = [];
       routes[`GET /heartbeat-runs/run-${n}`] = { contextSnapshot: {} };
@@ -773,8 +876,8 @@ const poller = (b, answer) => createPaperclipPoller({
   await check("bot.js: board runs never see the buffer, and the key never reaches Claude", () => {
     assert.match(bot, /noBufferContext: true/);
     assert.match(bot, /opts\.noBufferContext \? "" : buildContextPrompt/);
-    assert.match(bot, /\["PAPERCLIP_API_KEY", \.\.\.PAPERCLIP_BOARDS\.map\(\(b\) => b\.keyEnv\)\]/);
-    assert.match(bot, /for \(const name of connectorKeys\(\)\) delete cleanEnv\[name\];/);
+    // Every board's key, withheld from every run by the one builder (buildRunEnv).
+    assert.match(bot, /connectorKeys: \[\.\.\.boardKeyEnvs\(process\.env\), \.\.\.escalateBearer\(\)\],/);
   });
 
   await check("a file the run made is named as not delivered, never left to read as attached", () => {
@@ -798,9 +901,9 @@ const poller = (b, answer) => createPaperclipPoller({
     };
     const { boards, problems } = paperclipBoards(env);
     assert.deepStrictEqual(problems, []);
-    assert.deepStrictEqual(boards, [
-      { id: null, url: "https://one.example.com", apiKey: "k1", keyEnv: "PAPERCLIP_API_KEY", promptChannel: "123456789012345678" },
-      { id: "two", url: "https://two.example.com", apiKey: "k2", keyEnv: "TWO_KEY", promptChannel: "chan-2" },
+    assert.deepStrictEqual(boards.map(({ escalation, ...b }) => b), [
+      { id: null, url: "https://one.example.com", apiKey: "k1", keyEnv: "PAPERCLIP_API_KEY", promptChannel: "123456789012345678", contract: null, policy: null },
+      { id: "two", url: "https://two.example.com", apiKey: "k2", keyEnv: "TWO_KEY", promptChannel: "chan-2", contract: null, policy: null },
     ]);
   });
 
@@ -808,7 +911,7 @@ const poller = (b, answer) => createPaperclipPoller({
     const only = paperclipBoards({ PAPERCLIP_EXTRA_BOARDS: '[{"id":"two","url":"https://two.example.com","keyEnv":"TWO_KEY"}]', TWO_KEY: "k" });
     assert.deepStrictEqual(only.boards.map((b) => b.id), ["two"]);
     assert.strictEqual(only.boards[0].promptChannel, undefined);
-    assert.deepStrictEqual(paperclipBoards({}), { boards: [], problems: [] });
+    assert.deepStrictEqual(paperclipBoards({}), { boards: [], problems: [], warnings: [] });
   });
 
   await check("boards: a broken entry is reported and skipped; the rest still come on", () => {
@@ -839,7 +942,7 @@ const poller = (b, answer) => createPaperclipPoller({
   });
 
   await check("bot.js: every board's key is kept from Claude, and an extra board has its own state and sessions", () => {
-    assert.match(bot, /\.\.\.PAPERCLIP_BOARDS\.map\(\(b\) => b\.keyEnv\)/);
+    assert.match(bot, /connectorKeys: \[\.\.\.boardKeyEnvs\(process\.env\), \.\.\.escalateBearer\(\)\],/);
     assert.match(bot, /const tag = board\.id \? `paperclip-\$\{board\.id\}` : "paperclip";/);
     assert.match(bot, /stateFile: join\(STATE_DIR, `\$\{tag\}\.json`\)/);
     assert.match(bot, /runClaude\(prompt, `\$\{tag\}-\$\{issue\.identifier\}`/);
@@ -858,13 +961,13 @@ const poller = (b, answer) => createPaperclipPoller({
     const b = board({ runs: running });
     await poller(b, async () => `All done.\n${OUTCOME_MARK} done`).tick();
     assert.deepStrictEqual(b.writes.map((w) => w.body), [{ status: "done", comment: "All done." }]);
-    assert.deepStrictEqual(outcomeOf(`${OUTCOME_MARK} blocked`), { comment: "", status: "blocked", waitsOn: [] });
+    assert.deepStrictEqual(outcomeOf(`${OUTCOME_MARK} blocked`), { comment: "", status: "blocked", waitsOn: [], escalate: false, giveBack: false, followUp: false, person: null });
     assert.match(buildTaskPrompt({ identifier: "T-1", title: "Q" }, [], ME, "u"), new RegExp(`${OUTCOME_MARK} blocked`));
   });
 
   await check("a blocked close that a newer ask lands on is reopened for it", async () => {
     const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "first ask" }];
-    const issue = { id: "iss-1", identifier: "T-1", title: "A question", status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
+    const issue = { id: "iss-1", identifier: "T-1", title: "A question", assigneeAgentId: ME.id, status: "in_progress", createdAt: "2026-01-01T00:00:00Z" };
     const writes = [], activity = [];
     let landing = true;
     const fetch = async (url, init) => {

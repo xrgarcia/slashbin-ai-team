@@ -1,7 +1,7 @@
 require("dotenv").config();
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
-const { WebSocketServer } = require("ws");
+const { WebSocket, WebSocketServer } = require("ws");
 const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync, readlinkSync, renameSync, mkdtempSync, rmSync } = require("fs");
 const { basename, join, resolve } = require("path");
 const { pipeline } = require("stream/promises");
@@ -9,11 +9,16 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, withheldFromBoard, withheldFromParityBoard, discordCarriers, paperclipCarriers, parityMcpEnv, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
+const { buildRunEnv, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
-const { createPaperclipPoller, paperclipBoards, replyCollector } = require("./lib/paperclip");
+const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector, parseIntake, parseRewake } = require("./lib/paperclip");
+const { parseContract, toolLine } = require("./lib/handoff-contract");
+const { escalateClientFor, escalateBoard } = require("./lib/process-escalate");
+const { createAttempts } = require("./lib/attempts");
+const { createLiveEvents, eventsSetting, startBoard } = require("./lib/paperclip-events");
+const { botSurfaces, discordOffReason, PAPERCLIP_PREREQUISITE } = require("./lib/surfaces");
 const { resolveRuntime } = require("./lib/runtime");
 const { LAYOUTS, repoLayout } = require("./lib/runtime/layout");
 const codexRuntime = require("./lib/runtime/codex");
@@ -34,6 +39,13 @@ const log = pino({
  * config. Worse, for a value like a poll interval, a 0 that DID get through would
  * be a hot loop. Clamp explicitly and say something when the input was garbage.
  */
+// A Claude result reports fresh input apart from cache reads and writes; Codex
+// reports one total with cache included. Log the same total for both.
+function inputTotal(usage) {
+  if (!usage) return undefined;
+  return (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0);
+}
+
 function envInt(name, def, { min = 0 } = {}) {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return def;
@@ -123,6 +135,9 @@ const STATE_DIR = process.env.BOT_STATE_DIR
       ? process.env.BOT_STATE_DIR
       : join(__dirname, process.env.BOT_STATE_DIR))
   : HISTORY_DIR;
+
+// Board attempts: each one's worker, output and end, under the state folder (EM#626).
+const attempts = createAttempts(STATE_DIR);
 
 // Runtime state, not memory. HISTORY_DIR holds SUMMARIES — the reviewable record
 // people deliberately keep in a repo. A user's schedules, the summarizer's read
@@ -227,16 +242,72 @@ function botSettings() {
   return !SESSION_SETTINGS ? null
     : JSON.parse(SESSION_SETTINGS.startsWith("{") ? SESSION_SETTINGS : readFileSync(resolve(CLAUDE_CWD, SESSION_SETTINGS), "utf8"));
 }
+// The bot's settings for the run-environment check: "unreadable" when they cannot be read.
+function readableSettings() {
+  try {
+    return botSettings();
+  } catch {
+    return "unreadable";
+  }
+}
 function settingsArgs({ board = false, tmpDir = null } = {}) {
   if (!board) return SESSION_SETTINGS ? ["--settings", SESSION_SETTINGS] : [];
   // A board run sandboxes any shell it is allowed to the working directory, on
   // top of the bot's own settings.
   return ["--settings", JSON.stringify(boardSettings(botSettings(), boardReadDeniedPaths(), CLAUDE_CWD, { ...BOARD_POLICY, tmpDir }))];
 }
-// The Paperclip connector keys: every board's, not only the first — an extra
-// board names its own.
-function connectorKeys() {
-  return [...new Set(["PAPERCLIP_API_KEY", ...PAPERCLIP_BOARDS.map((b) => b.keyEnv)])];
+// The bridge's own hand-offs go through the shared escalate action when both
+// are set (SLA-1493): the process MCP's URL, and the name of the variable that
+// holds this bot's bearer for it. The seat's key and run ride as headers from
+// the bridge itself; nothing reaches a run. Unset, hand-offs stay direct writes.
+function escalateBearer() {
+  const name = process.env.PAPERCLIP_ESCALATE_BEARER_ENV;
+  return name ? [name] : [];
+}
+// A run's environment, from the one builder that sees every writer — the
+// bot's environment under BOT_RUN_ENV, the harness's paths, the MCP servers'
+// env and a board task's seat — and decides each variable over the result:
+// whether the run has it, and whether its commands can read it (buildRunEnv,
+// docs/run-environment.md). `run` is "session", "parity" or "board".
+function runEnvFor(run, { channelId = "", runOutbox = OUTBOX_DIR, tmpDir = null, seat = null } = {}) {
+  return buildRunEnv({
+    env: process.env,
+    spec: process.env.BOT_RUN_ENV,
+    runtime: RUNTIME.name,
+    mode: PERMISSION_MODE,
+    run,
+    // Every configured board's key, not only the first, listener on or not;
+    // and the bridge's own bearer for the escalate action: only the bridge
+    // calls it, never a run (SLA-1493).
+    connectorKeys: [...boardKeyEnvs(process.env), ...escalateBearer()],
+    mcpEnv: CODEX_MCP?.env ?? null,
+    // Each server's `${VAR}`s expanded into its command line (rule 11).
+    mcpRefs: CODEX_MCP?.refs ?? null,
+    // A board task's run is refused on a settings env block (rule 14); one
+    // that cannot be read cannot be shown to have none.
+    settings: run === "session" ? null : readableSettings(),
+    seat,
+    tmpDir,
+    // Publish the RESOLVED paths. This is what stops harness-owned skills from
+    // rotting: a skill that reads $BOT_BUFFER_FILE cannot go stale, while one
+    // that names `.po-bot-conversation-buffer.txt` breaks the moment a bot is
+    // renamed — which is exactly what happened to the shipped /remember, whose
+    // three hardcoded paths were ALL dead by the time anyone checked.
+    published: {
+      BOT_STATE_DIR: STATE_DIR,
+      BOT_SUMMARIES_DIR: HISTORY_DIR,
+      BOT_ATTACHMENTS_DIR: ATTACHMENTS_DIR,
+      BOT_OUTBOX_DIR: runOutbox,
+      BOT_BUFFER_FILE: BUFFER_FILE,
+      BOT_SESSIONS_FILE: SESSION_FILE,
+      BOT_JOB_HISTORY_FILE: JOB_HISTORY_FILE,
+      BOT_SCHEDULES_FILE: SCHEDULES_FILE,
+      BOT_CHANNEL_ID: String(channelId),
+      // Skills name their scripts under $CLAUDE_PLUGIN_ROOT, which Claude sets
+      // for a plugin; Codex has no plugin folder, so the harness sets it.
+      ...(CODEX && skillPacks().includes(SKILL_PACK) ? { CLAUDE_PLUGIN_ROOT: SKILL_PACK } : {}),
+    },
+  });
 }
 // What a board run's session is made with (boardAccessKey): one made under
 // other access is never resumed. Every permission input counts — a parity run
@@ -274,11 +345,13 @@ function mcpArgs() {
  * The same servers for a Codex bypass session: MCP_CONFIG, MCP_CONFIG_EXTRA and
  * the repo's .mcp.json, read once at startup. Codex runs local (stdio) servers
  * only, so any other kind is skipped and named in the log; their env values go
- * to the child process, never onto the command line. Without MCP_CONFIG_STRICT
+ * to the child process, never onto the command line (a server's command, args
+ * and cwd do go there, so runEnvFor refuses a `${VAR}` in them that the run's
+ * commands cannot read — `refs` names them). Without MCP_CONFIG_STRICT
  * the operator's own Codex config adds its servers, as the host's do on Claude.
  */
 function codexMcp() {
-  const servers = {}, env = {}, skipped = [];
+  const servers = {}, env = {}, skipped = [], refs = {};
   const repoConfig = resolve(CLAUDE_CWD, ".mcp.json");
   const sources = [process.env.MCP_CONFIG || (existsSync(repoConfig) ? repoConfig : ""), process.env.MCP_CONFIG_EXTRA || ""];
   for (const source of sources.filter(Boolean)) {
@@ -294,9 +367,10 @@ function codexMcp() {
     const got = codexRuntime.mcpServers(config, process.env, env);
     Object.assign(servers, got.servers);
     Object.assign(env, got.env);
+    Object.assign(refs, got.refs);
     skipped.push(...got.skipped);
   }
-  return { servers, env, skipped, strict: process.env.MCP_CONFIG_STRICT === "true" };
+  return { servers, env, skipped, refs, strict: process.env.MCP_CONFIG_STRICT === "true" };
 }
 
 // How often the "typing…" indicator is refreshed while a request runs.
@@ -533,6 +607,7 @@ const BUFFER_FILE = join(STATE_DIR, "buffer.txt");
 // the file is a temporal-dead-zone error waiting for the first message.
 const SCHEDULES_FILE = join(STATE_DIR, "schedules.json");
 const JOB_HISTORY_FILE = join(STATE_DIR, "job-history.jsonl");
+const SESSION_FILE = join(STATE_DIR, "sessions.json");
 
 // Files that used to live in the install directory, keyed by BOT_NAME. Moved on
 // first start rather than abandoned — a bot that silently forgets every session
@@ -569,10 +644,35 @@ const MAX_OUTBOUND_BYTES = parseInt(process.env.MAX_OUTBOUND_BYTES, 10) || 8 * 1
 // restartable, because a network blip genuinely does deserve another go.
 const EXIT_CONFIG = 78;
 
-if (!DISCORD_TOKEN) {
-  log.fatal("DISCORD_TOKEN environment variable is required — see docs/INSTALL.md");
+// Two peer surfaces: Discord and Paperclip boards (lib/surfaces.js, issue #89).
+// Unset BOT_SURFACES, the bot answers wherever it is configured: Discord with
+// a DISCORD_TOKEN, and every usable board; a board and no token is
+// Paperclip-only; neither is a refusal naming both. A declared BOT_SURFACES is
+// a prerequisite list, validated as written. With Discord off the client is
+// never built or logged in. Which boards are usable is settled in full at the
+// Paperclip block below (a board whose policy cannot be held is off, which is
+// fatal when the board is the bot's only surface); here it is only whether any
+// is configured at all.
+const { boards: CONFIGURED_BOARDS, problems: PAPERCLIP_PROBLEMS, warnings: PAPERCLIP_WARNINGS } = paperclipBoards(process.env);
+// The bot-wide handoff contract setting; a broken one is refused at startup
+// with the board problems, so no run starts on a contract it cannot name.
+const { setting: HANDOFF_CONTRACT, problem: HANDOFF_CONTRACT_PROBLEM } = parseContract(process.env.HANDOFF_CONTRACT, "HANDOFF_CONTRACT");
+if (HANDOFF_CONTRACT_PROBLEM) {
+  log.fatal(HANDOFF_CONTRACT_PROBLEM);
   process.exit(EXIT_CONFIG);
 }
+const SURFACES = botSurfaces(process.env, CONFIGURED_BOARDS.length);
+if (SURFACES.errors.length) {
+  if (SURFACES.paperclipRequired) for (const problem of PAPERCLIP_PROBLEMS) log.error(`Paperclip board off — ${problem}`);
+  for (const error of SURFACES.errors) log.fatal(error);
+  process.exit(EXIT_CONFIG);
+}
+for (const note of SURFACES.notes) log.warn(note);
+const DISCORD_ON = SURFACES.discord;
+const PAPERCLIP_BOARDS = SURFACES.paperclip ? CONFIGURED_BOARDS : [];
+const PAPERCLIP_EVENTS = eventsSetting(process.env.PAPERCLIP_EVENTS);
+if (PAPERCLIP_BOARDS.length && PAPERCLIP_EVENTS.problem) log.warn(PAPERCLIP_EVENTS.problem);
+if (!DISCORD_ON) log.info(discordOffReason(SURFACES));
 
 // A bot pointed at a directory that does not exist used to start happily and then
 // fail on the first message with a spawn error naming neither the variable nor the
@@ -615,6 +715,19 @@ const CODEX_MCP = CODEX && PERMISSION_MODE === "bypass" ? codexMcp() : null;
 // Not passed by the harness; the session still loads the Codex config, so a
 // server defined there (the repo's .codex/config.toml, ~/.codex) is available.
 for (const { name, reason } of CODEX_MCP?.skipped ?? []) log.warn({ server: name, reason }, "MCP server not passed to Codex — skipped; define it in the Codex config if the bot needs it");
+// Every run builds its environment the same way (runEnvFor), so a
+// configuration the builder refuses — a BOT_RUN_ENV the bot would read
+// differently from its operator, a policy setting or server env that could
+// only be held by handing a credential to commands — refuses to start, for
+// each kind of run this bot will make. A seat is added per task and only ever
+// as a hidden variable, so it cannot turn a startup pass into a refusal. A
+// session run exists only on Discord, so a Paperclip-only bot does not check one.
+for (const run of [...(DISCORD_ON ? ["session"] : []), ...(PAPERCLIP_BOARDS.length ? [BOARD_KIND === "board" ? "board" : "parity"] : [])]) {
+  const { problems } = runEnvFor(run);
+  if (!problems.length) continue;
+  for (const problem of problems) log.fatal(`Run environment refused (${run} run) — ${problem}`);
+  process.exit(EXIT_CONFIG);
+}
 // A malformed inline BOT_SETTINGS would fail every session, one message at a time.
 if (SESSION_SETTINGS.startsWith("{")) {
   try {
@@ -702,19 +815,42 @@ const PID_FILE = join(__dirname, `.${BOT_NAME}.pid`);
 })();
 
 // --- Readiness marker ---
+// Ready means every surface this bot runs is up: Discord once it says ready (if
+// on), and each Paperclip board once its first poll succeeds (if on). Per-surface
+// state is kept beside the marker, so doctor:fleet can say which one is not.
 // "A process exists" is not "the bot works": a failed Discord login leaves the
 // process alive (the WS server and scheduler keep the event loop busy), so PID
 // checks reported a permanently deaf bot as healthy. This file is written only
 // once Discord says ready, and removed on the way out, so `status` can tell
 // connected apart from merely running.
 const READY_FILE = join(__dirname, `.${BOT_NAME}.ready`);
+const SURFACES_FILE = join(__dirname, `.${BOT_NAME}.surfaces.json`);
+const surfaces = { discord: DISCORD_ON ? "not ready" : "off", boards: {}, events: {} };
 function markReady() {
   try { writeFileSync(READY_FILE, String(Date.now())); } catch { /* non-fatal */ }
 }
 function clearReady() {
   try { unlinkSync(READY_FILE); } catch { /* already gone */ }
+  try { unlinkSync(SURFACES_FILE); } catch { /* already gone */ }
+}
+function writeSurfaces() {
+  try { writeFileSync(SURFACES_FILE, JSON.stringify({ pid: process.pid, ...surfaces })); } catch { /* non-fatal */ }
+}
+/** Record one surface's state; the marker is written once every surface is ready. */
+function setSurface(kind, state, board) {
+  if (kind === "board") surfaces.boards[board] = state;
+  else surfaces.discord = state;
+  writeSurfaces();
+  const all = [...(surfaces.discord === "off" ? [] : [surfaces.discord]), ...Object.values(surfaces.boards)];
+  if (all.length && all.every((s) => s === "ready") && !existsSync(READY_FILE)) markReady();
+}
+/** A board's live-event state — live, reconnecting or off. Reported, never a readiness gate: polling carries a board without it. */
+function setEventState(board, state) {
+  surfaces.events[board] = state;
+  writeSurfaces();
 }
 clearReady();
+writeSurfaces();
 
 // Ensure directories exist
 mkdirSync(HISTORY_DIR, { recursive: true });
@@ -764,6 +900,10 @@ const SIGNAL_DATA_MAX = envInt("BRIDGE_SIGNAL_DATA_MAX", 2000, { min: 0 });
 // must always name the channel it was dropped for.
 async function resolveBridgeChannel(channelId, ctx) {
   if (!channelId) return null;
+  if (!client) {
+    log.error({ ...ctx, channelId }, "Discord is off — bridge message for a Discord channel dropped");
+    return null;
+  }
   const cached = client.channels.cache.get(channelId);
   if (cached) return cached;
   try {
@@ -902,7 +1042,7 @@ wss.on("connection", (ws) => {
       // Cosmetic, and deliberately not routed through resolveBridgeChannel: an
       // unreachable channel is already reported by the response that follows,
       // and typing fires often enough to bury that line in duplicates.
-      const channel = client.channels.cache.get(msg.channelId);
+      const channel = client?.channels.cache.get(msg.channelId);
       if (channel) {
         try { await channel.sendTyping(); } catch { /* ignore */ }
       }
@@ -1130,7 +1270,7 @@ function recordBotResponse(channelName, responseText) {
     text = `${text.substring(0, BUFFER_TRUNCATE_RESPONSE)}... [truncated, ${fullLength} chars total]`;
   }
 
-  const botName = client.user ? (client.user.username || client.user.tag) : "Bot";
+  const botName = client ? (client.user ? (client.user.username || client.user.tag) : "Bot") : BOT_NAME;
   const line = formatBufferLine(channelName, botName, text, null);
   appendToBuffer(line);
 }
@@ -1220,7 +1360,7 @@ const MAX_CONCURRENT_CLAUDE = parseInt(process.env.MAX_CONCURRENT_CLAUDE, 10) ||
 const botExchanges = new Map();
 
 // --- Session continuity: track Claude session IDs per channel for --resume ---
-const SESSION_FILE = join(STATE_DIR, "sessions.json");
+// (SESSION_FILE is declared with the other state paths above.)
 // Where each PRIVATE_MEMORY_ENV variable points, in the same order: Discord
 // memory a board run is denied by path as well as by variable.
 function privateMemoryPaths() {
@@ -1314,7 +1454,8 @@ setInterval(() => {
 }, envInt("BOT_BOT_EXCHANGE_PRUNE_MS", 600000, { min: 1000 }));
 
 // --- Discord client ---
-const client = new Client({
+// Null when Discord is off (no DISCORD_TOKEN): nothing below may assume it.
+const client = DISCORD_ON ? new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
@@ -1324,19 +1465,19 @@ const client = new Client({
     GatewayIntentBits.DirectMessageReactions,
   ],
   partials: [Partials.Channel, Partials.Message, Partials.Reaction],
-});
+}) : null;
 
 // --- WebSocket crash resilience ---
-client.on("error", (err) => {
+client?.on("error", (err) => {
   log.error({ err: err.message }, "Discord client error");
 });
 
-client.on("shardError", (err) => {
+client?.on("shardError", (err) => {
   log.error({ err: err.message }, "Discord WebSocket error");
 });
 
-client.once("ready", () => {
-  markReady();
+client?.once("ready", () => {
+  setSurface("discord", "ready");
   log.info({ tag: client.user.tag, cwd: CLAUDE_CWD, maxTurns: CODEX ? null : CLAUDE_MAX_TURNS || "unlimited", timeoutMs: CLAUDE_TIMEOUT_MS }, "Bot online");
   const shadowed = shadowedCommands();
   if (shadowed.length) {
@@ -1356,7 +1497,7 @@ client.once("ready", () => {
   );
 });
 
-client.on("messageCreate", async (msg) => {
+client?.on("messageCreate", async (msg) => {
   // Skip own messages (bot responses are recorded via recordBotResponse)
   if (msg.author.id === client.user?.id) return;
 
@@ -1548,7 +1689,7 @@ if (REACTION_HANDLER_ENABLED && ALLOWED_USER_IDS.length === 0) {
 
 const reactionInFlight = new Set();
 
-if (REACTION_HANDLER_ENABLED && ALLOWED_USER_IDS.length > 0) {
+if (client && REACTION_HANDLER_ENABLED && ALLOWED_USER_IDS.length > 0) {
   client.on("messageReactionAdd", async (reaction, user) => {
     try {
       if (reaction.partial) await reaction.fetch();
@@ -1915,6 +2056,10 @@ function collectOutboxFiles(sinceMs, dir = OUTBOX_DIR) {
  */
 function isSafeToRetryFresh(err) {
   if (!err) return false;
+  // A board attempt is never run a second time in-process: a worker that died
+  // may have acted, one that never started was already launched again once,
+  // and one that was stopped (a cancel, a hand-on) or hit its limit ended on purpose.
+  if (err.attemptDied || err.attemptNeverStarted || err.attemptCause) return false;
   return !err.sessionStarted && !err.toolCalls && !err.producedText;
 }
 
@@ -1946,6 +2091,12 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {
   const existingSession = channelSessions.get(channelId);
   // A board run's session is stamped with the access it was made under.
   if (opts.noBufferContext) opts = { ...opts, access: boardAccess() };
+  // An attempt that already fell back to a fresh session is followed there.
+  const freshAttempt = opts.attempt ? `${opts.attempt}-fresh` : null;
+  if (freshAttempt && attempts.state(freshAttempt).phase !== "none") {
+    opts = { ...opts, attempt: freshAttempt };
+    return spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, null, progress, opts);
+  }
   // A session from the other runtime is not carried over: after a switch the
   // channel starts fresh. Nor is a board session made under other access.
   const canResume = existingSession &&
@@ -1957,6 +2108,8 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {
     try {
       return await spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, existingSession.sessionId, progress, opts);
     } catch (err) {
+      // Refused before it launched (the poller's preflight): nothing ran, the session stands.
+      if (err?.launchRefused) throw err;
       if (!isSafeToRetryFresh(err)) {
         // Keep the session. It exists and holds the conversation, so the user's
         // NEXT message continues where the crash left off. If the session is
@@ -1978,6 +2131,8 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {
     }
   }
 
+  // A fresh session after a failed resume is an attempt of its own.
+  if (canResume && freshAttempt) opts = { ...opts, attempt: freshAttempt };
   return spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, null, progress, opts);
 }
 
@@ -2028,6 +2183,10 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "A scheduled or background wake-up does NOT owe a reply. When a check finds nothing, send nothing at all — not a status line, not a heartbeat, not a parenthetical explaining the silence. A sentence whose only content is that there is nothing to say IS the noise. Send a message only on a real event: an answer to something asked, a result, a change in state, or a failure.",
       "Never promise to check back with a sleep or a timer — those die with the session. Book the follow-up with the scheduler in the SAME reply that promises it, and say the concrete fire time.",
       "--- End speaking unprompted ---",
+      // The operator's shared handoff contract, when this bot's own tools carry
+      // it (HANDOFF_CONTRACT=tool:…). A reader setting applies to board tasks
+      // only: their prompt is built per task (lib/handoff-contract.js).
+      ...(HANDOFF_CONTRACT?.kind === "tool" && !opts.taskCarriesContract ? ["", "--- Handoff contract ---", toolLine(HANDOFF_CONTRACT), "--- End handoff contract ---"] : []),
     ].join("\n");
 
     // Head of the prompt, in precedence order: repo overrides, then anything
@@ -2059,6 +2218,8 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     // is parity, which builds it as the Discord session.
     const runKind = opts.noBufferContext ? BOARD_KIND : "session";
     const narrowBoard = runKind === "board";
+    // Board tasks and scheduled jobs take their own model; the conversation keeps the bot's.
+    const runModel = opts.noBufferContext ? RUNTIME.boardModel : opts.ephemeral ? RUNTIME.jobModel : RUNTIME.model;
     const args = CODEX ? [] : [
       "--output-format", "stream-json",
       // A run whose reply lands outside Discord gets least privilege, unless
@@ -2067,7 +2228,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       ...skillPackArgs(),
       "--verbose",
       ...(CLAUDE_MAX_TURNS ? ["--max-turns", String(CLAUDE_MAX_TURNS)] : []),
-      ...(RUNTIME.model ? ["--model", RUNTIME.model] : []),
+      ...(runModel ? ["--model", runModel] : []),
       ...mcpArgs(),
       ...settingsArgs({ board: narrowBoard, tmpDir: boardTmp }),
       "--append-system-prompt", systemPrompt,
@@ -2082,6 +2243,20 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     const finalPrompt = attachmentLines.length > 0
       ? `${attachmentLines.join("\n")}\n\n${prompt}`
       : prompt;
+
+    // The run's environment, built once over every writer (runEnvFor) and
+    // final here: Codex's shell exclusions come from the same decision, so no
+    // variable is kept from commands by a list computed before it was written.
+    const seatRun = opts.paperclipRun;
+    const built = runEnvFor(!opts.noBufferContext ? "session" : (narrowBoard ? "board" : "parity"), {
+      channelId, runOutbox, tmpDir: boardTmp,
+      seat: seatRun?.runId ? { value: process.env[seatRun.keyEnv], runId: seatRun.runId } : null,
+    });
+    if (built.problems.length) {
+      if (boardTmp) rmSync(boardTmp, { recursive: true, force: true });
+      throw new Error(`Run environment refused — ${built.problems.join("; ")}`);
+    }
+    const cleanEnv = built.env;
 
     const attachmentLog = { attachments: fileRefs.length, failedAttachments: attachmentFailures.length };
     if (CODEX) {
@@ -2103,7 +2278,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
         packs,
         mcp: CODEX_MCP?.servers,
         strictMcp: Boolean(CODEX_MCP?.strict),
-        shellExclude: connectorKeys(),
+        shellExclude: built.shellExclude,
       }));
       reqLog.info({ ...(resumeSessionId ? { sessionId: resumeSessionId } : {}), ...attachmentLog }, resumeSessionId ? "Resuming Codex session" : "Starting fresh Codex session");
     } else if (resumeSessionId) {
@@ -2113,60 +2288,6 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       args.push("-p", "--", finalPrompt);
       reqLog.info(attachmentLog, "Starting fresh Claude session");
     }
-
-    // Build a clean env without Claude nesting vars
-    const cleanEnv = { ...process.env };
-
-    // Publish the RESOLVED paths. This is what stops harness-owned skills from
-    // rotting: a skill that reads $BOT_BUFFER_FILE cannot go stale, while one
-    // that names `.po-bot-conversation-buffer.txt` breaks the moment a bot is
-    // renamed — which is exactly what happened to the shipped /remember, whose
-    // three hardcoded paths were ALL dead by the time anyone checked.
-    cleanEnv.BOT_STATE_DIR = STATE_DIR;
-    cleanEnv.BOT_SUMMARIES_DIR = HISTORY_DIR;
-    cleanEnv.BOT_ATTACHMENTS_DIR = ATTACHMENTS_DIR;
-    cleanEnv.BOT_OUTBOX_DIR = runOutbox;
-    cleanEnv.BOT_BUFFER_FILE = BUFFER_FILE;
-    cleanEnv.BOT_SESSIONS_FILE = SESSION_FILE;
-    cleanEnv.BOT_JOB_HISTORY_FILE = JOB_HISTORY_FILE;
-    cleanEnv.BOT_SCHEDULES_FILE = SCHEDULES_FILE;
-    cleanEnv.BOT_CHANNEL_ID = String(channelId);
-    // Every board run loses the Discord and bridge credentials under any name,
-    // and any variable carrying one's value (discordCarriers).
-    if (opts.noBufferContext) for (const name of discordCarriers(cleanEnv)) delete cleanEnv[name];
-    if (opts.noBufferContext && !narrowBoard) {
-      for (const name of Object.keys(cleanEnv)) if (withheldFromParityBoard(name)) delete cleanEnv[name];
-      // Every Paperclip key under any name too — a narrow run's scrub already
-      // takes them (withheldFromBoard).
-      for (const name of paperclipCarriers(cleanEnv)) delete cleanEnv[name];
-    } else if (opts.noBufferContext) {
-      for (const name of Object.keys(cleanEnv)) if (withheldFromBoard(name)) delete cleanEnv[name];
-      // Claude Code's project auto-memory is shared with the Discord sessions in
-      // the same CLAUDE_CWD and loads at startup, before any tool runs. Off here
-      // and in boardSettings; the CLI reads this variable first.
-      cleanEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
-      if (boardTmp) cleanEnv.TMPDIR = boardTmp;
-    }
-    // A board or restricted run reads no settings file (permissionArgs); its
-    // CLAUDE.md comes in through --add-dir, which loads one only with this set.
-    if (narrowBoard || PERMISSION_MODE === "restricted") cleanEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";
-    // The Paperclip connector keys leave every run, Discord's included…
-    for (const name of connectorKeys()) delete cleanEnv[name];
-    if (CODEX) {
-      // Skills name their scripts under $CLAUDE_PLUGIN_ROOT, which Claude sets
-      // for a plugin; Codex has no plugin folder, so the harness sets it.
-      if (skillPacks().includes(SKILL_PACK)) cleanEnv.CLAUDE_PLUGIN_ROOT = SKILL_PACK;
-      // A bypass session's MCP servers read their keys from here (codexMcp).
-      // A parity board run's: never one that puts back a withheld credential.
-      // …except where a server names one: Codex hands it to that server and
-      // keeps it out of every command (shellExclude).
-      if (!narrowBoard && CODEX_MCP) Object.assign(cleanEnv, opts.noBufferContext ? parityMcpEnv(CODEX_MCP.env) : CODEX_MCP.env);
-    }
-
-    delete cleanEnv.CLAUDECODE;
-    delete cleanEnv.CLAUDE_AGENT_SDK_VERSION;
-    delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
-    delete cleanEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING;
 
     // The spawn boundary. The context budget above is the policy; this is the
     // guarantee — an oversized argument gets cut here rather than becoming a
@@ -2178,14 +2299,27 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
         "An argument to Claude exceeded the OS limit and was truncated — this run saw an incomplete prompt. Lower CONTEXT_MAX_BYTES or SUMMARY_LOOKBACK_HOURS."
       );
     }
+    // A cut shell policy is one Codex reads wrong or not at all, and then the
+    // run's commands see what it hides (rule 15): refused, never spawned.
+    if (CODEX && codexRuntime.policyClamped(args, clamped)) {
+      if (boardTmp) rmSync(boardTmp, { recursive: true, force: true });
+      throw new Error("Run environment refused — the Codex shell exclusion policy is longer than one argument may be, and a cut list would let the run's commands read what it hides: list fewer variables in BOT_RUN_ENV or the MCP servers' env");
+    }
 
     const startTime = Date.now();
-    const child = spawn(RUNTIME.bin, safeArgs, {
-      cwd: CLAUDE_CWD,
-      env: cleanEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: CLAUDE_TIMEOUT_MS,
-    });
+    // A board attempt runs in a worker of its own that outlives this process
+    // (EM#626, lib/attempts.js): the same binary, arguments, environment and
+    // folder, its output on disk. A restarted bot follows the same attempt.
+    // Every launch of it passes the poller's preflight first (opts.gate).
+    const child = opts.attempt
+      ? attempts.run(opts.attempt, { bin: RUNTIME.bin, args: safeArgs, cwd: CLAUDE_CWD, env: cleanEnv, timeoutMs: CLAUDE_TIMEOUT_MS, ownTmp: boardTmp, gate: opts.gate })
+      : spawn(RUNTIME.bin, safeArgs, {
+        cwd: CLAUDE_CWD,
+        env: cleanEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: CLAUDE_TIMEOUT_MS,
+      });
+    if (child.adopted) reqLog.info({ attempt: opts.attempt, phase: child.adopted }, "Board attempt already under way — following it, not starting it again");
 
     activeProcesses.set(channelId, child);
     // Codex events become the Claude events handleStreamEvent reads.
@@ -2203,6 +2337,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       sessionId: null,
       resultSubtype: null,
       progress,
+      // A board answer is the card's record: only what follows the last tool
+      // call is posted there, whatever REPLY_FINAL_TEXT_ONLY says for chat.
+      finalTextOnly: Boolean(opts.finalTextOnly),
       // Did this process actually DO anything? Decides whether a failed run can
       // be safely retried — see isSafeToRetryFresh.
       toolCalls: 0,
@@ -2228,9 +2365,12 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       reqLog.warn({ stderr: data.toString().trim() }, "Claude stderr");
     });
 
+    // A worker handed the temp folder removes it itself, when it ends; the bot
+    // may close first (a stop, a restart), so it never removes one it handed over.
+    const dropTmp = () => { if (boardTmp && !child.tmpHanded) rmSync(boardTmp, { recursive: true, force: true }); };
     child.on("close", async (code) => {
       activeProcesses.delete(channelId);
-      if (boardTmp) rmSync(boardTmp, { recursive: true, force: true });
+      dropTmp();
       // Remove the status message first, so it never sits above the answer.
       try { await progress?.finish(); } catch { /* never block the reply */ }
       const elapsed = Date.now() - startTime;
@@ -2358,7 +2498,12 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
           { code, elapsed, subtype: state.resultSubtype, toolCalls: state.toolCalls, sessionStarted: Boolean(state.sessionId) },
           "Claude exited with non-zero code"
         );
-        const failure = new Error(`Claude exited with code ${code} after ${Math.round(elapsed / 1000)}s`);
+        const failure = new Error(child.died ? `The board attempt's worker died after it started (attempt ${opts.attempt})`
+          : child.neverStarted ? `The board attempt's worker never started (attempt ${opts.attempt})`
+            : `Claude exited with code ${code} after ${Math.round(elapsed / 1000)}s`);
+        failure.attemptDied = Boolean(child.died);
+        failure.attemptNeverStarted = Boolean(child.neverStarted);
+        failure.attemptCause = child.exit?.cause ?? null;
         // Evidence for the caller: a run that started a session, called tools, or
         // produced text may have already changed something in the world.
         failure.sessionStarted = Boolean(state.sessionId);
@@ -2373,7 +2518,12 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     });
 
     child.on("error", (err) => {
-      if (boardTmp) rmSync(boardTmp, { recursive: true, force: true });
+      // An error can end a run with no close (a refused launch never has one),
+      // so the run gives its slot back here too, or it holds it for good.
+      if (activeProcesses.get(channelId) === child) activeProcesses.delete(channelId);
+      dropTmp();
+      // A launch the poller's preflight refused ran nothing: its own error, as it is.
+      if (err?.launchRefused) { reqLog.info({ attempt: opts.attempt }, "Board attempt not launched — its card or a dependency changed first"); reject(err); return; }
       reqLog.error({ err }, "Failed to spawn Claude");
       reject(new Error(`Failed to spawn claude: ${err.message}`));
     });
@@ -2410,7 +2560,7 @@ function handleStreamEvent(event, reqLog, sendMessage, state) {
             // Everything written so far was working notes, not the answer.
             // Dropped from the reply AND from the returned response, so the
             // conversation history records what was posted, not what was thought.
-            if (REPLY_FINAL_TEXT_ONLY) state.setTurnText("");
+            if (REPLY_FINAL_TEXT_ONLY || state.finalTextOnly) state.setTurnText("");
             state.progress?.tool(block.name, block.input);
             if (block.name === "Write" && block.input?.file_path) {
               const fp = block.input.file_path;
@@ -2428,7 +2578,7 @@ function handleStreamEvent(event, reqLog, sendMessage, state) {
       // subtype tells a step-cap stop apart from a real crash — both exit non-zero
       state.resultSubtype = event.subtype;
       reqLog.info(
-        { subtype: event.subtype, isError: event.is_error, numTurns: event.num_turns, costUsd: event.cost_usd, durationMs: event.duration_ms, inputTokens: event.total_input_tokens, outputTokens: event.total_output_tokens },
+        { subtype: event.subtype, isError: event.is_error, numTurns: event.num_turns, costUsd: event.cost_usd, durationMs: event.duration_ms, inputTokens: event.total_input_tokens ?? inputTotal(event.usage), cachedInputTokens: event.total_cached_input_tokens ?? event.usage?.cache_read_input_tokens, outputTokens: event.total_output_tokens ?? event.usage?.output_tokens },
         "Claude result summary"
       );
       break;
@@ -2629,7 +2779,9 @@ async function runSummarizer() {
   summarizing = false;
 }
 
-if (SUMMARIZE_INTERVAL_MS > 0) {
+if (SUMMARIZE_INTERVAL_MS > 0 && !client) {
+  log.info("Background summarizer off — it reads Discord history, and Discord is off");
+} else if (SUMMARIZE_INTERVAL_MS > 0) {
   setTimeout(() => {
     runSummarizer();
     setInterval(runSummarizer, SUMMARIZE_INTERVAL_MS);
@@ -2878,6 +3030,19 @@ function shouldRunNow(cron, lastRunKey, tz = BOT_TIMEZONE) {
 // longer than the check interval would otherwise stack overlapping ticks.
 let schedulerRunning = false;
 
+// Every scheduled job posts to a Discord channel. With Discord off such a job
+// cannot run; it is refused when it is loaded (once, logged), never left to fail
+// at its minute. It stays in the file, so turning Discord on brings it back.
+const refusedJobs = new Set();
+function refusedForDiscordOff(job) {
+  if (client) return false;
+  if (!refusedJobs.has(job.id)) {
+    refusedJobs.add(job.id);
+    log.warn({ id: job.id, channel: job.channel }, "Scheduled job refused — it posts to a Discord channel and Discord is off; kept in the file for when Discord is on");
+  }
+  return true;
+}
+
 /**
  * Post a job's output. The suppression is here rather than in the caller because
  * the decision is deterministic and must apply to every kind of scheduled run.
@@ -2917,6 +3082,7 @@ function jobChannelSender(channel, jobLog, jobId) {
 // signal path needs it: the sender's ack waited out the whole Claude run, so a
 // notifier's 5s timeout reported "is it running?" on a signal that had landed.
 async function runWakeJob(job, sLog, explicitRelease = null, { detach = false } = {}) {
+  if (refusedForDiscordOff(job)) return false;
   const due = Date.parse(job.runAt);
   if (!Number.isFinite(due)) {
     sLog.error({ id: job.id, runAt: job.runAt }, "Wake job has an unreadable runAt — removing rather than retrying it every tick");
@@ -3015,6 +3181,7 @@ async function runScheduledJobs() {
     sLog.debug({ jobs: schedules.length, ids: schedules.map(j => j.id) }, "Scheduler check");
 
     for (const job of schedules) {
+      if (refusedForDiscordOff(job)) continue;
       if (isWakeJob(job)) {
         await runWakeJob(job, sLog);
         continue;
@@ -3092,6 +3259,7 @@ function validateSchedulesOnStartup() {
     return;
   }
   for (const job of schedules) {
+    if (refusedForDiscordOff(job)) continue;
     if (isWakeJob(job)) {
       const at = Date.parse(job.runAt);
       log.info(
@@ -3118,14 +3286,23 @@ setInterval(runScheduledJobs, SCHEDULE_CHECK_MS);
 // Tasks assigned to this bot on a Paperclip board, answered through the same
 // run path as Discord (see lib/paperclip.js). Off unless a board is configured:
 // PAPERCLIP_URL with PAPERCLIP_API_KEY, plus any PAPERCLIP_EXTRA_BOARDS.
-const { boards: PAPERCLIP_BOARDS, problems: PAPERCLIP_PROBLEMS } = paperclipBoards(process.env);
-for (const problem of PAPERCLIP_PROBLEMS) log.warn(`Paperclip board off — ${problem}`);
+// PAPERCLIP_BOARDS is read at the start gate.
+if (SURFACES.paperclip) for (const problem of PAPERCLIP_PROBLEMS) log.warn(`Paperclip board off — ${problem}`);
+if (SURFACES.paperclip) for (const warning of PAPERCLIP_WARNINGS) log.warn(`Paperclip escalation setting — ${warning}`);
 // The sandbox binds the working directory writable over its read denials, so a
 // CLAUDE_CWD that is the harness or state folder (or inside one) would open the
 // harness secrets file and the Discord stores to a board shell. Such a bot
 // answers no board.
 // A board policy that cannot be held turns board pickup off, never loosens it.
+// What lets a wake start the model: the card statuses a new ask starts it in,
+// and how often it looks again at an ask answered as waiting
+// (docs/model-work-triggers.md). A setting that cannot be read turns board
+// pickup off rather than guessing.
+const BOARD_TRIGGERS = { intake: undefined, rewake: 0, problems: [] };
+try { BOARD_TRIGGERS.intake = parseIntake(process.env.PAPERCLIP_INTAKE); } catch (err) { BOARD_TRIGGERS.problems.push(err.message); }
+try { BOARD_TRIGGERS.rewake = parseRewake(process.env.PAPERCLIP_REWAKE); } catch (err) { BOARD_TRIGGERS.problems.push(err.message); }
 const BOARD_POLICY_PROBLEMS = [
+  ...BOARD_TRIGGERS.problems,
   ...boardPolicyProblems(BOARD_POLICY, boardDeniedPaths(), CLAUDE_CWD),
   // A parity run on Codex is the session's argv, not the board profile.
   ...(CODEX && !BOARD_POLICY.parity ? codexRuntime.codexBoardProblems(BOARD_POLICY, RUNTIME) : []),
@@ -3135,7 +3312,23 @@ if (PAPERCLIP_BOARDS.length && PAPERCLIP_CWD_DENIED) {
   log.error({ cwd: CLAUDE_CWD }, "Paperclip connector off — CLAUDE_CWD is the harness or state folder, or inside one, which a board run cannot keep closed; point it at the folder board tasks should read");
 } else if (PAPERCLIP_BOARDS.length && BOARD_POLICY_PROBLEMS.length) {
   for (const problem of BOARD_POLICY_PROBLEMS) log.error(`Paperclip connector off — ${problem}`);
-} else {
+}
+if (PAPERCLIP_BOARDS.length && !BOARD_TRIGGERS.problems.length) {
+  log.info({ intake: BOARD_TRIGGERS.intake, rewake: BOARD_TRIGGERS.rewake || "off",
+    intakeFrom: process.env.PAPERCLIP_INTAKE ? "PAPERCLIP_INTAKE" : "default",
+    rewakeFrom: process.env.PAPERCLIP_REWAKE ? "PAPERCLIP_REWAKE" : "default" }, "Paperclip model-work triggers");
+}
+// A bot that declares Paperclip, or has no other surface, needs its connector
+// on: off, it is not the bot it says it is (or answers nowhere), and no
+// restart changes that.
+if (SURFACES.paperclipRequired && (PAPERCLIP_CWD_DENIED || BOARD_POLICY_PROBLEMS.length)) {
+  log.fatal(SURFACES.declared
+    ? `BOT_SURFACES includes paperclip, so ${PAPERCLIP_PREREQUISITE}. The connector is configured but off (see the error above).`
+    : "No DISCORD_TOKEN, so this bot answers on its Paperclip board alone, and the connector is configured but off (see the error above) — fix it, or set DISCORD_TOKEN.");
+  clearReady();
+  process.exit(EXIT_CONFIG);
+}
+if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.length) {
   if (PAPERCLIP_BOARDS.length) {
     const { execution, source, tools, allow, readPaths, writePaths, network } = BOARD_POLICY;
     // On Codex the tool names are not used: the run is the profile in lib/runtime/codex.js.
@@ -3157,29 +3350,78 @@ if (PAPERCLIP_BOARDS.length && PAPERCLIP_CWD_DENIED) {
     try { externalWriter = new RegExp(process.env.PAPERCLIP_EXTERNAL_WRITER); }
     catch (e) { log.error({ err: e.message }, "PAPERCLIP_EXTERNAL_WRITER is not a valid pattern; every task's status is the bot's to set"); }
   }
+  // A served board that names no configured board leaves every hand-off a direct write; say so.
+  if (process.env.PAPERCLIP_ESCALATE_URL && process.env.PAPERCLIP_ESCALATE_BOARD && !escalateBoard(PAPERCLIP_BOARDS))
+    log.warn({ board: process.env.PAPERCLIP_ESCALATE_BOARD }, "PAPERCLIP_ESCALATE_BOARD matches no board; hand-offs stay direct writes");
   for (const board of PAPERCLIP_BOARDS) {
     const pLog = log.child({ component: "paperclip", ...(board.id ? { board: board.id } : {}) });
-    const { promptChannel } = board;
+    const { promptChannel, escalation } = board;
     // The first board keeps the names it has always had, so its answered asks
     // and task sessions carry over; an extra board gets its own.
     const tag = board.id ? `paperclip-${board.id}` : "paperclip";
+    setSurface("board", "not ready", tag);
+    const escalate = escalateClientFor(board, { boards: PAPERCLIP_BOARDS });
+    if (escalate) pLog.info({ escalateBoard: board.url }, "Paperclip hand-offs on this board go through the shared escalate action");
     const poller = createPaperclipPoller({
       url: board.url,
       apiKey: board.apiKey,
       stateFile: join(STATE_DIR, `${tag}.json`),
       log: pLog,
       resumeInterrupted: process.env.PAPERCLIP_RESUME_INTERRUPTED === "1",
+      intake: BOARD_TRIGGERS.intake,
+      rewake: BOARD_TRIGGERS.rewake,
       externalWriter,
+      // A blocked card held by this bot with an escalation label is worked and
+      // left blocked; one it resolves goes back down (escalationReturnTo, else
+      // whoever handed it up), one it cannot goes to escalateTo, and a person
+      // handed one is told on Discord too, once (README: Escalations).
+      escalationLabels: escalation.labels,
+      escalateTo: escalation.escalateTo,
+      escalationReturnTo: escalation.returnTo,
+      escalationAuthority: escalation.authority,
+      // The action serves one board: PAPERCLIP_ESCALATE_BOARD's, else the first.
+      escalate,
+      contract: board.contract,
+      policy: board.policy,
+      onEscalate: async ({ task, link, to, ask }) => {
+        const channelId = escalation.channel ?? promptChannel;
+        const channel = await resolveBridgeChannel(channelId, { paperclipTask: task, escalation: true });
+        if (!channel) return;
+        // The ask is cut, never the link: the link is what the person acts on.
+        const line = ask.length > 1500 ? `${ask.slice(0, 1499)}…` : ask;
+        await channel.send({ content: `${escalation.mention ? `${escalation.mention} ` : ""}${task} is escalated to ${to}: ${line}\n${link}`,
+          allowedMentions: { parse: ["users"] } });
+        pLog.info({ paperclipTask: task, channelId }, "Paperclip escalation — the person was told on Discord");
+      },
+      // The board's attempts, so a cancel or reassignment stops the worker.
+      attempts,
+      // The first poll that reaches the board makes it a ready surface.
+      onPoll: () => { if (surfaces.boards[tag] !== "ready") { setSurface("board", "ready", tag); pLog.info("Paperclip board ready — first poll succeeded"); } },
       // One session per task, so a reply on the task continues its conversation.
-      answer: (prompt, issue) => {
+      answer: (prompt, issue, { runId, attemptId, gate } = {}) => {
         const reply = replyCollector();
         return runClaude(prompt, `${tag}-${issue.identifier}`, pLog.child({ paperclipTask: issue.identifier }),
-          reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true })
+          reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true, finalTextOnly: true, taskCarriesContract: Boolean(board.contract),
+            paperclipRun: runId ? { runId, keyEnv: board.keyEnv } : null, attempt: attemptId ?? null, gate })
           .then(() => reply.text());
       },
     });
-    setInterval(poller.tick, envInt("PAPERCLIP_POLL_MS", 15000, { min: 5000 }));
-    pLog.info({ url: board.url, promptChannel: promptChannel ?? null }, "Paperclip connector on");
+    // Live events wake the seat the moment one of its runs opens; polling stays
+    // on as recovery, slower while the socket is live (lib/paperclip-events.js).
+    const eventsOn = PAPERCLIP_EVENTS.on && board.events !== false && Boolean(poller.whoami);
+    let pump = null;
+    const events = eventsOn ? createLiveEvents({
+      url: board.url, apiKey: board.apiKey, whoami: poller.whoami, log: pLog, WebSocket,
+      onWake: (reason) => { poller.tick(reason); },
+      onState: (s) => { setEventState(tag, s); pump?.reschedule(); },
+    }) : null;
+    if (!eventsOn) setEventState(tag, "off");
+    pump = startBoard({
+      tick: poller.tick, events,
+      pollMs: envInt("PAPERCLIP_POLL_MS", 15000, { min: 5000 }),
+      reconcileMs: envInt("PAPERCLIP_RECONCILE_MS", 60000, { min: 5000 }),
+    });
+    pLog.info({ url: board.url, promptChannel: promptChannel ?? null, events: eventsOn ? "on" : "off" }, "Paperclip connector on");
   }
 }
 
@@ -3193,14 +3435,14 @@ process.on("unhandledRejection", (reason) => {
 process.on("SIGINT", () => {
   log.info("Shutting down...");
   clearReady();
-  client.destroy();
+  client?.destroy();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
   log.info("Shutting down...");
   clearReady();
-  client.destroy();
+  client?.destroy();
   process.exit(0);
 });
 
@@ -3209,7 +3451,8 @@ process.on("SIGTERM", () => {
 // forever because the WS server and scheduler keep the event loop busy. The
 // result was a bot that reported "started" and "running" while being
 // permanently deaf, which is the worst failure mode we can hand a new user.
-client.login(DISCORD_TOKEN).catch((err) => {
+// Discord off: no client, so no login — the boards above are the bot's surfaces.
+if (client) client.login(DISCORD_TOKEN).catch((err) => {
   clearReady();
   // A rejected token is permanent by definition — it is the same token next time.
   // Discord.js reports it as code TokenInvalid; the message check stays as a
