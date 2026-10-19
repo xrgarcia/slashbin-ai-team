@@ -215,14 +215,43 @@ network between that read and the write it guards, except the write itself.
 | w1 | the inbox listed the card, before the task is read | is handed to another agent, a person, or nobody | runs nothing; an owed answer is posted as a comment only; a live run ends with `HANDED_AWAY` | the holder is read with the task, and only this bot's card is worked (R40–R42) |
 | w2 | an answer is made | is unassigned | posts the answer as a comment only; status and holder stay | nobody holding a card is "away" too (`heldElsewhere`) (R2, R3, R5–R7) |
 | w3 | an answer is made | is handed away and back | posts the answer as a comment only | a change of holder after the mark is a newer decision (`decidedSince`) (R4, R10, R11) |
-| w4 | the tasks an answer linked finish one at a time, with trims and restarts between | — | resumes once, when the last is done | each done link is remembered in the state file (`linkDone`), not read from the card's trimmed waits (R1, R12, R14, R16, R18) |
+| w4 | the tasks an answer linked finish one at a time, with trims and restarts between | — | resumes once, when the last is done | every task the answer linked is read fresh at the wake, kept in the state file (`linked`) rather than read from the card's trimmed waits; one that reopened, or cannot be read, keeps the wait (d) (R1, R12, R14, R16, R18) |
 | w5 | a link write lands and its response is lost; the bot restarts | — | records the links from the card, and resumes when they are done | recovery reads the links back from the board (R24) |
-| w6 | an answered ask is revised A→B→A | — | works A again as new | an ask is answered only while it is the task's latest answered ask (`lastAnswered`) (R26–R33) |
+| w6 | an answered ask is revised A→B→A | — | works A again as new | an ask is answered only while it is the task's latest answered ask (`lastAnswered`, kept per task and never trimmed) (R26–R33) |
 | w7 | an escalation is routed by a seat reference | names a seat whose id is another seat's name | hands it to the seat with that id | an exact id is matched before a name (R34–R36) |
 | w8 | a blocked answer goes on (r7) | is taken away | runs nothing more; the answer is posted | holder and record are re-read before the go-on runs (R37–R39) |
 | w9 | the seats are listed for a hand-on | is unassigned, cycled, moved, re-waited, retitled, asked anew, or unlabelled | sees the change and does not hand it on | the seats are read before the card is validated (R43–R49) |
 | w10 | right before the answer's own write | is taken away or cycled | posts the answer as a comment only | the record is read last, just before the write; a change inside the write itself is a residual (R50, R51) |
 | w11 | the Foreman's note follows its hand-off, whatever its text or length | — | works the card, once | a restatement decides nothing; no comment text is read (`decisionsOf`) |
+
+## (d) The re-read rule: no act on a card that moved since its snapshot
+
+The rows above guard single writes. This one is the rule they all follow,
+and it covers the two acts that cost most when made on a stale card: running
+the model, and routing the card to someone else.
+
+- **Before the model runs**, the card is read again: status, holder, labels,
+  title, description, the newest ask, and the record since the wake's own
+  read. If any of it differs from the snapshot the run was built on, or the
+  card is cancelled, nothing runs and nothing is written. The state the
+  attempt began is put back, and the run is left open for the next look, which
+  decides from the card as it reads then (`cardNow`, `CardMoved`).
+- **Before every routing write** (a return, a hand-on, an unlink), the card is
+  read the same way. A change stops the write: the answer is posted as a
+  comment with `CARD_CHANGED`, or an escalation is worked again from the card
+  as it is. A routing write sends only the fields it changes (`holderWrite`):
+  it clears the other kind of holder only when the card has one.
+- **A wait resumes** only when every task it waits on reads `done` on a fresh
+  read. A task trimmed from the card, one that cannot be read, or one that
+  reopened keeps the wait (`linkedNow`, `allDone`).
+- **An ask is deduplicated** only against that task's own latest answered ask,
+  kept per task in the state file and never trimmed by other tasks' traffic
+  (`lastAnswered`). A hand-in to the bot from another holder since that answer
+  (`handedTo`) is a new ask, even with nothing else changed.
+
+Paperclip has no compare-and-set. A change inside the one round trip between
+the last read and the write is not seen (Known limits). The cases are in
+`test/paperclip-reread.test.js`, one per review row.
 
 ## Known limits
 
@@ -233,5 +262,7 @@ otherwise.
   or one the board refused to credit — reads as the person whose key it used,
   so a hand-off it made holds the card until someone moves it again.
 - **A hold made only in prose** does not hold the card (out of scope above).
-- **A write that lands inside the bot's own final write** (w10) is overwritten;
-  no Paperclip write can be made conditional. The window is one request.
+- **A write that lands inside the bot's own final write** (w10, (d)) is
+  overwritten; no Paperclip write can be made conditional. The window is one
+  round trip: from the response to the last re-read, through the write. A
+  change there to a card being returned, handed on or unlinked is not seen.

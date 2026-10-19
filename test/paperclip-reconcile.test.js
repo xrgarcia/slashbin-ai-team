@@ -1154,10 +1154,15 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
         replies: [(b) => { b.runs.get("t-1").find((r) => r.id === "r1").status = "cancelled"; return "Did it."; }, blockedOn("T-2"), "Did it again."],
         steps: [["wake", "r1"], ["ask", "And this?"], ["wake", "r2"], ["unask"], ["done", "t-2"], ["wake", "r3"]], ran: 3, status: "done",
         check: (b, prompts) => assert.ok(!/waited on|Resuming/.test(prompts[2]), prompts[2]) },
-      { name: "a person moves the card on between the bot's reads of it: the answer is a comment, their status stands",
+      // The card changed after the snapshot the run would be built on: nothing
+      // runs on it as it was and nothing is written; the next look works the
+      // card as it is now (docs/board-decisions.md (d)).
+      { name: "a person moves the card on between the bot's reads of it: nothing runs on the card as it was, the next look works it as it is",
         read: { of: "t-1", nth: 1, f: (b) => b.setStatus("t-1", "in_review", PERSON) },
-        replies: ["Did it."], steps: [["wake", "r1"]], ran: 1, status: "in_review",
-        check: (b) => assert.ok(b.writes.some((x) => x.body.comment === "Did it." && !x.body.status)) },
+        replies: ["Did it."], steps: [["wake", "r1"], ["retry"]], ran: 1, status: "done",
+        check: (b, prompts) => {
+          assert.deepStrictEqual(b.writes.map((x) => x.body), [{ status: "done", comment: "Did it." }]);
+        } },
       { name: "a person changes what the card waits on as the bot looks its waits up: the answer is a comment, their waits stand",
         read: { of: "T-2", nth: 2, f: (b) => b.relink("t-1", PERSON, ["t-3"]) },
         replies: [blockedOn("T-2")], steps: [["wake", "r1"]], ran: 1, status: "in_progress", links: ["t-3"],
@@ -1368,7 +1373,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     // The checkout is undone before the note, which ends the run — naming
     // this bot as what unblocks it, as the board demands; resolved, the card goes back to whoever handed it up, still blocked.
     assert.deepStrictEqual(b.writes.map((w) => w.body), [KEEP_BLOCKED,
-      { assigneeAgentId: "agent-foreman", assigneeUserId: null, comment: "Ruled on acme/app#12: 30 s retry window." }]);
+      { assigneeAgentId: "agent-foreman", comment: "Ruled on acme/app#12: 30 s retry window." }]);
     assert.strictEqual(b.issues.get("t-1").status, "blocked");
     assert.strictEqual(b.issues.get("t-1").assigneeAgentId, "agent-foreman");
     // A person's own block, labelled and handed to the bot, is an escalation too.
@@ -1444,7 +1449,8 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     const hand = b.writes.find((w) => "assigneeAgentId" in w.body);
     assert.ok(hand, JSON.stringify(b.writes));
     assert.strictEqual(hand.runId, "r1", "the hand-off was not made under the bot's run");
-    assert.deepStrictEqual(hand.body, { assigneeAgentId: "agent-po", assigneeUserId: null,
+    // Only the fields it changes: the card had no user holder to clear.
+    assert.deepStrictEqual(hand.body, { assigneeAgentId: "agent-po",
       comment: "Need a product call on the retry window.\nTried both specs; they conflict on customer-facing behaviour." });
     assert.strictEqual(b.issues.get("t-1").assigneeAgentId, "agent-po");
     assert.strictEqual(b.issues.get("t-1").status, "blocked");
@@ -2088,7 +2094,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       const opts = { stateFile, escalateTo: parseEscalateTo("user:user-boss|Boss"), onEscalate: async (p) => pings.push(p) };
       const pings = [];
       // Lands just after the bot puts the card back to blocked, before anything runs.
-      if (phase.before) b.state.afterWrite = () => rev.make(b);
+      if (phase.before) b.state.afterWrite = () => { b.state.afterWrite = null; rev.make(b); };
       const prompts = [], statuses = [];
       const answer = async (p) => {
         prompts.push(p);
@@ -2100,6 +2106,24 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
         return way === "up" ? `Need a call ${k}.\n${OUTCOME_MARK} escalate` : `Ruled ${k}.`;
       };
       await escalating(b, answer, opts).tick();
+      if (phase.before) {
+        // Changed after the snapshot the run was built on: nothing runs on the
+        // old card, nothing but the checkout's undo is written, and the card
+        // is left for the next look (docs/board-decisions.md (d)).
+        assert.strictEqual(prompts.length, 0, `${name}: worked on the card as it was`);
+        assert.deepStrictEqual(b.writes.map((w) => w.body), [KEEP_BLOCKED], `${name}: wrote over the change`);
+        await escalating(b, answer, opts).tick();
+        if (rev.kind === "theirs") {
+          // The next look decides from the card as it is now, their change
+          // included, as any wake does: handed away, it is not the bot's to
+          // work; otherwise it is worked once, on the card as it now reads.
+          const away = rev.name === "handed to another seat";
+          assert.strictEqual(prompts.length, away ? 0 : 1, `${name}: worked ${prompts.length} times`);
+          if (away) assert.deepStrictEqual(b.writes.map((w) => w.body), [KEEP_BLOCKED], `${name}: wrote on a card handed away`);
+          else assert.deepStrictEqual(b.writes.filter((w) => w.body.comment).map((w) => w.runId), ["r1"], name);
+          continue;
+        }
+      }
       const t = b.issues.get("t-1");
       const holderNow = t.assigneeAgentId ?? t.assigneeUserId;
       const said = b.writes.filter((w) => w.body.comment);
@@ -2135,11 +2159,12 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
         assert.strictEqual(b.writes.filter((w) => "assigneeAgentId" in w.body || "assigneeUserId" in w.body).length, 1, name);
         continue;
       }
-      // Revised once: worked again under the same run from the card as it is, then handed on.
-      const runs = 1 + 1 + (phase.warmUp ? 1 : 0);
+      // Revised once: worked again under the same run from the card as it is,
+      // then handed on. Revised before the run: worked once, on the revision.
+      const runs = phase.before ? 1 : 1 + 1 + (phase.warmUp ? 1 : 0);
       assert.strictEqual(prompts.length, runs, `${name}: worked ${prompts.length} times`);
       if (rev.seen) assert.match(prompts.at(-1), rev.seen, `${name}: the last run was not given the revision`);
-      assert.match(prompts.at(-1), /The card changed while you worked on it/, name);
+      if (!phase.before) assert.match(prompts.at(-1), /The card changed while you worked on it/, name);
       assert.strictEqual(handOffs.length, 1, `${name}: ${JSON.stringify(b.writes)}`);
       assert.strictEqual(handOffs[0], said[0], `${name}: the hand-off was not the answer's write`);
       assert.match(said[0].body.comment, new RegExp(`${runs}\\.`), `${name}: the newest answer was not posted`);

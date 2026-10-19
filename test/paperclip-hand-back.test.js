@@ -83,8 +83,9 @@ const RETURNED = `Only the Product Owner can change its own routine.\n1. Fix the
     assert.strictEqual(b.writes.length, 1, JSON.stringify(b.writes));
     const [w] = b.writes;
     assert.strictEqual(w.runId, "r1");
+    // Only the fields it changes: the card had no user holder to clear.
     assert.deepStrictEqual(w.body, { status: "blocked", unblockDescriptor: { owner: { agentId: "agent-em" }, action: UNBLOCK_ACTION }, blockedByIssueIds: [],
-      assigneeAgentId: "agent-po", assigneeUserId: null, comment: "Only the Product Owner can change its own routine.\n1. Fix the skill path." });
+      assigneeAgentId: "agent-po", comment: "Only the Product Owner can change its own routine.\n1. Fix the skill path." });
   });
 
   await check("a task handed to the bot goes back to whoever handed it, not its creator", async () => {
