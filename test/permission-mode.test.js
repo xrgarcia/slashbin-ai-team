@@ -773,7 +773,7 @@ check("a list it would read differently from its operator is refused, at startup
     assert.match(p.problems.join(), /BOT_RUN_ENV entry/);
   }
   const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.match(bot, /for \(const run of \["session", [^\n]*\]\) \{\n  const \{ problems \} = runEnvFor\(run\);[\s\S]{0,200}process\.exit\(EXIT_CONFIG\)/);
+  assert.match(bot, /for \(const run of \[\.\.\.\(DISCORD_ON \? \["session"\] : \[\]\), [^\n]*\]\) \{\n  const \{ problems \} = runEnvFor\(run\);[\s\S]{0,200}process\.exit\(EXIT_CONFIG\)/);
   // A run never builds on a refused environment.
   assert.match(bot, /if \(built\.problems\.length\) \{[\s\S]{0,120}throw new Error/);
 });

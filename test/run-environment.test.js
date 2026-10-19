@@ -138,7 +138,7 @@ check("the Codex shell exclusions are the builder's, from the same call", () => 
 });
 check("runEnvFor is the only caller of buildRunEnv, and startup checks every run kind it will make", () => {
   assert.strictEqual((BOT.match(/buildRunEnv\(/g) || []).length, 1);
-  assert.ok(/for \(const run of \["session", \.\.\.\(PAPERCLIP_BOARDS\.length/.test(BOT));
+  assert.ok(/for \(const run of \[\.\.\.\(DISCORD_ON \? \["session"\] : \[\]\), \.\.\.\(PAPERCLIP_BOARDS\.length/.test(BOT));
   assert.ok(/Run environment refused \(\$\{run\} run\)/.test(BOT));
 });
 check("the builder sees every Codex server's command line, as Codex is handed it (rule 11)", () => {
