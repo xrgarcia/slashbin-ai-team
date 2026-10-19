@@ -618,6 +618,122 @@ const wake = (b, id) => {
     });
   }
 
+  // ---- Round 7: the snapshot is the whole card, whoever changed it ----
+
+  // The card a run is built on, as compared just before the run: its status,
+  // holder, labels, title, description and newest comment. A change by
+  // Paperclip itself, or by this bot's own seat outside the run, is a change.
+  const BOT_SEAT = { actorType: "agent", actorId: ME.id };
+  const systemNotice = (b) => {
+    const c = { id: "s1", authorType: "system", authorAgentId: null, authorUserId: null, createdAt: b.now(), body: "Run recovered by the board." };
+    b.comments.get("t-1").push(c);
+    b.activity.get("t-1").unshift({ action: "issue.comment_added", createdAt: c.createdAt, actorType: "system", actorId: "execution-recovery", details: { commentId: c.id } });
+  };
+  const neverRan = (b, prompts, row) => {
+    assert.strictEqual(prompts.length, 0, `${row}: ran on the card as it was`);
+    assert.ok(!b.writes.some((w) => w.body.status === "done" || w.body.comment), `${row}: answered over the change: ${JSON.stringify(b.writes)}`);
+    assert.deepStrictEqual(handOffs(b), [], `${row}: handed on over the change`);
+  };
+  for (const [row, kind, at, change, what] of [
+    // Paperclip's recovery blocks the card and fails its run after the first comments read.
+    ["R1", "ordinary", GET("/issues/t-1/comments"), (b) => b.recover("t-1", "r1"), "recovered after the first comments read"],
+    // The same recovery inside the re-read itself: after its read of the task, before its read of the record.
+    ["R55", "ordinary", GET("/issues/t-1"), (b) => b.recover("t-1", "r1"), "recovered during the re-read before the run"],
+    // On an escalation, after the prompt's seat lookup, the last read before the run.
+    ["R6", "escalation", GET(`/companies/${ME.companyId}/agents`), (b) => b.recover("t-1", "r1"), "recovered after the prompt's seat lookup"],
+    ["R2", "ordinary", GET("/issues/t-1/comments"), (b) => b.say("t-1", BOT_SEAT, "A note from this bot's seat."), "commented on by this bot's own seat after the first comments read"],
+    ["R7", "escalation", GET(`/companies/${ME.companyId}/agents`), (b) => b.say("t-1", BOT_SEAT, "A note from this bot's seat."), "commented on by this bot's own seat before the run"],
+    ["R7", "escalation", GET(`/companies/${ME.companyId}/agents`), systemNotice, "given a notice by the board before the run"],
+  ]) {
+    await check(`${row}: ${kind}, ${what}: nothing runs and nothing is answered`, async () => {
+      const b = kind === "ordinary" ? ordinary() : escalation();
+      const fetch = after(b, at, change, row === "R55" ? 2 : 1);
+      const { prompts, answer } = model(b, ["Done.", "Done."]);
+      await poller(b, answer, { stateFile: stateFileOf(), fetch, ...(kind === "escalation" ? ESC : {}) }).tick();
+      neverRan(b, prompts, row);
+      if (change !== systemNotice && !what.includes("own seat")) assert.strictEqual(b.issues.get("t-1").status, "blocked", `${row}: the recovery's block was not left`);
+    });
+  }
+
+  // R3, R9: a wait-less look trims a done wait off a card that waits on T-2 and
+  // T-3. A title (R3) or description (R9) edit after the look reads the card
+  // stops the trim: the links and the unblock step stay as they were.
+  const waitingOnBoth = async () => {
+    const b = ordinary();
+    const stateFile = stateFileOf();
+    await poller(b, model(b, [`Need both.\n${OUTCOME_MARK} blocked on T-2, T-3`]).answer, { stateFile }).tick();
+    assert.deepStrictEqual(b.issues.get("t-1").blockedByIssueIds, ["t-2", "t-3"]);
+    b.setStatus("t-2", "done", PERSON);
+    return { b, stateFile, step: b.issues.get("t-1").unblockDescriptor };
+  };
+  await check("R3, R9 control: unchanged, the wait-less look trims the done wait", async () => {
+    const { b, stateFile } = await waitingOnBoth();
+    await poller(b, model(b, []).answer, { stateFile }).tick();
+    assert.deepStrictEqual(b.issues.get("t-1").blockedByIssueIds, ["t-3"]);
+  });
+  for (const [row, field] of [["R3", "title"], ["R9", "description"]]) {
+    await check(`${row}: the ${field} edited after a wait-less look reads the card: its waits are not trimmed`, async () => {
+      const { b, stateFile, step } = await waitingOnBoth();
+      const before = b.writes.length;
+      const fetch = after(b, GET("/issues/t-1"), (x) => x.edit("t-1", PERSON, field, `${field}, revised`));
+      await poller(b, model(b, []).answer, { stateFile, fetch }).tick();
+      const t = b.issues.get("t-1");
+      assert.deepStrictEqual(t.blockedByIssueIds, ["t-2", "t-3"], `${row}: unlinked over the edit`);
+      assert.deepStrictEqual(t.unblockDescriptor, step, `${row}: the unblock step was rewritten over the edit`);
+      assert.ok(!b.writes.slice(before).some((w) => "blockedByIssueIds" in w.body || "unblockDescriptor" in w.body), `${row}: ${JSON.stringify(b.writes.slice(before))}`);
+    });
+  }
+
+  // R4: an escalation waits on T-2 and on T-404, a task the board does not
+  // have. T-2 finishing is not every wait done. R5: it waits on open T-2 and
+  // on T-3, done when it answered; T-3 reopens, then T-2 finishes. Each with
+  // and without a restart before the wake.
+  for (const [row, waits, before, restart] of [
+    ["R4", "T-2, T-404", () => {}, false], ["R4", "T-2, T-404", () => {}, true],
+    ["R5", "T-2, T-3", (b) => b.setStatus("t-3", "done", PERSON), false], ["R5", "T-2, T-3", (b) => b.setStatus("t-3", "done", PERSON), true],
+  ]) for (const mirrored of [false, true]) {
+    await check(`${row}: a${mirrored ? " mirrored" : "n unmirrored"} escalation blocked on ${waits}${restart ? ", restart before the wake" : ""}: no resume or hand-on until every one reads done`, async () => {
+      const b = escalation({ mirrored });
+      before(b);
+      const stateFile = stateFileOf();
+      const { prompts, answer } = model(b, [`Need ${waits}.\n${OUTCOME_MARK} blocked on ${waits}`, "Ruled."]);
+      let p = poller(b, answer, { stateFile, ...ESC });
+      await p.tick();
+      if (row === "R5") b.setStatus("t-3", "todo", PERSON);
+      b.setStatus("t-2", "done", PERSON);
+      if (restart) p = poller(b, answer, { stateFile, ...ESC });
+      wake(b, "r2");
+      await p.tick();
+      assert.strictEqual(prompts.length, 1, `${row}: resumed with a wait not done`);
+      assert.deepStrictEqual(handOffs(b), [], `${row}: handed on with a wait not done`);
+      if (row === "R5") {
+        // Control: once both read done, it resumes.
+        b.setStatus("t-3", "done", PERSON);
+        wake(b, "r3");
+        await p.tick();
+        assert.strictEqual(prompts.length, 2, `${row}: not resumed once both were done`);
+      }
+    });
+  }
+
+  // R8: a person adds a label to an escalation while it is worked, keeping
+  // the escalation label. The answer was built on the labels before it: it
+  // is not handed on unless a run on the card as it is now came after.
+  await check("R8: a label added while an escalation is worked: the answer built before it is not handed on", async () => {
+    const b = escalation();
+    const addLabel = (x) => {
+      const i = x.issues.get("t-1");
+      const to = [...i.labels, { name: "Customer waiting" }];
+      x.record("t-1", PERSON, { changes: { labels: { from: i.labels, to } } });
+      i.labels = to;
+    };
+    const { prompts, answer } = model(b, [(x) => { addLabel(x); return "Ruled: 30 s."; }, "Ruled again: 30 s."]);
+    await poller(b, answer, { stateFile: stateFileOf(), ...ESC }).tick();
+    const on = handOffs(b).filter((w) => w.body.assigneeAgentId === "agent-foreman");
+    assert.ok(on.length === 0 || (prompts.length === 2 && on.every((w) => /Ruled again/.test(w.body.comment ?? ""))),
+      `handed on with the answer from before the label: ${prompts.length} runs, ${JSON.stringify(on)}`);
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
