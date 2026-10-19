@@ -1078,9 +1078,10 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
         check: (b) => assert.match(b.writes.at(-1).body.comment, /^Need T-2\.\n\nResuming: T-2[\s\S]*Finished\.$/) },
       { name: "mid-retry of a resume: its post fails, then its wait reopens", replies: [blockedOn("T-2"), (b) => { b.state.down = new Set(["t-1"]); return "Finished."; }],
         // Its close came of a resume, and the wait it resumed from is open
-        // again when it is posted: the answer goes as a comment, the wait kept.
+        // again when it is posted: the answer is said in the write that keeps
+        // the wait — blocked, if the card is not — and never closes it.
         steps: [["wake", "r1"], ["done", "t-2"], ["wake", "r2"], ["up"], ["open", "t-2"], ["retry"]], ran: 2, status: "blocked", links: ["t-2"],
-        check: (b) => assert.ok(b.writes.some((x) => x.body.comment?.includes("Finished.") && x.body.status === undefined)) },
+        check: (b) => assert.ok(b.writes.some((x) => x.body.comment?.includes("Finished.") && x.body.comment.includes("T-2 is not done any more") && x.body.status !== "done")) },
       { name: "interrupted, then a linked wait finishes: the fallback, never a rerun", start: { blockedByIssueIds: ["t-2"] }, replies: [],
         steps: [["die", "r1"], ["done", "t-2"], ["retry"]], ran: 0, status: "blocked",
         check: (b) => assert.ok(b.writes.some((x) => x.body.comment === FALLBACK_REPLY)) },

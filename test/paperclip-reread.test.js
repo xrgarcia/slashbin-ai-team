@@ -1287,13 +1287,27 @@ const wake = (b, id) => {
     assert.ok([...src.matchAll(/await answer\("", /g)].every((m) => /attemptId: id \}/.test(src.slice(m.index, m.index + 120))), "an answer(\"\") that is not a worker followed");
     assert.strictEqual(answers.length, 1, "more than one place invokes the model");
     assert.ok(inRun(answers[0]), "the model is invoked outside run()");
-    for (const step of ["await depsGate(deps.refs, item.id)", "throw new DepsOpen(now)", "deps.say(", "deps: depIds"]) {
+    // The one preflight: every dependency read first, the card compared
+    // after them, last before the model (a change during the dependency
+    // reads is seen), each refusal thrown.
+    const preAt = src.indexOf("const preflight = async (");
+    assert.ok(preAt >= 0 && preAt < runAt, "no preflight() before run()");
+    const pre = span(preAt), inPre = within(pre);
+    const preDeps = src.indexOf("await depsGate(deps.refs, item.id)", preAt), preCard = src.indexOf("await cardNow(item.id", preAt);
+    assert.ok(inPre(preDeps) && inPre(preCard) && preDeps < preCard, "preflight() does not read the dependencies before the card");
+    for (const step of ["throw new DepsOpen(now)", "throw new CardMoved()"]) assert.ok(inPre(src.indexOf(step, preAt)), `preflight() does not ${step}`);
+    for (const step of ["await preflight(card, deps)", "deps.say(", "deps: depIds"]) {
       const at = src.indexOf(step, runAt);
       assert.ok(at >= 0 && inRun(at) && at < answers[0], `run() does not ${step} before the model`);
     }
-    // The routing writes of an answer built on that read check it again.
+    assert.ok(![...src.slice(src.indexOf("await preflight(card, deps)", runAt), answers[0]).matchAll(/await (api|cardNow|depsGate|readCard)\(/g)].length, "a read between the preflight and the model");
+    // The routing writes of an answer built on that read check it again:
+    // the dependencies first, the card after them, last before the write.
     const gateAt = src.indexOf("async function routeGate(");
-    assert.ok(within(span(gateAt, ") {"))(src.indexOf("await depsGate(from.deps, taskId)", gateAt)), "routeGate does not re-check a resume's dependencies");
+    const inGate = within(span(gateAt, ") {"));
+    const gateDeps = src.indexOf("await depsGate(from.deps, taskId)", gateAt), gateCard = src.indexOf("await cardNow(taskId", gateAt);
+    assert.ok(inGate(gateDeps), "routeGate does not re-check a resume's dependencies");
+    assert.ok(inGate(gateCard) && gateDeps < gateCard, "routeGate reads the card before the dependencies");
     // The dependency-done words exist only in the two builders, and the
     // builders are called only from a `deps.say`, which only run() calls.
     const builders = [src.indexOf("const resumeText = ("), src.indexOf("const goOnText = (")].map((at) => span(at));
@@ -1309,9 +1323,14 @@ const wake = (b, id) => {
       assert.ok(ok, `${m[1]}() called outside a deps say: ${src.slice(m.index - 60, m.index + 30)}`);
     }
     // Each resume and going-on passes its deps to run(): the ordinary resume,
-    // goOn, r7, the escalation resume, and both interrupted re-runs.
-    const gated = [...src.matchAll(/\brun\(([^;]*?), (deps|cont \? contDeps\(cont, "(task|card)"\) : undefined)\)/g)];
-    assert.strictEqual(gated.length, 6, `found ${gated.length} gated run() calls: ${gated.map((m) => m[0])}`);
+    // goOn, r7, the escalation resume, both interrupted re-runs and both
+    // unlaunched workers run after a restart (savedDeps). The only run()
+    // without them is the rework of a newer ask.
+    const gated = [...src.matchAll(/\brun\(([^;]*?), (deps|\(deps = cont \? contDeps\(cont, "(task|card)"\) : savedDeps\(key, "\3"\)\))\)/g)];
+    assert.strictEqual(gated.length, 8, `found ${gated.length} gated run() calls: ${gated.map((m) => m[0])}`);
+    const ungated = [...src.matchAll(/\bawait run\(/g)].map((m) => m.index).filter((i) => !gated.some((g) => g.index === i + 6));
+    assert.deepStrictEqual(ungated.map((i) => src.slice(i, i + 31)), ["await run(reworkNote(what.join("], "a run() without its deps besides the rework");
+    assert.strictEqual([...src.matchAll(/cont \? contDeps\(cont, "(task|card)"\) : savedDeps\(key, "\1"\)/g)].length, 4, "a recovery run() not gated on its saved dependencies");
     // Every eligibility lookup that admits a resume leads to one of them:
     // no run() between it and the next gated run() goes ungated.
     for (const look of ["doneBlockers(issue) : []", "await allDone(first.waitsOn, item.id)", "waits?.ready && !continued.has(goneOn)", "const deps = resumes ?"]) {
@@ -1450,6 +1469,238 @@ const wake = (b, id) => {
     await poller(b, m.answer, { stateFile: stateFileOf(), fetch: reopensAfterLookup(b), ...ESC }).tick();
     waitKept(b, m, "R4");
   });
+
+  // ---- Round 13: one preflight, one settle path ----
+
+  // The card compare is the last read before the model and before each
+  // routing write: every dependency is read first (depsGate), the card after
+  // them (cardNow), so a change during a dependency read is seen. A refusal
+  // because a dependency reads open keeps the wait on the board (waitKept),
+  // and every recovery that runs the model goes through the same preflight.
+  // Read order, from the fake board's log: an ordinary resume reads T-2 for
+  // eligibility (1) and in its preflight (2), then T-1, then the model; an
+  // escalation resume reads T-2 in linkedNow (1), its preflight (2), then
+  // after the model before its unlink (3) and before its hand-off (4); a
+  // go-on reads T-2 in allDone (1) and its preflight (2).
+  const REFUNDS = (b) => b.say("t-1", PERSON, "And refunds too?");
+  const hangAt = (b, match, nth = 1) => async (url, init = {}) => {
+    if (nth > 0 && match(url.replace(/^.*\/api/, ""), init) && --nth === 0) return new Promise(() => {});
+    return b.fetch(url, init);
+  };
+  const settleDown = () => new Promise((r) => setTimeout(r, 20));
+  const reopen = (b) => b.setStatus("t-2", "todo", PERSON);
+  const finish = (b) => b.setStatus("t-2", "done", PERSON);
+  // T-1 answered blocked on T-2, T-2 done since, woken under r2.
+  const resumable = async (kind) => {
+    const b = kind === "escalation" ? escalation() : ordinary();
+    const opts = kind === "escalation" ? ESC : {};
+    const stateFile = stateFileOf();
+    return { b, opts, stateFile, first: async (m, more = {}) => {
+      await poller(b, m.answer, { stateFile, ...opts, ...more }).tick();
+      assert.deepStrictEqual(b.issues.get("t-1").blockedByIssueIds, ["t-2"], `${kind}: the first answer did not wait on T-2`);
+      finish(b);
+      wake(b, "r2");
+    } };
+  };
+  const kept = (b, row) => {
+    const t = b.issues.get("t-1");
+    assert.strictEqual(t.status, "blocked", `${row}: the card left its wait: ${JSON.stringify(b.writes.slice(-3))}`);
+    assert.deepStrictEqual(t.blockedByIssueIds, ["t-2"], `${row}: the wait's link was dropped`);
+    assert.strictEqual(holderOf(t), ME.id, `${row}: handed on`);
+    assert.deepStrictEqual(handOffs(b), [], `${row}: a hand-off went out`);
+    assert.ok(!b.writes.some((w) => w.body.status === "done"), `${row}: closed done`);
+  };
+
+  // R1 / R26: a follow-up during the preflight's T-2 read, after the eligibility lookup.
+  for (const row of ["R1", "R26"]) {
+    await check(`${row}: an ordinary resume, a follow-up lands during the preflight's dependency read: answer() never runs on the older thread`, async () => {
+      const r = await resumable("ordinary");
+      const m = model(r.b, [ON_T2, "Refunds too, done."]);
+      await r.first(m);
+      await poller(r.b, m.answer, { stateFile: r.stateFile, fetch: after(r.b, T2_READ, REFUNDS, 2) }).tick();
+      assert.strictEqual(m.prompts.length, 1, `${row}: the resume ran on a changed card`);
+      assert.ok(!r.b.writes.some((w) => w.body.status === "done"), `${row}: closed on the older thread`);
+      // The follow-up is still there for the next wake, which answers it.
+      wake(r.b, "r3");
+      await poller(r.b, m.answer, { stateFile: r.stateFile }).tick();
+      assert.strictEqual(m.prompts.length, 2, `${row}: the follow-up was not answered on the next wake`);
+      assert.match(m.prompts[1], /And refunds too\?/, `${row}: the next run omits the follow-up`);
+    });
+  }
+
+  // R2 / R6: an escalation resume, a follow-up during a dependency read after the model, before its routing.
+  for (const [row, nth, where] of [["R2", 4, "just before its hand-off"], ["R2", 3, "before its unlink"], ["R6", 4, "(the final one) before its hand-off"]]) {
+    await check(`${row}: an escalation resume, a follow-up lands during the dependency read ${where}: the stale ruling is not handed on`, async () => {
+      const r = await resumable("escalation");
+      const m = model(r.b, [ON_T2, "Ruled: 30 s.", "Ruled again: 30 s., refunds too."]);
+      await r.first(m);
+      await poller(r.b, m.answer, { stateFile: r.stateFile, ...ESC, fetch: after(r.b, T2_READ, REFUNDS, nth) }).tick();
+      // No hand-off of the ruling made on the older thread: one goes out only
+      // with the rework that answered the follow-up (as R18 holds).
+      const stale = handOffs(r.b).filter((w) => !/Ruled again: 30 s\., refunds too\./.test(w.body.comment ?? ""));
+      assert.deepStrictEqual(stale, [], `${row}: the old ruling was handed on: ${JSON.stringify(stale)}`);
+      if (handOffs(r.b).length) assert.ok(m.prompts.length === 3 && /And refunds too\?/.test(m.prompts[2]), `${row}: handed on without working the follow-up`);
+      else assert.strictEqual(holderOf(r.b.issues.get("t-1")), ME.id, `${row}: the holder was not kept`);
+      assert.ok(r.b.writes.some((w) => /Ruled: 30 s\./.test(w.body.comment ?? "")), `${row}: the existing answer was not posted`);
+      // Whatever went on after it answered the follow-up, never the older thread.
+      for (const p of m.prompts.slice(2)) assert.match(p, /And refunds too\?/, `${row}: a later run omits the follow-up`);
+    });
+  }
+
+  // R3 / R8: T-2 reopens while an ordinary resume's answer is made.
+  const reopenedDuring = async (kind, row) => {
+    const r = await resumable(kind);
+    const answer = kind === "escalation" ? "Ruled: 30 s." : "Finished.";
+    const m = model(r.b, [ON_T2, (b) => { reopen(b); return answer; }, `${answer} Again.`]);
+    await r.first(m);
+    await poller(r.b, m.answer, { stateFile: r.stateFile, ...r.opts }).tick();
+    assert.strictEqual(m.prompts.length, 2, `${row}: the resume did not run`);
+    kept(r.b, row);
+    assert.ok(r.b.writes.some((w) => w.body.comment?.includes(answer) && w.body.comment.includes("T-2 is not done any more")), `${row}: the answer was not posted with the reopened wait`);
+    return { ...r, m, answer };
+  };
+  await check("R3: T-2 reopens while an ordinary resume's answer is made: the close is refused, the wait durable across wakes and a restart", async () => {
+    const r = await reopenedDuring("ordinary", "R3");
+    // A quiet wake (a new poller: a restart) keeps it waiting, no model run.
+    wake(r.b, "r3");
+    await poller(r.b, r.m.answer, { stateFile: r.stateFile }).tick();
+    assert.strictEqual(r.m.prompts.length, 2, "R3: a quiet wake ran the model");
+    kept(r.b, "R3");
+  });
+  await check("R8: an ordinary resumed close refused on a reopened T-2: T-1 finishes when T-2 finishes again", async () => {
+    const r = await reopenedDuring("ordinary", "R8");
+    finish(r.b);
+    wake(r.b, "r3");
+    await poller(r.b, r.m.answer, { stateFile: r.stateFile }).tick();
+    assert.strictEqual(r.b.issues.get("t-1").status, "done", `R8: T-1 did not finish: ${JSON.stringify(r.b.writes.slice(-2))}`);
+    assert.ok(r.m.prompts.length <= 3, "R8: run more than once more");
+  });
+  await check("R4: T-2 reopens while a resumed escalation's ruling is made: the hand-off refused, the wait kept across wakes and a restart", async () => {
+    const r = await reopenedDuring("escalation", "R4");
+    wake(r.b, "r3");
+    await poller(r.b, r.m.answer, { stateFile: r.stateFile, ...ESC }).tick();
+    assert.strictEqual(r.m.prompts.length, 2, "R4: a quiet wake ran the model");
+    kept(r.b, "R4");
+  });
+  await check("R9: an escalation hand-off refused on a reopened T-2: a later wake completes it once T-2 finishes, no new ask", async () => {
+    const r = await reopenedDuring("escalation", "R9");
+    finish(r.b);
+    wake(r.b, "r3");
+    await poller(r.b, r.m.answer, { stateFile: r.stateFile, ...ESC }).tick();
+    const on = handOffs(r.b).filter((w) => w.body.assigneeAgentId === "agent-foreman");
+    assert.strictEqual(on.length, 1, `R9: not handed on once T-2 was done: ${JSON.stringify(r.b.writes.slice(-3))}`);
+    assert.strictEqual(holderOf(r.b.issues.get("t-1")), "agent-foreman");
+    assert.ok(r.m.prompts.length <= 3, "R9: run more than once more");
+  });
+
+  // R5 / R10 / R11: a restart with the resume's worker never launched (none / unlaunched), T-2 reopened since.
+  const attemptsAt = (phase, ids) => ({ phases: ids, state: (id) => ids[id] ?? { phase }, current: (id) => ids[id] ?? { phase },
+    alive: () => false, stop: () => false });
+  for (const [row, kind, phase] of [["R5", "ordinary", "none"], ["R10", "ordinary", "unlaunched"], ["R11", "escalation", "none"], ["R11", "escalation", "unlaunched"]]) {
+    await check(`${row}: a restart with an ${kind} resume's worker ${phase}, T-2 reopened: nothing launches, the wait kept, it runs once T-2 is done`, async () => {
+      const r = await resumable(kind);
+      const answer = kind === "escalation" ? "Ruled: 30 s." : "Finished.";
+      const m = model(r.b, [ON_T2, () => new Promise(() => {}), answer]);
+      await r.first(m, { attempts: attemptsAt(phase, {}) });
+      // The bot dies with the resume admitted, its worker not launched.
+      poller(r.b, m.answer, { stateFile: r.stateFile, ...r.opts, watchMs: 1e6, attempts: attemptsAt(phase, {}) }).tick();
+      await settleDown();
+      assert.strictEqual(m.prompts.length, 2, `${row}: the resume was not admitted`);
+      reopen(r.b);
+      await poller(r.b, m.answer, { stateFile: r.stateFile, ...r.opts, attempts: attemptsAt(phase, {}) }).tick();
+      assert.strictEqual(m.prompts.length, 2, `${row}: the unlaunched worker ran with T-2 open`);
+      kept(r.b, row);
+      finish(r.b);
+      wake(r.b, "r3");
+      await poller(r.b, m.answer, { stateFile: r.stateFile, ...r.opts, attempts: attemptsAt(phase, {}) }).tick();
+      assert.strictEqual(m.prompts.length, 3, `${row}: not run once T-2 was done`);
+      const t = r.b.issues.get("t-1");
+      if (kind === "escalation") assert.strictEqual(holderOf(t), "agent-foreman", `${row}: the ruling was not handed on`);
+      else assert.strictEqual(t.status, "done", `${row}: T-1 did not finish`);
+    });
+  }
+
+  // R12 / R13: an interrupted resume run again (resumeInterrupted) with T-2 open.
+  for (const [row, kind] of [["R12", "ordinary"], ["R13", "escalation"]]) {
+    await check(`${row}: an interrupted ${kind} resume restarted with resumeInterrupted, T-2 open: not run, the wait kept, it runs once T-2 is done`, async () => {
+      const r = await resumable(kind);
+      const answer = kind === "escalation" ? "Ruled: 30 s." : "Finished.";
+      const m = model(r.b, [ON_T2, () => new Promise(() => {}), answer]);
+      await r.first(m);
+      poller(r.b, m.answer, { stateFile: r.stateFile, ...r.opts, watchMs: 1e6 }).tick();
+      await settleDown();
+      assert.strictEqual(m.prompts.length, 2, `${row}: the resume was not started`);
+      reopen(r.b);
+      await poller(r.b, m.answer, { stateFile: r.stateFile, ...r.opts, resumeInterrupted: true }).tick();
+      assert.strictEqual(m.prompts.length, 2, `${row}: the interrupted resume ran with T-2 open`);
+      kept(r.b, row);
+      finish(r.b);
+      wake(r.b, "r3");
+      await poller(r.b, m.answer, { stateFile: r.stateFile, ...r.opts, resumeInterrupted: true }).tick();
+      assert.strictEqual(m.prompts.length, 3, `${row}: not run once T-2 was done`);
+      const t = r.b.issues.get("t-1");
+      if (kind === "escalation") assert.strictEqual(holderOf(t), "agent-foreman", `${row}: the ruling was not handed on`);
+      else assert.strictEqual(t.status, "done", `${row}: T-1 did not finish`);
+    });
+  }
+
+  // R7: a change to T-1 during a resume's preflight dependency read; four variants.
+  const CHANGES = { cancelled: (b) => b.setStatus("t-1", "cancelled", PERSON), "a newer question": REFUNDS };
+  for (const kind of ["ordinary", "escalation"]) {
+    for (const [what, change] of Object.entries(CHANGES)) {
+      await check(`R7: an ${kind} resume, T-1 ${what} during the preflight's dependency read: never run, left for the next wake`, async () => {
+        const r = await resumable(kind);
+        const m = model(r.b, [ON_T2, "Refunds too: ruled."]);
+        await r.first(m);
+        await poller(r.b, m.answer, { stateFile: r.stateFile, ...r.opts, fetch: after(r.b, T2_READ, change, 2) }).tick();
+        assert.strictEqual(m.prompts.length, 1, `R7 ${kind} ${what}: the stale resume ran`);
+        assert.deepStrictEqual(handOffs(r.b), [], `R7 ${kind} ${what}: handed on`);
+        if (what === "cancelled") {
+          assert.strictEqual(r.b.issues.get("t-1").status, "cancelled", `R7 ${kind}: the cancel was written over`);
+          return;
+        }
+        // The next wake works the question, once.
+        wake(r.b, "r3");
+        await poller(r.b, m.answer, { stateFile: r.stateFile, ...r.opts }).tick();
+        assert.strictEqual(m.prompts.length, 2, `R7 ${kind}: the question was not worked in one run on the next wake`);
+        assert.match(m.prompts[1], /And refunds too\?/);
+      });
+    }
+  }
+
+  // R14 / R15 / R25: a restart inside a go-on's preflight (its T-2 read hangs), T-2 still done.
+  for (const [row, kind] of [["R14", "ordinary"], ["R25", "ordinary"], ["R15", "escalation"]]) {
+    await check(`${row}: a restart inside an ${kind} go-on's preflight, T-2 done: the next live wake runs the go-on and delivers its result`, async () => {
+      const b = kind === "escalation" ? escalation() : ordinary();
+      const opts = kind === "escalation" ? ESC : {};
+      b.issues.get("t-2").status = "done";
+      const stateFile = stateFileOf();
+      const answer = kind === "escalation" ? "Ruled: 30 s." : "Finished.";
+      const m = model(b, [ON_T2, answer]);
+      poller(b, m.answer, { stateFile, ...opts, watchMs: 1e6, fetch: hangAt(b, T2_READ, 2) }).tick();
+      await settleDown();
+      assert.strictEqual(m.prompts.length, 1, `${row}: the go-on ran before its preflight finished`);
+      if (row === "R25") {
+        // Saved unstarted: its go-on mark and the continuation it marks, together.
+        const s = JSON.parse(require("fs").readFileSync(stateFile, "utf8"));
+        const cont = Object.values(s.continuing ?? {});
+        assert.strictEqual(cont.length, 1, `R25: no continuation saved: ${JSON.stringify(s.continuing)}`);
+        assert.ok(cont[0].mark && (s.continuedAsks ?? []).includes(cont[0].mark), `R25: the go-on mark and its continuation not saved together: ${JSON.stringify(s)}`);
+        assert.strictEqual(cont[0].prefix, undefined, "R25: saved as started");
+      }
+      wake(b, "r2");
+      await poller(b, m.answer, { stateFile, ...opts }).tick();
+      assert.strictEqual(m.prompts.length, 2, `${row}: the go-on was not run after the restart`);
+      const t = b.issues.get("t-1");
+      assert.ok(b.writes.some((w) => w.body.comment?.includes(answer)), `${row}: its result was not delivered`);
+      if (kind === "escalation") assert.strictEqual(holderOf(t), "agent-foreman", `${row}: the ruling was not routed: ${JSON.stringify(b.writes.slice(-2))}`);
+      else assert.strictEqual(t.status, "done", `${row}: T-1 not closed on the go-on's result`);
+      // And never again.
+      wake(b, "r3");
+      await poller(b, m.answer, { stateFile, ...opts }).tick();
+      assert.strictEqual(m.prompts.length, 2, `${row}: the go-on ran twice`);
+    });
+  }
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

@@ -325,9 +325,26 @@ the model, and routing the card to someone else.
   "dependency done" note is made from that read only. The answer's routing
   writes carry the dependencies on the producing snapshot, and `routeGate`
   reads them again before a write that leaves the wait (a close, a hand-off,
-  an escalation, a link cut): one open, and the write is a comment only. A
-  test scans the source: one model call, gated, and no other place says a
-  dependency is done.
+  an escalation, a link cut). A test scans the source: one model call, gated,
+  and no other place says a dependency is done.
+- **One preflight, the card read last.** Before the model (`preflight`) and
+  before a write that leaves a wait (`routeGate`), every dependency is read
+  first and the card after them, so a cancel, a hand-off or a follow-up
+  landing during a dependency read stops the act. The one gap left is the
+  round trip between that last card read and its write.
+- **A refusal because a dependency reopened keeps the wait durable.** The
+  same single write that would have closed or handed the card on puts it back
+  to blocked on the reopened tasks instead, with the answer and a note naming
+  them (`waitKept`); settle keeps the ask owed with those waits, so the wake
+  that reads them done again runs it and closes or hands it on.
+- **Every recovery that runs the model is gated too.** A worker never
+  launched (`none`/`unlaunched`) after a restart, and an interrupted resume
+  run again (`resumeInterrupted`), go through the same preflight on the
+  dependencies the resume was admitted on (`gates`, kept in the state file
+  while the ask is owed). One open, and nothing runs, nothing is used up, the
+  wait linked again. A going-on is saved unstarted with its mark in one write
+  (`continuing`, `continued`); a restart inside its preflight puts both back
+  (`unstarted`), so the next live wake runs it, never consumes it.
 - **An ask is deduplicated** only against that task's own latest answered ask,
   kept per task in the state file and never trimmed by other tasks' traffic
   (`lastAnswered`). A hand-in to the bot from another holder since that answer
