@@ -562,9 +562,15 @@ check("an operating basic or a policy setting holding a whole server value refus
   for (const p of [refusedFor({ XDG_CACHE_HOME: "/srv/cache-smtp-pass-value" }, { SMTP_PASSWORD: "smtp-pass-value" })]) {
     assert.ok(!p.join().includes("smtp-pass-value"), "the refusal prints the value");
   }
-  // Not a refusal: a server path that is no credential, a value under 6 characters, a basic the server itself writes.
+  // Not a refusal: a server path that is no credential, a basic the server itself writes.
   assert.deepStrictEqual(refusedFor({ XDG_CONFIG_HOME: "/srv/cfg" }, { ROUTER_DIR: "/srv/cfg" }), []);
-  assert.deepStrictEqual(refusedFor({ BOT_MAX_WAKE_ATTEMPTS: "3" }, { RETRIES: "3" }), []);
+  assert.deepStrictEqual(refusedFor({ BOT_MAX_WAKE_ATTEMPTS: "3" }, { RETRIES: "4" }), []);
+  // A policy setting holding a whole hidden server value is refused at any length or shape (round 7 R1, R2).
+  for (const v of ["abcde", "3", "/srv/private"]) {
+    const p = refusedFor({ BOT_MAIL_SUBJECT_PREFIX: v }, { ROUTER_HOME: v });
+    assert.match(p.join(), /^BOT_MAIL_SUBJECT_PREFIX holds the value of ROUTER_HOME in the MCP servers' env/);
+    assert.ok(!p.join().includes(`value ${v}`) && !p.join().includes(`"${v}"`), "the refusal prints the value");
+  }
   assert.deepStrictEqual(refusedFor({ PATH: "/usr/bin" }, { PATH: "/opt/node/bin:/usr/bin" }), []);
   // A credential name counts whatever its value looks like.
   assert.match(refusedFor({ XDG_DATA_HOME: "/srv/keys/x" }, { SIGNING_KEY: "/srv/keys/x" }).join(), /^XDG_DATA_HOME holds the value of SIGNING_KEY/);
