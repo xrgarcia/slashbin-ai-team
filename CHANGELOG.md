@@ -63,6 +63,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer deleted: the board lists a deleted comment as a blank one, which
   read as the bot posting an empty reply. A blank answer is posted as the
   fallback reply, never empty.
+- **Run environment.** `BOT_RUN_ENV` takes exact names only. A selected
+  variable is hidden from Codex commands unless it has a non-credential name
+  and its whole value is one absolute path. MCP command lines may expand only
+  variables the run can read. Short withheld credentials, a `BOT_SETTINGS` env
+  block on a board-running bot, and a cut shell policy now refuse startup.
+- **Board decisions are read structurally.** A status, holder or waits change,
+  by its credited writer, decides who holds a card, so no comment text does,
+  and an interrupted escalation is not resumed over someone's newer decision.
+- **The Paperclip poller re-reads the card before it acts.** It reads the card
+  again before running the model and before every return, hand-on or unlink,
+  resumes a wait only when every linked task reads done on a fresh read, and
+  treats a hand-back as a new ask.
 
 ### Fixed
 
