@@ -204,6 +204,39 @@ check("stop, alive and current follow an attempt to its fresh successor", async 
   assert.strictEqual(r.child.exit.cause, "stopped");
 });
 
+check("a launch the gate refuses runs nothing and ends with that error, marked launchRefused; a passing gate launches once", async () => {
+  const a = fresh(), count = join(root, "c13");
+  let asked = 0;
+  const refused = new Error("open again");
+  const err = await closed(a.run("a13", { ...spec(count, 0), gate: async () => { asked++; throw refused; } })).then(() => null, (e) => e);
+  assert.strictEqual(err, refused);
+  assert.strictEqual(err.launchRefused, true);
+  await sleep(200);
+  assert.strictEqual(launches(count), 0, "a refused gate launched the worker");
+  assert.strictEqual(asked, 1);
+  assert.notStrictEqual(a.state("a13").phase, "running");
+  // The same attempt, its gate passing now: launched once.
+  const r = await closed(a.run("a13", { ...spec(count, 0), gate: async () => { asked++; } }));
+  assert.strictEqual(r.code, 0);
+  assert.strictEqual(launches(count), 1);
+  assert.strictEqual(asked, 2);
+});
+
+check("a claim that never started is relaunched only through the gate", async () => {
+  const dir = mkdtempSync(join(root, "state-")), count = join(root, "c14");
+  const a = createAttempts(dir, { pollMs: 50, launchGraceMs: 300 });
+  const d = join(dir, "attempts", "a14");
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, "accepted.json"), "{}");
+  writeFileSync(join(d, "launch.claim"), "");
+  const old = (Date.now() - 5000) / 1000;
+  utimesSync(join(d, "launch.claim"), old, old);
+  const err = await closed(a.run("a14", { ...spec(count, 0), gate: () => Promise.reject(new Error("card moved")) })).then(() => null, (e) => e);
+  assert.ok(err?.launchRefused, "the relaunch did not end refused");
+  await sleep(200);
+  assert.strictEqual(launches(count), 0, "the relaunch skipped the gate");
+});
+
 check("an attempt id cannot name a path outside the attempts folder", () => {
   assert.throws(() => fresh().dirOf("../x"), /bad attempt id/);
 });

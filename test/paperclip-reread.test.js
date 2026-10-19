@@ -1343,6 +1343,54 @@ const wake = (b, id) => {
     }
   });
 
+  // Round 14 scans: a refusal is saved before the write that delivers it,
+  // and every launch of a worker passes the preflight first.
+  await check("a kept wait's refusal is saved before its write, and every worker launch is gated", async () => {
+    const fs = require("fs"), path = require("path");
+    const src = fs.readFileSync(path.join(__dirname, "../lib/paperclip.js"), "utf8");
+    const body = (at) => {
+      let depth = 0, i = src.indexOf(") {", at) + 2;
+      const start = i;
+      for (; i < src.length; i++) { if (src[i] === "{") depth++; else if (src[i] === "}" && --depth === 0) break; }
+      return [start, i];
+    };
+    // waitKept: the refusal set, then saved, before anything is returned.
+    const [wa, wb] = body(src.indexOf("function waitKept("));
+    const wk = src.slice(wa, wb);
+    const set = wk.indexOf("depsRefused.set("), save = wk.indexOf("saveState(stateFile, state)"), ret = wk.indexOf("return ");
+    assert.ok(set >= 0 && save > set && ret > save, "waitKept does not save the refusal before returning the write");
+    // routeGate: every write of the kept wait comes after waitKept(.
+    const [ga, gb] = body(src.indexOf("async function routeGate("));
+    const rg = src.slice(ga, gb);
+    const kAt = rg.indexOf("waitKept(");
+    assert.ok(kAt >= 0, "routeGate does not call waitKept");
+    for (const m of rg.matchAll(/await (api\("PATCH"|say\(taskId, keep\.text)/g)) assert.ok(m.index > kAt, `a kept-wait write before waitKept: ${rg.slice(m.index, m.index + 40)}`);
+    // The refusal lives in the poller state, and is written with it.
+    assert.ok(/const depsRefused = state\.refused;/.test(src), "the refusal is not the saved state's");
+    assert.ok(/refused: Object\.fromEntries\(/.test(src), "saveState does not write the refusal");
+    // A launching claim is not followed as a launched worker: its launch is still gated.
+    assert.ok(/const following = [^;]*\["none", "unlaunched", "launching"\]\.includes\(/.test(src), "a launching claim is followed without the preflight");
+    // The one model call hands the preflight to the launcher.
+    const answers = [...src.matchAll(/await answer\((?!"", )/g)];
+    assert.ok(answers.length === 1 && /attemptId, gate \}\)/.test(src.slice(answers[0].index, answers[0].index + 400)), "the model call does not pass its gate");
+    // attempts.run: launch( only from launchNow; launchNow only from start, after spec.gate.
+    const at = fs.readFileSync(path.join(__dirname, "../lib/attempts.js"), "utf8");
+    const runAt = at.indexOf("function run(id, spec)");
+    const launches = [...at.matchAll(/\blaunch\(id, spec\)/g)].map((m) => m.index);
+    assert.deepStrictEqual(launches.filter((i) => i < runAt || !at.slice(at.lastIndexOf("\n", i), i).includes("const launchNow =")), [], "a launch( outside launchNow");
+    const nows = [...at.matchAll(/\blaunchNow\(\)/g)].map((m) => at.slice(at.lastIndexOf("\n", m.index), m.index));
+    assert.strictEqual(nows.length, 2, `found ${nows.length} launchNow() calls`);
+    assert.ok(nows.some((l) => /if \(typeof spec\.gate !== "function"\) return $/.test(l)), "launchNow without a gate besides the no-gate branch");
+    assert.ok(nows.some((l) => /spec\.gate\(\)\)\.then\(\(\) => \{ gating = false; if \(!done\) $/.test(l)), "launchNow not after spec.gate");
+    const startCalls = [...at.slice(runAt).matchAll(/\bstart\(\)/g)].length;
+    assert.ok(startCalls >= 3, `found ${startCalls} start() calls`);
+    assert.ok(/if \(gating \|\| done\) return;/.test(at), "look() relaunches while the gate is out");
+    // bot.js hands the poller's gate to attempts.run.
+    const bot = fs.readFileSync(path.join(__dirname, "../bot.js"), "utf8");
+    const runs = [...bot.matchAll(/attempts\.run\(/g)];
+    assert.ok(runs.length >= 1 && runs.every((m) => /gate: opts\.gate \}\)/.test(bot.slice(m.index, m.index + 300))), "an attempts.run without the poller's gate");
+  });
+
   // The validator itself: only a snapshot with its fields, its record mark and its runs authorizes routing.
   await check("routableSnapshot: no mark, no runs, legacy or nothing never authorizes routing", async () => {
     const { routableSnapshot } = require("../lib/paperclip");
@@ -1701,6 +1749,209 @@ const wake = (b, id) => {
       assert.strictEqual(m.prompts.length, 2, `${row}: the go-on ran twice`);
     });
   }
+
+  // ---- Round 14: the refusal is durable, every launch gated, a go-on its own attempt ----
+
+  // A crash just after the board takes a write: the write lands, its response
+  // never reaches the bot, and nothing more of that bot reaches the board.
+  // The state file is what it last saved — what a restart reads.
+  const crashAfter = (b, match) => { let down = false; return async (url, init = {}) => {
+    if (down) return new Promise(() => {});
+    const r = await b.fetch(url, init);
+    if (match(url.replace(/^.*\/api/, ""), init)) { down = true; return new Promise(() => {}); }
+    return r;
+  }; };
+  // The write that delivers an answer refused on a reopened T-2, with the wait kept.
+  const KEPT_WRITE = (p, init) => (init.method ?? "GET") !== "GET" && String(init.body ?? "").includes("is not done any more");
+  const stateNow = (file) => JSON.parse(require("fs").readFileSync(file, "utf8"));
+  // T-1 resumed, T-2 reopened while the answer was made, the board took the
+  // answer with its wait kept, and the bot died before settling it.
+  // `marked`: durable attempts, so the answer carries its attempt's mark and recovery finds it by that.
+  const crashedOnKeptWait = async (kind, row, marked = false) => {
+    const r = await resumable(kind);
+    if (marked) r.opts = { ...r.opts, attempts: attemptsAt("none", {}) };
+    const answer = kind === "escalation" ? "Ruled: 30 s." : "Finished.";
+    const m = model(r.b, [ON_T2, (b) => { reopen(b); return answer; }, `${answer} Again.`]);
+    await r.first(m);
+    poller(r.b, m.answer, { stateFile: r.stateFile, ...r.opts, watchMs: 1e6, fetch: crashAfter(r.b, KEPT_WRITE) }).tick();
+    await settleDown();
+    assert.strictEqual(m.prompts.length, 2, `${row}: the resume did not run`);
+    assert.ok(r.b.writes.some((w) => w.body.comment?.includes(answer) && w.body.comment.includes("T-2 is not done any more"))
+      || [...r.b.comments.get("t-1")].some((c) => c.body?.includes(answer) && c.body.includes("T-2 is not done any more")), `${row}: the kept wait never reached the board`);
+    // Saved before the write that delivered it (write-ahead).
+    const s = stateNow(r.stateFile);
+    assert.ok(s.refused?.["t-1"]?.open?.some((t) => t.id === "t-2"), `${row}: the refusal was not saved before its write: ${JSON.stringify(s.refused)}`);
+    return { ...r, m, answer };
+  };
+  const answeredOnce = (b, answer, row) => {
+    const texts = [...b.comments.get("t-1")].map((c) => c.body ?? "").filter((c) => c.includes(answer) && !c.includes(`${answer} Again.`));
+    assert.strictEqual(texts.length, 1, `${row}: the refused answer was delivered ${texts.length} times`);
+  };
+
+  for (const [row, kind, marked] of [["R1", "ordinary", false], ["R1", "ordinary", true], ["R2", "escalation", false], ["R2", "escalation", true]]) {
+    await check(`${row}: an ${kind} resume's answer taken by the board with its wait kept${marked ? " (found by its mark)" : ""}, a restart before settlement: the wait stands, nothing runs while T-2 is open, it completes once T-2 is done`, async () => {
+      const r = await crashedOnKeptWait(kind, row, marked);
+      // The restart, on a new wake, T-2 still open.
+      wake(r.b, "r3");
+      await poller(r.b, r.m.answer, { stateFile: r.stateFile, ...r.opts }).tick();
+      assert.strictEqual(r.m.prompts.length, 2, `${row}: the model ran with T-2 open`);
+      kept(r.b, row);
+      finish(r.b);
+      wake(r.b, "r4");
+      await poller(r.b, r.m.answer, { stateFile: r.stateFile, ...r.opts }).tick();
+      const t = r.b.issues.get("t-1");
+      if (kind === "escalation") assert.strictEqual(holderOf(t), "agent-foreman", `${row}: the deferred hand-off did not complete: ${JSON.stringify(r.b.writes.slice(-3))}`);
+      else assert.strictEqual(t.status, "done", `${row}: T-1 did not finish: ${JSON.stringify(r.b.writes.slice(-3))}`);
+      assert.ok(r.m.prompts.length <= 3, `${row}: run more than once more`);
+      answeredOnce(r.b, r.answer, row);
+    });
+  }
+
+  for (const [row, kind, marked] of [["R3", "ordinary", false], ["R3", "ordinary", true], ["R4", "escalation", false], ["R4", "escalation", true]]) {
+    await check(`${row}: an ${kind} resume's refusal answer posted${marked ? " (found by its mark)" : ""}, a restart before settlement on the same run, T-2 open and later done: the wait recovered, it resumes with no new ask`, async () => {
+      const r = await crashedOnKeptWait(kind, row, marked);
+      // The restarted bot first sees the same open run (r2), T-2 still open.
+      await poller(r.b, r.m.answer, { stateFile: r.stateFile, ...r.opts }).tick();
+      assert.strictEqual(r.m.prompts.length, 2, `${row}: the model ran with T-2 open`);
+      kept(r.b, row);
+      const s = stateNow(r.stateFile);
+      assert.ok(Object.keys(s.blockedAsks ?? {}).some((k) => k.startsWith("t-1:")), `${row}: the ask is not kept waiting: ${JSON.stringify(s.blockedAsks)}`);
+      // Quiet wakes keep it waiting.
+      wake(r.b, "r3");
+      await poller(r.b, r.m.answer, { stateFile: r.stateFile, ...r.opts }).tick();
+      assert.strictEqual(r.m.prompts.length, 2, `${row}: a quiet wake ran the model`);
+      kept(r.b, row);
+      finish(r.b);
+      wake(r.b, "r4");
+      await poller(r.b, r.m.answer, { stateFile: r.stateFile, ...r.opts }).tick();
+      const t = r.b.issues.get("t-1");
+      if (kind === "escalation") assert.strictEqual(holderOf(t), "agent-foreman", `${row}: the deferred hand-off was not recovered: ${JSON.stringify(r.b.writes.slice(-3))}`);
+      else assert.strictEqual(t.status, "done", `${row}: T-1 did not resume to completion: ${JSON.stringify(r.b.writes.slice(-3))}`);
+      assert.strictEqual(r.m.prompts.length, 3, `${row}: not resumed exactly once`);
+      assert.ok(!r.b.comments.get("t-1").some((c) => c.authorAgentId === ME.id && /\?\s*$/.test(c.body ?? "") && !c.body.includes(r.answer)), `${row}: a new ask was posted`);
+      answeredOnce(r.b, r.answer, row);
+    });
+  }
+
+  await check("R30: the kept wait's write (the Finished answer, its mark, the blocked status) lands, a restart before settlement: the waiting disposition survives", async () => {
+    const r = await crashedOnKeptWait("ordinary", "R30", true);
+    assert.ok(r.b.comments.get("t-1").some((c) => c.body?.includes("Finished.") && c.body.includes("slashbin-attempt:")), "R30: the answer and its mark did not land");
+    assert.strictEqual(r.b.issues.get("t-1").status, "blocked", "R30: the kept wait did not restore blocked");
+    wake(r.b, "r3");
+    await poller(r.b, r.m.answer, { stateFile: r.stateFile, ...r.opts }).tick();
+    const s = stateNow(r.stateFile);
+    const k = Object.keys(s.blockedAsks ?? {}).find((x) => x.startsWith("t-1:"));
+    assert.ok(k, `R30: settled as finished: ${JSON.stringify(s.blockedAsks)}`);
+    assert.deepStrictEqual(s.revisits?.[k]?.waits, ["T-2"], `R30: what it waits on was lost: ${JSON.stringify(s.revisits)}`);
+    assert.deepStrictEqual(s.refused ?? {}, {}, "R30: the refusal was not used up by its settle");
+    kept(r.b, "R30");
+    assert.strictEqual(r.m.prompts.length, 2, "R30: the model ran");
+  });
+
+  await check("R31: walkthrough — recovered from the kept wait, T-2 finishes again: ordinary T-1 resumes and reaches done, no new ask, no duplicate", async () => {
+    const r = await crashedOnKeptWait("ordinary", "R31", true);
+    wake(r.b, "r3");
+    await poller(r.b, r.m.answer, { stateFile: r.stateFile, ...r.opts }).tick();
+    kept(r.b, "R31");
+    finish(r.b);
+    wake(r.b, "r4");
+    await poller(r.b, r.m.answer, { stateFile: r.stateFile, ...r.opts }).tick();
+    assert.strictEqual(r.m.prompts.length, 3, "R31: not resumed exactly once");
+    assert.match(r.m.prompts[2], /T-2/, "R31: the resume was not told T-2 is done");
+    assert.strictEqual(r.b.issues.get("t-1").status, "done", `R31: T-1 not done: ${JSON.stringify(r.b.writes.slice(-3))}`);
+    answeredOnce(r.b, "Finished.", "R31");
+    assert.strictEqual(r.b.comments.get("t-1").filter((c) => c.body?.includes("Finished. Again.")).length, 1, "R31: the resumed answer was not delivered exactly once");
+    // And never again.
+    wake(r.b, "r5");
+    await poller(r.b, r.m.answer, { stateFile: r.stateFile, ...r.opts }).tick();
+    assert.strictEqual(r.m.prompts.length, 3, "R31: worked again after done");
+  });
+
+  // R5 / R6: the real attempts state machine, a dummy provider that counts its launches.
+  const { createAttempts } = require("../lib/attempts");
+  const { writeFileSync, existsSync, readFileSync, mkdirSync } = require("fs");
+  const scratch = mkdtempSync(join(tmpdir(), "pc-launch-"));
+  const provider = join(scratch, "provider.sh");
+  writeFileSync(provider, `#!/bin/sh\necho run >> "$COUNT"\nprintf '%s\\n' "{\\"type\\":\\"result\\",\\"result\\":\\"$ANSWER\\"}"\n`, { mode: 0o755 });
+  const launchesOf = (count) => (existsSync(count) ? readFileSync(count, "utf8").trim().split("\n").filter(Boolean).length : 0);
+  // The bot's answer() as bot.js makes it for a durable attempt: attempts.run with the poller's gate.
+  const launcher = (attempts, count, answer, before = () => {}) => (prompt, issue, { attemptId, gate } = {}) => new Promise((resolve, reject) => {
+    before();
+    const child = attempts.run(attemptId, { bin: provider, args: [], cwd: scratch, timeoutMs: 0, gate,
+      env: { PATH: process.env.PATH, COUNT: count, ANSWER: answer } });
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.on("error", reject);
+    child.on("close", () => { const line = out.trim().split("\n").map((l) => { try { return JSON.parse(l); } catch { return null; } }).find((e) => e?.type === "result"); resolve(line?.result ?? ""); });
+  });
+  for (const [row, kind] of [["R5", "ordinary"], ["R6", "escalation"]]) {
+    for (const when of ["before the restart", "after the restarted bot follows the claim"]) {
+      await check(`${row}: an ${kind} resume claimed, its worker never started, T-2 reopened ${when}: no launch while T-2 is open, and the launch once it is done passes deps and card`, async () => {
+        const r = await resumable(kind);
+        const answer = kind === "escalation" ? "Ruled: 30 s." : "Finished.";
+        const dir = mkdtempSync(join(scratch, "state-"));
+        const count = join(dir, "count");
+        const attempts = createAttempts(dir, { pollMs: 20, launchGraceMs: 300 });
+        const m = model(r.b, [ON_T2]);
+        await r.first(m);
+        // The resume admitted, its launch claimed, the bot dead before its worker started.
+        let claimed = null;
+        poller(r.b, (p, issue, { attemptId }) => {
+          claimed = attemptId;
+          const d = attempts.dirOf(attemptId);
+          mkdirSync(d, { recursive: true });
+          writeFileSync(join(d, "accepted.json"), JSON.stringify({ id: attemptId }));
+          writeFileSync(join(d, "launch.claim"), "");
+          return new Promise(() => {});
+        }, { stateFile: r.stateFile, ...r.opts, watchMs: 1e6, attempts }).tick();
+        await settleDown();
+        assert.ok(claimed && attempts.state(claimed).phase === "launching", `${row}: the claim was not fresh`);
+        if (when === "before the restart") reopen(r.b);
+        await poller(r.b, launcher(attempts, count, answer, () => { if (when !== "before the restart") reopen(r.b); }),
+          { stateFile: r.stateFile, ...r.opts, attempts }).tick();
+        await new Promise((res) => setTimeout(res, 400));
+        assert.strictEqual(launchesOf(count), 0, `${row}: the worker launched with T-2 open`);
+        kept(r.b, row);
+        finish(r.b);
+        wake(r.b, "r3");
+        await poller(r.b, launcher(attempts, count, answer), { stateFile: r.stateFile, ...r.opts, attempts }).tick();
+        assert.strictEqual(launchesOf(count), 1, `${row}: not launched once T-2 was done`);
+        const t = r.b.issues.get("t-1");
+        if (kind === "escalation") assert.strictEqual(holderOf(t), "agent-foreman", `${row}: the ruling was not handed on: ${JSON.stringify(r.b.writes.slice(-3))}`);
+        else assert.strictEqual(t.status, "done", `${row}: T-1 did not finish: ${JSON.stringify(r.b.writes.slice(-3))}`);
+      });
+    }
+  }
+
+  // R7: an escalation goes on at once from an answer blocked on a T-2 already done; a restart once the go-on runs.
+  await check("R7: an escalation's immediate go-on is an attempt of its own: a restart after it starts follows it and delivers its result", async () => {
+    const b = escalation();
+    b.issues.get("t-2").status = "done";
+    const stateFile = stateFileOf();
+    // Durable workers, as the bot's: an attempt's output is what it wrote, replayed to whoever follows it.
+    const wrote = new Map(), prompts = [];
+    const attempts = { state: (id) => ({ phase: wrote.has(id) ? "finished" : "none" }), current: (id) => ({ phase: wrote.has(id) ? "finished" : "none" }),
+      alive: () => false, stop: () => false };
+    const answers = [ON_T2, { dies: "Ruled: 30 s." }];
+    const answer = async (p, issue, { attemptId } = {}) => {
+      if (attemptId && wrote.has(attemptId)) return wrote.get(attemptId);
+      prompts.push(p);
+      const a = answers[prompts.length - 1];
+      if (a === undefined) assert.fail(`ran ${prompts.length} times`);
+      if (typeof a === "object") { if (attemptId) wrote.set(attemptId, a.dies); return new Promise(() => {}); }
+      if (attemptId) wrote.set(attemptId, a);
+      return a;
+    };
+    poller(b, answer, { stateFile, ...ESC, watchMs: 1e6, attempts }).tick();
+    await settleDown();
+    assert.strictEqual(prompts.length, 2, "R7: the go-on did not start");
+    wake(b, "r2");
+    await poller(b, answer, { stateFile, ...ESC, attempts }).tick();
+    assert.strictEqual(prompts.length, 2, "R7: the go-on was run again");
+    assert.ok(b.writes.some((w) => w.body.comment?.includes("Ruled: 30 s.")) || b.comments.get("t-1").some((c) => c.body?.includes("Ruled: 30 s.")),
+      `R7: the go-on's result was not delivered: ${JSON.stringify(b.writes.slice(-3))}`);
+    assert.strictEqual(holderOf(b.issues.get("t-1")), "agent-foreman", `R7: the go-on's ruling was not routed: ${JSON.stringify(b.writes.slice(-3))}`);
+  });
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

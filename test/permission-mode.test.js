@@ -1078,7 +1078,7 @@ check("a Codex board run hands the escalate action its seat key and run, never t
     assert.ok(!("PAPERCLIP_RUN_AGENT_KEY" in b.env), `the seat key on ${JSON.stringify(o)}, which has no shell policy to keep it out`);
   }
   const paperclip = readFileSync(join(__dirname, "..", "lib", "paperclip.js"), "utf8");
-  assert.ok(/issue, \{ runId: postRun, attemptId \}\)\)\.trim\(\)/.test(paperclip), "the task's run reaches the answer");
+  assert.ok(/issue, \{ runId: postRun, attemptId, gate \}\)\)\.trim\(\)/.test(paperclip), "the task's run reaches the answer");
 });
 
 console.log(`\n${passes} passed, ${failures} failed\n`);

@@ -337,6 +337,11 @@ the model, and routing the card to someone else.
   to blocked on the reopened tasks instead, with the answer and a note naming
   them (`waitKept`); settle keeps the ask owed with those waits, so the wake
   that reads them done again runs it and closes or hands it on.
+  The refusal (`refused` in the state file: the tasks, the open ones, the
+  asks owed) is saved before that write is sent — write-ahead — so a
+  restart that finds the answer landed, by its text or its attempt marker,
+  settles it as the same kept wait. It goes in settle, or when a later write
+  reads the dependencies done.
 - **Every recovery that runs the model is gated too.** A worker never
   launched (`none`/`unlaunched`) after a restart, and an interrupted resume
   run again (`resumeInterrupted`), go through the same preflight on the
@@ -345,6 +350,11 @@ the model, and routing the card to someone else.
   wait linked again. A going-on is saved unstarted with its mark in one write
   (`continuing`, `continued`); a restart inside its preflight puts both back
   (`unstarted`), so the next live wake runs it, never consumes it.
+  The preflight is also the launcher's gate (`spec.gate` in
+  `lib/attempts.js`): the first launch, a claim still launching at a
+  restart, and the relaunch of a claim that never started all pass it, and
+  a refusal launches nothing. A continuation after an escalation ruling
+  has its own attempt id, so a restart follows it instead of re-running it.
 - **An ask is deduplicated** only against that task's own latest answered ask,
   kept per task in the state file and never trimmed by other tasks' traffic
   (`lastAnswered`). A hand-in to the bot from another holder since that answer

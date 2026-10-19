@@ -2108,6 +2108,8 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {
     try {
       return await spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channelName, existingSession.sessionId, progress, opts);
     } catch (err) {
+      // Refused before it launched (the poller's preflight): nothing ran, the session stands.
+      if (err?.launchRefused) throw err;
       if (!isSafeToRetryFresh(err)) {
         // Keep the session. It exists and holds the conversation, so the user's
         // NEXT message continues where the crash left off. If the session is
@@ -2308,8 +2310,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     // A board attempt runs in a worker of its own that outlives this process
     // (EM#626, lib/attempts.js): the same binary, arguments, environment and
     // folder, its output on disk. A restarted bot follows the same attempt.
+    // Every launch of it passes the poller's preflight first (opts.gate).
     const child = opts.attempt
-      ? attempts.run(opts.attempt, { bin: RUNTIME.bin, args: safeArgs, cwd: CLAUDE_CWD, env: cleanEnv, timeoutMs: CLAUDE_TIMEOUT_MS, ownTmp: boardTmp })
+      ? attempts.run(opts.attempt, { bin: RUNTIME.bin, args: safeArgs, cwd: CLAUDE_CWD, env: cleanEnv, timeoutMs: CLAUDE_TIMEOUT_MS, ownTmp: boardTmp, gate: opts.gate })
       : spawn(RUNTIME.bin, safeArgs, {
         cwd: CLAUDE_CWD,
         env: cleanEnv,
@@ -2516,6 +2519,8 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 
     child.on("error", (err) => {
       dropTmp();
+      // A launch the poller's preflight refused ran nothing: its own error, as it is.
+      if (err?.launchRefused) { reqLog.info({ attempt: opts.attempt }, "Board attempt not launched — its card or a dependency changed first"); reject(err); return; }
       reqLog.error({ err }, "Failed to spawn Claude");
       reject(new Error(`Failed to spawn claude: ${err.message}`));
     });
@@ -3390,11 +3395,11 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       // The first poll that reaches the board makes it a ready surface.
       onPoll: () => { if (surfaces.boards[tag] !== "ready") { setSurface("board", "ready", tag); pLog.info("Paperclip board ready — first poll succeeded"); } },
       // One session per task, so a reply on the task continues its conversation.
-      answer: (prompt, issue, { runId, attemptId } = {}) => {
+      answer: (prompt, issue, { runId, attemptId, gate } = {}) => {
         const reply = replyCollector();
         return runClaude(prompt, `${tag}-${issue.identifier}`, pLog.child({ paperclipTask: issue.identifier }),
           reply.collect, {}, "paperclip", null, { promptChannel, noBufferContext: true, finalTextOnly: true, taskCarriesContract: Boolean(board.contract),
-            paperclipRun: runId ? { runId, keyEnv: board.keyEnv } : null, attempt: attemptId ?? null })
+            paperclipRun: runId ? { runId, keyEnv: board.keyEnv } : null, attempt: attemptId ?? null, gate })
           .then(() => reply.text());
       },
     });
