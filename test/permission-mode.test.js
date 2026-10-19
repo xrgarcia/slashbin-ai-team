@@ -533,8 +533,85 @@ check("a parity run's MCP env never puts back a withheld credential, by name or 
   assert.deepStrictEqual(Object.keys(b.env).sort(), ["API_KEY", "EMPTY", "OTHER"]);
   assert.ok(b.shellExclude.includes("API_KEY"), "a server's key reaches a command");
   for (const name of DISCORD_CREDENTIAL_ENV) {
-    assert.ok(!(name in build({ runtime: "codex", run: "parity", mcpEnv: { [name]: "x" } }).env), `${name} restored by name`);
+    assert.ok(!(name in build({ runtime: "codex", run: "parity", mcpEnv: { [name]: "relay-value-1" } }).env), `${name} restored by name`);
   }
+});
+
+check("a withheld credential too short to match by value refuses, naming it and never quoting it (rule 13)", () => {
+  // Shorter than MIN_CREDENTIAL_CHARS, a copy under another name could not be found.
+  const parity = build({ runtime: "codex", run: "parity", env: { DISCORD_TOKEN: "tk1" } });
+  assert.strictEqual(parity.env, null);
+  assert.match(parity.problems.join(), /^DISCORD_TOKEN is a credential a parity run must not have, and its value is shorter than 6 characters/);
+  assert.ok(!parity.problems.join().includes("tk1"), "the refusal prints the value");
+  const server = build({ runtime: "codex", run: "parity", mcpEnv: { BRIDGE_TOKEN: "tk1" } });
+  assert.match(server.problems.join(), /BRIDGE_TOKEN in the MCP servers' env is a credential/);
+  // A connector key is withheld from every run, a Discord session's included.
+  const connector = build({ runtime: "claude", run: "session", env: { PAPERCLIP_API_KEY: "k1" }, connectorKeys: ["PAPERCLIP_API_KEY"] });
+  assert.match(connector.problems.join(), /^PAPERCLIP_API_KEY is a credential a session run must not have/);
+  // A session keeps its own Discord token, so nothing has to match it; a credential of no withheld class is not refused.
+  assert.deepStrictEqual(build({ runtime: "claude", run: "session", env: { DISCORD_TOKEN: "tk1" } }).problems, []);
+  assert.deepStrictEqual(build({ runtime: "codex", run: "parity", env: { RETRY_AUTH: "3", DISCORD_TOKEN: "" } }).problems, []);
+});
+
+check("an operating basic or a policy setting holding a whole server value refuses (rules 8, 9)", () => {
+  const refusedFor = (env, mcpEnv) => build({ runtime: "codex", env, mcpEnv }).problems;
+  assert.match(refusedFor({ XDG_CACHE_HOME: "/srv/cache-smtp-pass-value" }, { SMTP_PASSWORD: "smtp-pass-value" }).join(),
+    /^XDG_CACHE_HOME holds the value of SMTP_PASSWORD in the MCP servers' env/);
+  assert.match(refusedFor({ BOT_MAIL_SUBJECT_PREFIX: "[https://router.example]" }, { ROUTER_URL: "https://router.example" }).join(),
+    /^BOT_MAIL_SUBJECT_PREFIX holds the value of ROUTER_URL in the MCP servers' env/);
+  for (const p of [refusedFor({ XDG_CACHE_HOME: "/srv/cache-smtp-pass-value" }, { SMTP_PASSWORD: "smtp-pass-value" })]) {
+    assert.ok(!p.join().includes("smtp-pass-value"), "the refusal prints the value");
+  }
+  // Not a refusal: a server path that is no credential, a value under 6 characters, a basic the server itself writes.
+  assert.deepStrictEqual(refusedFor({ XDG_CONFIG_HOME: "/srv/cfg" }, { ROUTER_DIR: "/srv/cfg" }), []);
+  assert.deepStrictEqual(refusedFor({ BOT_MAX_WAKE_ATTEMPTS: "3" }, { RETRIES: "3" }), []);
+  assert.deepStrictEqual(refusedFor({ PATH: "/usr/bin" }, { PATH: "/opt/node/bin:/usr/bin" }), []);
+  // A credential name counts whatever its value looks like.
+  assert.match(refusedFor({ XDG_DATA_HOME: "/srv/keys/x" }, { SIGNING_KEY: "/srv/keys/x" }).join(), /^XDG_DATA_HOME holds the value of SIGNING_KEY/);
+  // Claude has no server channel, so there is nothing to hold.
+  assert.deepStrictEqual(build({ runtime: "claude", env: { XDG_CACHE_HOME: "/srv/cache-smtp-pass-value" }, mcpEnv: { SMTP_PASSWORD: "smtp-pass-value" } }).problems, []);
+});
+
+check("an MCP server's command line may expand only a variable the run's commands can read (rule 11)", () => {
+  const { mcpServers } = require("../lib/runtime/codex");
+  const run = (env, args, o = {}) => {
+    const read = mcpServers({ mcpServers: { router: { command: "node", args } } }, env);
+    return build({ runtime: "codex", env, spec: env.BOT_RUN_ENV, mcpEnv: read.env, mcpRefs: read.refs, ...o }).problems;
+  };
+  const env = { NOVA_BEARER: "nova-bearer-value", GH_CONFIG_DIR: "/srv/gh", NOVA_URL: "https://router.example" };
+  assert.deepStrictEqual(run(env, ["--url=${NOVA_URL}", "--bearer=${NOVA_BEARER}"]), [], "unset: every variable is the commands' already");
+  const listed = { ...env, BOT_RUN_ENV: "NOVA_BEARER,GH_CONFIG_DIR,NOVA_URL" };
+  assert.deepStrictEqual(run(listed, ["--config=${GH_CONFIG_DIR}"]), [], "a kept path");
+  for (const arg of ["--bearer=${NOVA_BEARER}", "--bearer=${NOVA_BEARER:-none}", "--url=${NOVA_URL}"]) {
+    const p = run(listed, [arg]);
+    assert.strictEqual(p.length, 1, arg);
+    assert.match(p[0], /^MCP server router's command line expands \$\{NOVA_(BEARER|URL)\}/);
+    assert.ok(!p[0].includes("nova-bearer-value") && !p[0].includes("router.example"), "the refusal prints a value");
+  }
+  assert.deepStrictEqual(run(listed, ["--port=${ROUTER_PORT:-8080}"]), [], "an unset variable expands to a literal");
+  assert.match(run({ ...env, BOT_RUN_ENV: "NOVA_URL" }, ["--bearer=${NOVA_BEARER}"]).join(), /expands \$\{NOVA_BEARER\}/, "a withheld variable");
+  // Not the server channel: a narrow or Claude run passes no server, so no command line is checked.
+  assert.deepStrictEqual(run(listed, ["--bearer=${NOVA_BEARER}"], { run: "board" }), []);
+  assert.deepStrictEqual(run(listed, ["--bearer=${NOVA_BEARER}"], { runtime: "claude" }), []);
+});
+
+check("a variable named __proto__ is a variable, never the environment's prototype", () => {
+  const env = JSON.parse('{"__proto__":"odd-value","A":"b"}');
+  const b = build({ env });
+  assert.strictEqual(Object.getPrototypeOf(b.env), Object.prototype);
+  assert.ok(Object.prototype.hasOwnProperty.call(b.env, "__proto__"));
+  assert.strictEqual(b.env.A, "b");
+});
+
+check("a board task's run is refused on a BOT_SETTINGS env block, and on settings it cannot read (rule 14)", () => {
+  for (const run of ["parity", "board"]) {
+    for (const runtime of ["claude", "codex"]) {
+      assert.match(build({ runtime, run, settings: { env: { X: "y" } } }).problems.join(), /^BOT_SETTINGS carries an env block/);
+      assert.match(build({ runtime, run, settings: "unreadable" }).problems.join(), /^BOT_SETTINGS cannot be read/);
+      assert.deepStrictEqual(build({ runtime, run, settings: { sandbox: { enabled: true } } }).problems, []);
+    }
+  }
+  assert.deepStrictEqual(build({ run: "session", settings: { env: { X: "y" } } }).problems, [], "a Discord session's own settings");
 });
 
 check("no board run keeps a Discord or bridge credential, under any name or any variable carrying its value", () => {
@@ -643,16 +720,18 @@ check("named keeps the basics, the names and the harness policy, and no unlisted
   for (const [k, v] of Object.entries(POLICY)) assert.strictEqual(run[k], v, `${k} changed`);
 });
 
-check("a trailing * expands against the variables actually set", () => {
-  const p = underList({ NOVA_A: "1", NOVA_B: "2", EM_A: "3" }, "NOVA_*");
-  assert.deepStrictEqual(Object.keys(p.inherit).sort(), ["NOVA_A", "NOVA_B"]);
-  assert.deepStrictEqual(p.shellExclude, []);
+check("a * or a NAME_* entry is refused, never expanded (rule 1)", () => {
+  for (const spec of ["NOVA_*", "*", "NOVA_A,EM_*", "NOVA_ROUTER_*,GH_CONFIG_DIR"]) {
+    const p = underList({ NOVA_A: "1", NOVA_B: "2", EM_A: "3" }, spec);
+    assert.strictEqual(p.inherit, null, spec);
+    assert.match(p.problems.join(), /BOT_RUN_ENV entry "[^"]*\*" is not an exact variable name/, spec);
+  }
 });
 
-// Every credential family the shared classification knows, each reached by an
-// exact name and by a prefix entry: inherited (its MCP server needs it) and
-// withheld from the commands (PR #91 review round 3: NOVA_* kept
-// NOVA_ROUTER_BEARER but excluded nothing; an exact NOVA_AUTH escaped).
+// Every credential family the shared classification knows, each listed by its
+// exact name: inherited (its MCP server needs it) and withheld from the
+// commands (PR #91 review round 3: NOVA_* kept NOVA_ROUTER_BEARER but excluded
+// nothing; an exact NOVA_AUTH escaped. A prefix entry is refused since round 7).
 const FAMILIES = ["TOKEN", "TOKENS", "KEY", "KEYS", "SECRET", "PASS", "PASSWORD", "PASSPHRASE", "BEARER", "AUTH",
   "CREDENTIAL", "CREDENTIALS", "COOKIE", "PAT", "PASSWD", "api_key"];
 
@@ -666,33 +745,35 @@ check("every credential family is classified a credential, and look-alikes are n
   }
 });
 
-check("exact-name, prefix and credential-family combinations: every kept credential is inherited and withheld from commands", () => {
+check("exact names and credential families: every kept credential is inherited and withheld from commands", () => {
   for (const f of FAMILIES) {
     const cred = `NOVA_ROUTER_${f}`;
     const env = { PATH: "/bin", [cred]: `value-of-${f}-credential`, NOVA_URL: "https://router.example", GH_CONFIG_DIR: "/gh", ...POLICY, ...CREDS };
-    for (const spec of [cred, "NOVA_*", `NOVA_ROUTER_*,GH_CONFIG_DIR`, `${cred},NOVA_URL,GH_CONFIG_DIR`]) {
+    for (const spec of [cred, `${cred},GH_CONFIG_DIR`, `${cred},NOVA_URL,GH_CONFIG_DIR`]) {
       const p = underList(env, spec);
       assert.deepStrictEqual(p.problems, [], `${spec}: refused`);
       assert.strictEqual(p.inherit[cred], env[cred], `${spec}: ${cred} did not reach the run's MCP servers`);
       assert.ok(p.shellExclude.includes(cred), `${spec}: ${cred} reaches a Codex command`);
-      for (const k of ["NOVA_URL", "GH_CONFIG_DIR", "PATH", ...Object.keys(POLICY)]) assert.ok(!p.shellExclude.includes(k), `${spec}: ${k} withheld from commands`);
+      for (const k of ["GH_CONFIG_DIR", "PATH", ...Object.keys(POLICY)]) assert.ok(!p.shellExclude.includes(k), `${spec}: ${k} withheld from commands`);
+      // A listed URL is neither a credential name nor a path: hidden (rule 7).
+      assert.strictEqual(p.shellExclude.includes("NOVA_URL"), spec.split(",").includes("NOVA_URL"), `${spec}: NOVA_URL`);
       for (const k of Object.keys(CREDS)) assert.ok(!(k in p.inherit), `${spec}: unlisted ${k} reached the run`);
     }
   }
 });
 
-check("the named Nova cases: NOVA_ROUTER_BEARER by prefix and NOVA_AUTH by exact name", () => {
+check("the named Nova cases: NOVA_ROUTER_BEARER and NOVA_AUTH by exact name", () => {
   const env = { PATH: "/bin", NOVA_ROUTER_BEARER: "nova-bearer-value", NOVA_AUTH: "nova-auth-value", NOVA_URL: "https://r", ...POLICY };
-  assert.deepStrictEqual(underList(env, "NOVA_*").shellExclude.sort(), ["NOVA_AUTH", "NOVA_ROUTER_BEARER"]);
+  assert.deepStrictEqual(underList(env, "NOVA_ROUTER_BEARER,NOVA_AUTH").shellExclude.sort(), ["NOVA_AUTH", "NOVA_ROUTER_BEARER"]);
   assert.deepStrictEqual(underList(env, "NOVA_AUTH").shellExclude, ["NOVA_AUTH"]);
-  assert.deepStrictEqual(underList(env, "NOVA_ROUTER_BEARER,NOVA_URL").shellExclude, ["NOVA_ROUTER_BEARER"]);
+  assert.deepStrictEqual(underList(env, "NOVA_ROUTER_BEARER,NOVA_URL").shellExclude.sort(), ["NOVA_ROUTER_BEARER", "NOVA_URL"]);
 });
 
 check("whatever is listed, every inherited credential is withheld from commands, and only inherited names are", () => {
   const env = { PATH: "/bin", HOME: "/h", NOVA_ROUTER_BEARER: "nova-bearer-value", NOVA_AUTH: "nova-auth-value", NOVA_URL: "https://r",
     DISCORDTOKEN: "discord-token-value", PAPERCLIPKEY: "paperclip-key-value", GIT_AUTHOR_TOKEN: "git-author-token", ...POLICY, ...CREDS };
   const names = Object.keys(env);
-  const specs = ["NOVA_*", "NOVA_AUTH", "DISCORDTOKEN,PAPERCLIPKEY", "GIT_AUTHOR_TOKEN", "EM_*,PROD_*", names.join(","), "NOVA_URL"];
+  const specs = ["NOVA_ROUTER_BEARER,NOVA_AUTH", "NOVA_AUTH", "DISCORDTOKEN,PAPERCLIPKEY", "GIT_AUTHOR_TOKEN", "EM_GITHUB_TOKEN,PROD_STRIPE_SRE_KEY", names.join(","), "NOVA_URL"];
   for (const spec of specs) {
     const p = underList(env, spec);
     const kept = Object.keys(p.inherit);
@@ -701,11 +782,26 @@ check("whatever is listed, every inherited credential is withheld from commands,
   }
 });
 
-check("a listed variable carrying a credential's value is withheld from commands too", () => {
-  const env = { PATH: "/bin", NOVA_ROUTER_BEARER: "nova-bearer-value", NOVA_URL: "https://r/?b=nova-bearer-value", EM_GITHUB_TOKEN: "ghp_em_token_value",
-    NOVA_REMOTE: "https://github.example/repo?access=ghp_em_token_value" };
-  const p = underList(env, "NOVA_*");
-  assert.deepStrictEqual(p.shellExclude.sort(), ["NOVA_REMOTE", "NOVA_ROUTER_BEARER", "NOVA_URL"]);
+check("a listed variable is decided by its name and its value's shape, never by another variable's value (rule 7)", () => {
+  // A path is kept even when it holds an unlisted credential's value: nothing
+  // looks for one (round 7). A URL is hidden for what it is, not what it holds.
+  const env = { PATH: "/bin", NOVA_ROUTER_BEARER: "nova-bearer-value", NOVA_URL: "https://r/", EM_GITHUB_TOKEN: "ghp_em_token_value",
+    NOVA_REMOTE_DIR: "/srv/ghp_em_token_value", NOVA_CACHE: "/srv/cache" };
+  const p = underList(env, "NOVA_ROUTER_BEARER,NOVA_URL,NOVA_REMOTE_DIR,NOVA_CACHE");
+  assert.deepStrictEqual(p.shellExclude.sort(), ["NOVA_ROUTER_BEARER", "NOVA_URL"]);
+  for (const [v, kept] of [["/home/bot/.config/gh", true], ["/srv/a:/srv/b", false], ["relative/dir", false], ["/srv/x y", false],
+    ["https://x/y", false], ["/srv/k=v", false], ["", false]]) {
+    assert.strictEqual(underList({ GH_CONFIG_DIR: v }, "GH_CONFIG_DIR").shellExclude.includes("GH_CONFIG_DIR"), !kept, JSON.stringify(v));
+  }
+  // Claude cannot hide: a listed variable is kept.
+  assert.deepStrictEqual(build({ runtime: "claude", spec: "NOVA_URL", env: { NOVA_URL: "https://r/" } }).hidden, []);
+  // The server channel's variable under an inherited one's name: kept only when
+  // the value is the same and the inherited one would be kept (rule 6).
+  const same = (o) => build({ runtime: "codex", env: { GH_TOKEN: "gh-token-value" }, mcpEnv: { GH_TOKEN: "gh-token-value" }, ...o }).shellExclude.includes("GH_TOKEN");
+  assert.ok(!same({}), "unset: the same name and value stays kept");
+  assert.ok(same({ mcpEnv: { GH_TOKEN: "other-token-value" } }), "another value is the server's");
+  assert.ok(same({ spec: "GH_TOKEN" }), "listed, a credential name is hidden either way");
+  assert.ok(build({ runtime: "codex", spec: "NOVA_DIR", env: { NOVA_DIR: "/srv/n" }, mcpEnv: { NOVA_DIR: "/srv/n" } }).hidden.length === 0, "a listed path the server repeats");
   // The basics never are: a credential naming a folder on PATH must not take PATH from every command.
   const q = underList({ PATH: "/usr/bin:/opt/keys/bin", SIGNING_KEY_DIR: "/opt/keys/bin" }, "SIGNING_KEY_DIR");
   assert.deepStrictEqual(q.shellExclude, ["SIGNING_KEY_DIR"]);
@@ -729,7 +825,7 @@ check("a policy setting holding a credential's value, exactly or as a substring,
       ["exact", "credential-value-123", "credential-value-123"],
       ["substring", "credential-value-123", "prefix,credential-value-123,suffix"],
     ]) {
-      for (const [where, spec] of [["dropped", "NOVA_BEARER"], ["listed", "NOVA_BEARER,SVC_TOKEN"], ["prefix", "NOVA_*,SVC_*"]]) {
+      for (const [where, spec] of [["dropped", "NOVA_BEARER"], ["listed", "NOVA_BEARER,SVC_TOKEN"]]) {
         const env = { PATH: "/bin", NOVA_BEARER: "nova-bearer-value", ...POLICY, [policy]: policyValue, SVC_TOKEN: credValue };
         const p = underList(env, spec);
         const label = `${policy} ${how}, credential ${where}`;
@@ -765,8 +861,8 @@ check("a short credential value is not matched inside a policy setting", () => {
 });
 
 check("a list it would read differently from its operator is refused, at startup and at every run", () => {
-  assert.deepStrictEqual(runEnvProblems("NOVA_BEARER, GH_CONFIG_DIR,NOVA_*"), []);
-  for (const bad of ["*", "NOVA BEARER", "NOVA-BEARER", "NOVA_*_X", "$HOME"]) {
+  assert.deepStrictEqual(runEnvProblems("NOVA_BEARER, GH_CONFIG_DIR,DOPPLER_CONFIG_DIR"), []);
+  for (const bad of ["*", "NOVA_*", "NOVA BEARER", "NOVA-BEARER", "NOVA_*_X", "$HOME", "__proto__", "constructor", "prototype"]) {
     assert.strictEqual(runEnvProblems(`NOVA_BEARER,${bad}`).length, 1, `${bad} was accepted`);
     const p = underList({}, bad);
     assert.strictEqual(p.inherit, null);
@@ -796,6 +892,25 @@ check("the bot refuses an overlapping policy at startup, before any run, without
   const refusal = out.split("\n").find((l) => /Run environment refused/.test(l));
   assert.ok(!refusal.includes("allow-me@example.com"), "the refusal prints the credential's value");
   for (const f of [".runenv-refuse.pid", ".runenv-refuse.ready", ".runenv-refuse.surfaces.json"]) rmSync(join(__dirname, "..", f), { force: true });
+  rmSync(dir, { recursive: true, force: true });
+});
+
+check("the bot refuses a BOT_SETTINGS env block at startup when it runs board tasks (rule 14)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "run-env-settings-"));
+  for (const d of ["cwd", "state", "run"]) mkdirSync(join(dir, d));
+  const base = {};
+  for (const k of ["PATH", "HOME", "USER", "SHELL", "LANG"]) if (process.env[k]) base[k] = process.env[k];
+  const env = { ...base, BOT_NAME: "runenv-settings", WS_PORT: String(19300 + (process.pid % 300)), CLAUDE_CWD: join(dir, "cwd"),
+    BOT_STATE_DIR: join(dir, "state"), BOT_HISTORY_DIR: join(dir, "history"), SUMMARIZE_INTERVAL_MS: "0",
+    DISCORD_TOKEN: "not-a-real-token", PAPERCLIP_URL: "https://board.example.com", PAPERCLIP_API_KEY: "fixture-board-key",
+    BOT_SETTINGS: JSON.stringify({ env: { SOME_SETTING: "fixture-setting-value" } }) };
+  const r = spawnSync(process.execPath, [join(__dirname, "..", "bot.js")], { cwd: join(dir, "run"), env, encoding: "utf8", timeout: 20000 });
+  const out = r.stdout + r.stderr;
+  assert.strictEqual(r.status, 78, `exit ${r.status}\n${out}`);
+  assert.match(out, /Run environment refused \((parity|board) run\) — BOT_SETTINGS carries an env block/);
+  assert.ok(!/Discord login failed|Bot online|Starting fresh/.test(out), "the bot went on past the refusal");
+  assert.ok(!out.includes("fixture-setting-value"), "the refusal prints a value");
+  for (const f of [".runenv-settings.pid", ".runenv-settings.ready", ".runenv-settings.surfaces.json"]) rmSync(join(__dirname, "..", f), { force: true });
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -906,7 +1021,8 @@ check("every credential the run environment keeps is withheld from a Codex run's
   };
   const env = { PATH: "/bin", NOVA_SLASHBIN_MCP_ROUTER_BEARER: "nova-bearer-value", NOVA_AUTH: "nova-auth-value", GH_CONFIG_DIR: "/gh", DOPPLER_CONFIG_DIR: "/dp" };
   assert.deepStrictEqual(withheld({ ...env, BOT_RUN_ENV: "NOVA_SLASHBIN_MCP_ROUTER_BEARER,GH_CONFIG_DIR,DOPPLER_CONFIG_DIR" }), ["NOVA_SLASHBIN_MCP_ROUTER_BEARER", "PAPERCLIP_RUN_AGENT_KEY"]);
-  assert.deepStrictEqual(withheld({ ...env, BOT_RUN_ENV: "NOVA_*" }), ["NOVA_AUTH", "NOVA_SLASHBIN_MCP_ROUTER_BEARER", "PAPERCLIP_RUN_AGENT_KEY"]);
+  assert.deepStrictEqual(withheld({ ...env, BOT_RUN_ENV: "NOVA_SLASHBIN_MCP_ROUTER_BEARER,NOVA_AUTH" }), ["NOVA_AUTH", "NOVA_SLASHBIN_MCP_ROUTER_BEARER", "PAPERCLIP_RUN_AGENT_KEY"]);
+  assert.throws(() => withheld({ ...env, BOT_RUN_ENV: "NOVA_*" }), /BOT_RUN_ENV entry "NOVA_\*"/, "a prefix is refused");
   assert.deepStrictEqual(withheld({ ...env, BOT_RUN_ENV: "NOVA_AUTH" }), ["NOVA_AUTH", "PAPERCLIP_RUN_AGENT_KEY"]);
   assert.deepStrictEqual(withheld(env), ["PAPERCLIP_RUN_AGENT_KEY"]);
   assert.throws(() => withheld({ ...env, BOT_RUN_ENV: "*" }), /BOT_RUN_ENV entry/, "a refused policy built a run");
