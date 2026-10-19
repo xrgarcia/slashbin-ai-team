@@ -260,13 +260,23 @@ the model, and routing the card to someone else.
   decides from the card as it reads then (`cardNow`, `CardMoved`).
 - **Before every routing write** (a return, a hand-on, an unlink, a rewrite of
   what the card waits on), the card is read the same way. A change stops the
-  write: the answer is posted as a comment with `CARD_CHANGED`, or an
-  escalation is worked again from the card as it is. An escalation compares
-  against the card its answer was built on, not only the round's own reads,
-  so a label added while it was worked is never routed past. That card is
-  saved with the answer in the state file (`builtOn`), so a bot restarted
-  between the answer and its routing still checks it against the card that
-  produced it. A rewrite of what the card waits on reads the card again
+  write: the answer is posted as a comment with `CARD_CHANGED`, with status,
+  links and unblock step left as the change made them, or an escalation is
+  worked again from the card as it is. Every kind of routing (blocked, a
+  return or transfer, review, an unlink or rewrite of what the card waits on,
+  an escalation's hand-on) compares a fresh read against the card the answer
+  was built on, never against a read taken after the answer came back, so a
+  change that lands while the model works is never routed past. That card is
+  saved with the answer in the state file (`builtOn`), together with the
+  record mark of the read it came from and the attempt's run ids, so a bot
+  restarted between the answer and its routing still checks it against the
+  card that produced it: a change by another run of this seat before the
+  restarted run's own checkout is still a change. A saved answer with no
+  `builtOn` (written by an older version) has no card to check against and
+  never routes: it is posted as a comment, or an escalation is worked again.
+  Paperclip settling one of this attempt's own lost runs is not a change for
+  routing (the replacement run carries the work on); before the model runs it
+  still stops the run. A rewrite of what the card waits on reads the card again
   after the dependency lookup, and a fallback hand-up after a refused
   `process.escalate` reads it again after its unblock step: no other awaited
   call comes between the last read and the write it guards. Comments the

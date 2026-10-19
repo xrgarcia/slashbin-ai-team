@@ -422,7 +422,8 @@ const poller = (b, answer) => createPaperclipPoller({
 
   await check("a progress comment written during the run does not stop the saved answer being posted", async () => {
     // Second-pass review of 2.7.0: the progress note looked like an answer, so the
-    // run was marked handled and the real answer was never posted.
+    // run was marked handled and the real answer was never posted. The note is
+    // posted under the attempt's own run, so it is its output, not a change.
     const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
     const b = board({ runs: running, comments, wakeCommentId: "w" });
     let failPatch = 1;
@@ -431,7 +432,7 @@ const poller = (b, answer) => createPaperclipPoller({
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     let calls = 0;
     const make = () => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch: flaky,
-      answer: async () => { calls++; comments.push({ id: "p", authorAgentId: ME.id, createdAt: "2026-01-02T00:01:00Z", body: "working on it" }); return "the answer"; } });
+      answer: async () => { calls++; comments.push({ id: "p", authorAgentId: ME.id, createdByRunId: "run-1", createdAt: "2026-01-02T00:01:00Z", body: "working on it" }); return "the answer"; } });
     await make().tick();          // runs; writes a progress note; the post fails
     await make().tick();          // a restarted bot
     assert.strictEqual(calls, 1);

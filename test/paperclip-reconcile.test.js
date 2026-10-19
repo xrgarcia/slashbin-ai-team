@@ -289,7 +289,11 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(b.issues.get("t-1").status, "done");
   });
 
-  await check("case 1, Paperclip's notice mid-resume: a system comment is no new ask, so the resumed answer still closes the card", async () => {
+  // A board notice is a change to the card the answer was made from
+  // (docs/board-decisions.md (d)): the resumed answer is said as a comment
+  // only, nothing routed, and the card is left for the next wake. It is no
+  // new ask, so the work is not run again.
+  await check("case 1, Paperclip's notice mid-resume: the resumed answer goes as a comment only, and the work never runs again", async () => {
     const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "todo" })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     let n = 0;
@@ -304,7 +308,8 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     b.runs.set("t-1", run("r2"));
     b.issues.get("t-1").status = "in_progress";
     await poller(b, answer, { stateFile }).tick();
-    assert.strictEqual(b.issues.get("t-1").status, "done");
+    assert.notStrictEqual(b.issues.get("t-1").status, "done", "closed over the notice");
+    assert.ok(b.writes.some((x) => /^Resuming: T-2[^]*Finished\.[^]*changed while I worked/.test(x.body.comment ?? "") && !x.body.status), JSON.stringify(b.writes));
     // A later wake on the same done waits does not resume it again.
     b.runs.set("t-1", run("r3"));
     await poller(b, answer, { stateFile }).tick();

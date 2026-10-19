@@ -874,6 +874,158 @@ const wake = (b, id) => {
     assert.ok(!b.writes.some((w) => "blockedByIssueIds" in w.body), JSON.stringify(b.writes));
   });
 
+  // ---- Round 9: routing is checked against the card the answer was made from ----
+
+  // An ordinary card waits on T-2, its unblock step written; its answer blocks
+  // on T-3. Whatever lands while answer() runs is a change to the card the
+  // answer was made from (builtOn): no read taken after the answer came back
+  // stands in for it. The answer is said as a comment only; status, links and
+  // unblock step stay as the change left them.
+  const STEP_T2 = { owner: { agentId: ME.id }, action: "Waits on T-2." };
+  const onT2 = () => {
+    const b = ordinary();
+    Object.assign(b.issues.get("t-1"), { blockedByIssueIds: ["t-2"], unblockDescriptor: STEP_T2 });
+    return b;
+  };
+  const addLabel = (name) => (x) => {
+    const i = x.issues.get("t-1");
+    const to = [...(i.labels ?? []), { name }];
+    x.record("t-1", PERSON, { changes: { labels: { from: i.labels ?? [], to } } });
+    i.labels = to;
+  };
+  const seatComment = (x) => { const c = x.say("t-1", BOT_SEAT, "A note from another run."); c.createdByRunId = "r0"; x.activity.get("t-1")[0].runId = "r0"; };
+  const ROUTES = (w) => ["status", "blockedByIssueIds", "unblockDescriptor", "assigneeAgentId", "assigneeUserId", "reviewers", "executionPolicy"].some((k) => k in w.body);
+  // Nothing routed: the answer said as a comment, the card as `status`, still on T-2 with its step.
+  const keptOnT2 = (b, row, status) => {
+    const t = b.issues.get("t-1");
+    assert.deepStrictEqual(t.blockedByIssueIds, ["t-2"], `${row}: the T-2 wait was replaced: ${JSON.stringify(b.writes)}`);
+    assert.deepStrictEqual(t.unblockDescriptor, STEP_T2, `${row}: the unblock step was rewritten`);
+    if (status) assert.strictEqual(t.status, status, `${row}: the status was written over`);
+    assert.ok(!b.writes.some(ROUTES), `${row}: a stale routing write: ${JSON.stringify(b.writes)}`);
+    assert.ok(b.writes.some((w) => /Needs T-3\./.test(w.body.comment ?? "")), `${row}: the answer was not said: ${JSON.stringify(b.writes)}`);
+  };
+  await check("R5 control: an unchanged card still routes the blocked answer to T-3", async () => {
+    const b = onT2();
+    await poller(b, model(b, [ON_T3]).answer, { stateFile: stateFileOf() }).tick();
+    const t = b.issues.get("t-1");
+    assert.deepStrictEqual(t.blockedByIssueIds, ["t-3"], JSON.stringify(b.writes));
+    assert.strictEqual(t.status, "blocked");
+  });
+  for (const [row, what, change, status] of [
+    ["R1", "another run of this seat moves it to todo", (x) => x.setStatus("t-1", "todo", BOT_SEAT, OTHER_RUN), "todo"],
+    ["R2", "another run of this seat blocks it", (x) => x.setStatus("t-1", "blocked", BOT_SEAT, OTHER_RUN), "blocked"],
+    ["R3", "a label is added", addLabel("Customer waiting"), "in_progress"],
+    ["R4", "another run of this seat comments", seatComment, "in_progress"],
+    ["R5", "the board posts a notice", systemNotice, "in_progress"],
+    ["R6", "another label is added", addLabel("Priority"), "in_progress"],
+    ["R7", "another run of this seat comments, the step written", seatComment, "in_progress"],
+    ["R8", "a board notice changes the newest comment", systemNotice, "in_progress"],
+    ["R9", "another run of this seat moves it from in_progress to todo", (x) => x.setStatus("t-1", "todo", BOT_SEAT, OTHER_RUN), "todo"],
+    ["R10", "another run of this seat moves it from in_progress to blocked", (x) => x.setStatus("t-1", "blocked", BOT_SEAT, OTHER_RUN), "blocked"],
+  ]) {
+    await check(`${row}: ${what} while the blocked-on-T-3 answer is made: nothing routed, T-2 and its step stand`, async () => {
+      const b = onT2();
+      const { prompts, answer } = model(b, [(x) => { change(x); return ON_T3; }, ON_T3]);
+      await poller(b, answer, { stateFile: stateFileOf() }).tick();
+      assert.strictEqual(prompts.length, 1, `${row}: ran ${prompts.length} times`);
+      keptOnT2(b, row, status);
+    });
+  }
+  // R30: the walkthrough itself — one answer, no routing PATCH at all.
+  await check("R30: walkthrough, another run of this seat moves T-1 to todo during answer(): one answer, no routing PATCH, todo on T-2", async () => {
+    const b = onT2();
+    const patches = [];
+    const fetch = async (url, init = {}) => { if (init.method === "PATCH") patches.push(JSON.parse(init.body)); return b.fetch(url, init); };
+    const { prompts, answer } = model(b, [(x) => { x.setStatus("t-1", "todo", BOT_SEAT, OTHER_RUN); return ON_T3; }]);
+    await poller(b, answer, { stateFile: stateFileOf(), fetch }).tick();
+    assert.strictEqual(prompts.length, 1);
+    assert.ok(patches.every((p) => !ROUTES({ body: p })), `a routing PATCH went out: ${JSON.stringify(patches)}`);
+    keptOnT2(b, "R30", "todo");
+  });
+  // R16: a label added while an answer ending `review` is made: no review routing.
+  await check("R16: a label added while a review answer is made: no in_review write, no reviewer named", async () => {
+    const b = ordinary();
+    const { answer } = model(b, [(x) => { addLabel("Customer waiting")(x); return `Done, please check.\n${OUTCOME_MARK} review`; }]);
+    await poller(b, answer, { stateFile: stateFileOf() }).tick();
+    assert.notStrictEqual(b.issues.get("t-1").status, "in_review", JSON.stringify(b.writes));
+    assert.ok(!b.writes.some(ROUTES), `review routed over the label: ${JSON.stringify(b.writes)}`);
+    assert.ok(b.writes.some((w) => /Done, please check\./.test(w.body.comment ?? "")), "the answer was not said");
+  });
+  await check("R16 control: unchanged, the review answer goes to review", async () => {
+    const b = ordinary();
+    await poller(b, model(b, [`Done, please check.\n${OUTCOME_MARK} review`]).answer, { stateFile: stateFileOf() }).tick();
+    assert.strictEqual(b.issues.get("t-1").status, "in_review", JSON.stringify(b.writes));
+  });
+
+  // R11-R14: the answer is saved, the bot stops before routing it, the card
+  // changes, and a restarted bot replays the saved answer: it is checked
+  // against the card it was made from (builtOn, with that read's record
+  // mark), so a change before the restarted run's own checkout is still seen.
+  const savedThenStopped = async (b, first) => {
+    const stateFile = stateFileOf();
+    let dead = false;
+    const dying = async (url, init) => { if (dead) throw new Error("the bot stopped"); return b.fetch(url, init); };
+    const { prompts, answer } = model(b, [() => { dead = true; return first; }, first]);
+    await poller(b, answer, { stateFile, fetch: dying }).tick();
+    assert.strictEqual(prompts.length, 1);
+    assert.ok(Object.values(savedState(stateFile).pendingReplies).includes(first), "the answer was not saved before the stop");
+    assert.ok(Object.values(savedState(stateFile).builtOn ?? {}).every((v) => v.mark), "the card's record mark was not saved with the answer");
+    return { stateFile, prompts, answer };
+  };
+  for (const [row, what, change] of [
+    ["R11", "a label added", addLabel("Customer waiting")],
+    ["R12", "another run of this seat comments", seatComment],
+    ["R13", "another run of this seat moves it to todo, and the restart's checkout shows in_progress", (x) => x.setStatus("t-1", "todo", BOT_SEAT, OTHER_RUN)],
+  ]) {
+    await check(`${row}: a saved blocked-on-T-3 answer, ${what} before a restart: the replay routes nothing, T-2 stands`, async () => {
+      const b = onT2();
+      const { stateFile, answer } = await savedThenStopped(b, ON_T3);
+      change(b);
+      wake(b, "r2");
+      await poller(b, answer, { stateFile }).tick();
+      keptOnT2(b, row);
+    });
+  }
+  await check("R11 control: a saved blocked-on-T-3 answer, nothing changed, a restart: it routes to T-3 without another run", async () => {
+    const b = onT2();
+    const { stateFile, prompts, answer } = await savedThenStopped(b, ON_T3);
+    wake(b, "r2");
+    await poller(b, answer, { stateFile }).tick();
+    assert.strictEqual(prompts.length, 1);
+    assert.deepStrictEqual(b.issues.get("t-1").blockedByIssueIds, ["t-3"], JSON.stringify(b.writes));
+  });
+  await check("R14: a saved return, another run of this seat moves the card to todo, a restart under r2: nothing is handed back", async () => {
+    const b = ordinary();
+    const { stateFile, answer } = await savedThenStopped(b, RETURNED);
+    b.setStatus("t-1", "todo", BOT_SEAT, OTHER_RUN);
+    wake(b, "r2");
+    await poller(b, answer, { stateFile }).tick();
+    assert.deepStrictEqual(handOffs(b), [], `returned over the later decision: ${JSON.stringify(b.writes)}`);
+    assert.strictEqual(holderOf(b.issues.get("t-1")), ME.id);
+    assert.ok(!b.writes.some((w) => w.body.status === "blocked"), JSON.stringify(b.writes));
+  });
+
+  // R15: a saved escalation answer with no builtOn (saved before it was kept),
+  // a label added, a restart: no record of its card, so it is not handed on
+  // unless it is made again from the card as it is.
+  await check("R15: a legacy saved escalation answer without builtOn, a label added, a restart: the old ruling is not handed on", async () => {
+    const b = escalation();
+    const stateFile = stateFileOf();
+    let dead = false;
+    const dying = async (url, init) => { if (dead) throw new Error("the bot stopped"); return b.fetch(url, init); };
+    const { prompts, answer } = model(b, [() => { dead = true; return "Ruled: 30 s."; }, "Ruled again: 30 s."]);
+    await poller(b, answer, { stateFile, fetch: dying, ...ESC }).tick();
+    const s = savedState(stateFile);
+    delete s.builtOn;
+    require("fs").writeFileSync(stateFile, JSON.stringify(s));
+    addLabel("Customer waiting")(b);
+    wake(b, "r2");
+    await poller(b, answer, { stateFile, ...ESC }).tick();
+    const on = handOffs(b).filter((w) => w.body.assigneeAgentId === "agent-foreman");
+    assert.ok(on.every((w) => !/Ruled: 30 s\./.test(w.body.comment ?? "")), `the old ruling was handed on: ${JSON.stringify(on)}`);
+    assert.ok(on.length === 0 || (prompts.length === 2 && on.every((w) => /Ruled again/.test(w.body.comment ?? ""))), `${prompts.length} runs, ${JSON.stringify(on)}`);
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
