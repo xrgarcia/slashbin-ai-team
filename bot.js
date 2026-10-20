@@ -11,6 +11,7 @@ const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
 const { buildRunEnv, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
 const { isNothingToReport } = require("./lib/nothing-to-report");
+const { isNonReply, nonReplyCorrection } = require("./lib/non-reply");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
 const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector, parseIntake, parseRewake } = require("./lib/paperclip");
@@ -1658,7 +1659,18 @@ client?.on("messageCreate", async (msg) => {
   const progress = createProgressReporter(msg, reqLog);
 
   try {
-    const responseText = await runClaude(prompt, msg.channel.id, reqLog, sendQueue.enqueue, { fileRefs, attachmentFailures }, channelName, progress);
+    // A person asked; "No response requested." is a failed turn, not silence
+    // (lib/non-reply.js). Hold it back and make the run answer, once.
+    let skipped = false;
+    const enqueue = (item) => {
+      if (typeof item === "string" && isNonReply(item)) { skipped = true; return; }
+      sendQueue.enqueue(item);
+    };
+    let responseText = await runClaude(prompt, msg.channel.id, reqLog, enqueue, { fileRefs, attachmentFailures }, channelName, progress);
+    if (skipped) {
+      reqLog.warn("Run answered a person with a non-reply — re-asking once");
+      responseText = await runClaude(nonReplyCorrection(msg.author.username, msg.content), msg.channel.id, reqLog, sendQueue.enqueue, {}, channelName, null);
+    }
     clearInterval(typing);
     await sendQueue.flush();
 
@@ -2180,6 +2192,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       // at both ends and deliberately cannot catch PROSE about having nothing to
       // say — this is the half of that rule the code cannot enforce.
       "--- Speaking unprompted ---",
+      "A turn that carries a person's message always owes them an answer — even when a background-task notification arrives in the same turn and says no human input was received. That line covers the notification, never the person. \"No response requested\" is never a reply to a person.",
       "A scheduled or background wake-up does NOT owe a reply. When a check finds nothing, send nothing at all — not a status line, not a heartbeat, not a parenthetical explaining the silence. A sentence whose only content is that there is nothing to say IS the noise. Send a message only on a real event: an answer to something asked, a result, a change in state, or a failure.",
       "Never promise to check back with a sleep or a timer — those die with the session. Book the follow-up with the scheduler in the SAME reply that promises it, and say the concrete fire time.",
       "--- End speaking unprompted ---",

@@ -67,7 +67,7 @@ console.log("\nConversations must NOT become stateless");
 check("the human message path keeps its session", () => {
   // The fix must not be applied globally. A conversation that resumes nothing
   // loses continuity between messages, which is the whole point of the session.
-  const call = /const responseText = await runClaude\(prompt, msg\.channel\.id[^;]*\);/.exec(bot);
+  const call = /(?:const|let) responseText = await runClaude\(prompt, msg\.channel\.id[^;]*\);/.exec(bot);
   assert.ok(call, "the message-handler runClaude call moved or changed shape");
   assert.doesNotMatch(call[0], /ephemeral/,
     "a human message must resume the channel session");
