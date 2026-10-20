@@ -710,13 +710,13 @@ check("a parity run withholds only the Discord and Paperclip credentials, and st
 
 console.log("\nRun environment — BOT_RUN_ENV, one policy for inheritance and shell exclusions");
 
-// Hank's policy settings beside a Doppler shell's credentials: the shape that
+// An operator's policy settings beside a Doppler shell's credentials: the shape that
 // turned the mail and calendar gates off when a list dropped everything
 // unlisted (PR #91 review, S1).
 const POLICY = {
   BOT_MAIL_ALLOWED_RECIPIENTS: "owner@example.com", BOT_MAIL_SUBJECT_PREFIX: "Bot:",
   BOT_CALENDAR_NO_ATTENDEES: "true", BOT_CALENDAR_OWN_EVENTS: "true", BOT_CALENDAR_TITLE_PREFIX: "Bot:",
-  BOT_LAND_PATHS: "notes/**", BOT_NAME: "hank", BOT_TIMEZONE: "UTC", BOT_MAX_WAKE_ATTEMPTS: "3", BOT_MAX_SCHEDULED_JOBS: "5",
+  BOT_LAND_PATHS: "notes/**", BOT_NAME: "acme", BOT_TIMEZONE: "UTC", BOT_MAX_WAKE_ATTEMPTS: "3", BOT_MAX_SCHEDULED_JOBS: "5",
   WS_PORT: "9899", RECENT_CONTEXT_MAX_CHARS: "1000",
   GIT_AUTHOR_NAME: "bot", GIT_AUTHOR_EMAIL: "bot@example.com", GIT_COMMITTER_NAME: "bot", GIT_COMMITTER_EMAIL: "bot@example.com",
 };

@@ -113,12 +113,21 @@ const RETURNED = `Only the Product Owner can change its own routine.\n1. Fix the
     assert.match(b.writes.at(-1).body.comment, /could not hand this task back to Product Owner: the board refused it \(403\)/);
   });
 
-  await check("a plain `blocked` answer still keeps the task with the bot", async () => {
-    const b = board();
+  // A plain block on a card another agent created goes to that agent (CHANGELOG
+  // Unreleased); one the bot created itself has no one else to wait with.
+  await check("a plain `blocked` answer on a task the bot created keeps it with the bot", async () => {
+    const b = board({ createdBy: { createdByAgentId: "agent-em" } });
     await seat(b, async () => `No access.\n${OUTCOME_MARK} blocked`).tick();
     assert.strictEqual(b.card.assigneeAgentId, "agent-em");
     assert.strictEqual(b.card.status, "blocked");
     assert.ok(b.writes.every((w) => !("assigneeAgentId" in w.body)));
+  });
+
+  await check("a plain `blocked` answer on a task another agent created goes to that agent, still blocked", async () => {
+    const b = board();
+    await seat(b, async () => `No access.\n${OUTCOME_MARK} blocked`).tick();
+    assert.strictEqual(b.card.assigneeAgentId, "agent-po", JSON.stringify(b.writes));
+    assert.strictEqual(b.card.status, "blocked");
   });
 
   await check("a normal task's prompt offers `return`; one that may not hand back does not", async () => {

@@ -76,14 +76,14 @@ These are read from the source, not inferred from behaviour. Paperclip is at
     Foreman writes the real move, then the session summary as a commented
     restatement, then the deferred note.
 - **How long a record is** (measured, GET only, 2026-10-15): on the slashbin
-  board's 1000 cards, activity entries p50 7, p99 131, max 301. The jerky
+  board's 1000 cards, activity entries p50 7, p99 131, max 301. The other
   board's longest record is 16 entries.
 
 ## (a) Status decisions
 
 **Who wrote it.** A row's writer is `details.creditedActor` when the row
 carries one, and otherwise the row's actor (`writerOf`). So the Foreman's
-credited writes are its agent's, and Ray's writes on the same key are his. A
+credited writes are its agent's, and a person's writes on the same key are theirs. A
 sync write with no credit reads as the person whose key it used: that is
 conservative, since it counts as a person's decision.
 
@@ -130,7 +130,7 @@ or Paperclip's; `handedSince` returns their change of holder.
 | a3 | bare restatement of blocked (statusVersion, no comment) | the writer of the block | none | no | no | changes no status, holder or waits (R5, R36: out of scope) |
 | a4 | the Foreman's note: a commented restatement after its move | the Foreman, credited | none | no | no | mirror.ts `note()` (R51–R53, R90) |
 | a5 | session release: the summary restatement, then the note | the Foreman, credited | none | no | no | mirror.ts `onSession` (R51) |
-| a6 | a commented restatement, any text, after the Foreman's hand-off | Ray on the sync's key | none | no | no | a prose hold: out of scope (R1, R2, R15, R48–R50, R59, R60) |
+| a6 | a commented restatement, any text, after the Foreman's hand-off | a person on the sync's key | none | no | no | a prose hold: out of scope (R1, R2, R15, R48–R50, R59, R60) |
 | a7 | a person reasserts the block, naming who unblocks it | a person | waits | yes | yes | services/issues.ts: a new unblock step |
 | a8 | waits or unblock-step rewrite on a blocked card | a person | waits | yes | yes | services/issues.ts |
 | a9 | waits change on a card that is not blocked | a person | waits | yes | yes | no statusVersion bump, still a decision |
@@ -144,7 +144,7 @@ or Paperclip's; `handedSince` returns their change of holder.
 | a17 | the Foreman's note recorded as blocked again after the wake's checkout | the Foreman, credited | none | no | no | the record's last status is blocked (R3, R65) |
 | a18 | a person's hold between the Foreman's move and its note | a person | waits | yes | yes | the note after it decides nothing (R3) |
 | a19 | a person cancels between the Foreman's move and its note, which restates cancelled | a person | status | yes | yes | mirror.ts `note()` restates the status it reads (R4) |
-| a20 | the same writer cancels, then moves the card back to blocked | Ray on the sync's key | status | yes | yes | the newest move wins; the cancel stays a decision (R95) |
+| a20 | the same writer cancels, then moves the card back to blocked | a person on the sync's key | status | yes | yes | the newest move wins; the cancel stays a decision (R95) |
 | a21 | holder and waits rewrite on a card created blocked, no status recorded | a person | waits | yes | yes | the request's status is the status in force (R96) |
 | a22 | a person's block that also hands the card to this bot | a person | status | yes | yes | a hold, not a hand-off (R61) |
 | a23 | another agent reasserts the block after its own hand-off to this bot | another agent | waits | yes | yes | an agent's change counts (R102) |

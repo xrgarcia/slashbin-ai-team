@@ -74,7 +74,7 @@ function board(tasks) {
     }
     const rec = path.match(/^\/issues\/([^/]+)\/recovery-actions\/resolve$/);
     if (rec && init.method === "POST") {
-      // The evidence path (EM#609): the settled action, a verified outcome, the card back to todo.
+      // The evidence path: the settled action, a verified outcome, the card back to todo.
       const body = JSON.parse(init.body), runId = init.headers["x-paperclip-run-id"];
       const hold = state.holds?.get(rec[1]);
       if (!hold || body.actionId !== hold || body.outcome !== "restored" || body.sourceIssueStatus !== "todo" || !body.executionReconciliation) return { ok: false, status: 404, text: async () => JSON.stringify({ error: "Active recovery action not found" }) };

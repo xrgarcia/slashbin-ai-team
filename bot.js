@@ -136,7 +136,7 @@ const STATE_DIR = process.env.BOT_STATE_DIR
       : join(__dirname, process.env.BOT_STATE_DIR))
   : HISTORY_DIR;
 
-// Board attempts: each one's worker, output and end, under the state folder (EM#626).
+// Board attempts: each one's worker, output and end, under the state folder.
 const attempts = createAttempts(STATE_DIR);
 
 // Runtime state, not memory. HISTORY_DIR holds SUMMARIES — the reviewable record
@@ -2308,7 +2308,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
 
     const startTime = Date.now();
     // A board attempt runs in a worker of its own that outlives this process
-    // (EM#626, lib/attempts.js): the same binary, arguments, environment and
+    // (lib/attempts.js): the same binary, arguments, environment and
     // folder, its output on disk. A restarted bot follows the same attempt.
     // Every launch of it passes the poller's preflight first (opts.gate).
     const child = opts.attempt

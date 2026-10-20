@@ -81,7 +81,7 @@ const seat = (b, answer, extra = {}) => createPaperclipPoller({ url: "https://bo
 (async () => {
   await check("the requester is the task's creator from its record, never the seat itself", async () => {
     assert.strictEqual(requesterOf({ createdByAgentId: "agent-po" }, "agent-em"), "agent:agent-po");
-    assert.strictEqual(requesterOf({ createdByUserId: "user-ray" }, "agent-em"), "user:user-ray");
+    assert.strictEqual(requesterOf({ createdByUserId: "user-owner" }, "agent-em"), "user:user-owner");
     assert.strictEqual(requesterOf({ createdByAgentId: "agent-em" }, "agent-em"), null);
     assert.strictEqual(requesterOf({}, "agent-em"), null);
   });
@@ -110,11 +110,11 @@ const seat = (b, answer, extra = {}) => createPaperclipPoller({ url: "https://bo
   });
 
   await check("a task a person created waits for that person's review: no agent accepts for them", async () => {
-    const b = board({ createdBy: { createdByAgentId: null, createdByUserId: "user-ray" } });
+    const b = board({ createdBy: { createdByAgentId: null, createdByUserId: "user-owner" } });
     await seat(b, async () => "Here is the result.").tick();
     assert.strictEqual(b.card.status, "in_review");
-    assert.deepStrictEqual(b.writes[0].body.executionPolicy.stages[0].participants, [{ type: "user", userId: "user-ray" }]);
-    assert.strictEqual(b.card.assigneeUserId, "user-ray");
+    assert.deepStrictEqual(b.writes[0].body.executionPolicy.stages[0].participants, [{ type: "user", userId: "user-owner" }]);
+    assert.strictEqual(b.card.assigneeUserId, "user-owner");
   });
 
   await check("a board with no company policy keeps answerer-closes: done", async () => {

@@ -72,7 +72,7 @@ function board(tasks) {
     }
     const rec = path.match(/^\/issues\/([^/]+)\/recovery-actions\/resolve$/);
     if (rec && init.method === "POST") {
-      // The evidence path (EM#609): the settled action, a verified outcome, the card back to todo.
+      // The evidence path: the settled action, a verified outcome, the card back to todo.
       const body = JSON.parse(init.body), runId = init.headers["x-paperclip-run-id"];
       const hold = state.holds?.get(rec[1]);
       if (!hold || body.actionId !== hold || body.outcome !== "restored" || body.sourceIssueStatus !== "todo" || !body.executionReconciliation) return { ok: false, status: 404, text: async () => JSON.stringify({ error: "Active recovery action not found" }) };
@@ -706,9 +706,9 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
   // note(), which finds the card blocked and restates blocked with its comment.
   // Released from a session hold (onSession), the move is followed by the
   // session's summary, another commented restatement, then the deferred note.
-  // All carry a board user's key — one Ray's own writes may share — and, since
+  // All carry a board user's key — one a person's own writes may share — and, since
   // 2026-10-18, Paperclip's credit to the Foreman's own agent (credited); a
-  // write on that key without the credit is Ray's, or the Foreman's from before.
+  // write on that key without the credit is a person's, or the Foreman's from before.
   const SYNC = { actorType: "user", actorId: "user-sync" };
   const FOREMAN_AGENT = { type: "agent", id: "agent-foreman" };
   // What `f` writes under the sync's key, credited to the Foreman's agent.
@@ -762,8 +762,8 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
 
   await check("the Foreman's hand-off — its move, then the note restating blocked — is worked once; a later status, holder or waits change stands, whoever's key made it", async () => {
     const mirror = /^source: \S+#\d+$/;
-    // Ray on the sync's key: the same actor, no credit.
-    const RAY = SYNC;
+    // A person on the sync's key: the same actor, no credit.
+    const ON_SYNC = SYNC;
     const bareOn = (b, actor) => b.record("t-1", actor, { status: "blocked", changes: { statusVersion: { from: 3, to: 4 } } });
     const reholdOn = (b, actor) => b.rehold("t-1", actor, ["t-2"], { owner: { userId: actor.actorId }, action: "Wait on T-2." });
     const rows = [
@@ -782,16 +782,16 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       { name: "a person blocks it between the move and the note", works: false, opts: { between: (b) => b.reassert("t-1", PERSON) } },
       { name: "a person holds it before the hand-off, which then hands it on", works: true,
         before: (b) => { b.setStatus("t-1", "blocked", PERSON); b.issues.get("t-1").status = "in_progress"; } },
-      // Ray on the hand-off's own key (round 4): told apart by the credit, not the text.
-      { name: "Ray on the sync's key reasserts the block, naming what unblocks it", works: false, after: (b) => b.reassert("t-1", RAY) },
-      { name: "Ray on the sync's key re-blocks it on a linked task after the note", works: false, after: (b) => reholdOn(b, RAY) },
-      { name: "Ray on the sync's key reasserts the block between the move and the note", works: false, opts: { between: (b) => b.reassert("t-1", RAY) } },
-      { name: "Ray on the sync's key restates blocked after it, changing nothing else", works: true, after: (b) => bareOn(b, RAY) },
-      { name: "Ray on the sync's key restates blocked with a comment of his own, after the note", works: true,
-        after: (b) => restate(b, RAY, "Holding this until Monday.") },
-      { name: "Ray on the sync's key restates blocked between the move and the note", works: true,
-        opts: { between: (b) => b.record("t-1", RAY, { status: "blocked", changes: { statusVersion: { from: 2, to: 3 } } }) } },
-      { name: "Ray on the sync's key repeats the note's text, after the note", works: true, after: (b) => restate(b, RAY, SYNC_NOTE) },
+      // A person on the hand-off's own key (round 4): told apart by the credit, not the text.
+      { name: "A person on the sync's key reasserts the block, naming what unblocks it", works: false, after: (b) => b.reassert("t-1", ON_SYNC) },
+      { name: "A person on the sync's key re-blocks it on a linked task after the note", works: false, after: (b) => reholdOn(b, ON_SYNC) },
+      { name: "A person on the sync's key reasserts the block between the move and the note", works: false, opts: { between: (b) => b.reassert("t-1", ON_SYNC) } },
+      { name: "A person on the sync's key restates blocked after it, changing nothing else", works: true, after: (b) => bareOn(b, ON_SYNC) },
+      { name: "A person on the sync's key restates blocked with a comment of his own, after the note", works: true,
+        after: (b) => restate(b, ON_SYNC, "Holding this until Monday.") },
+      { name: "A person on the sync's key restates blocked between the move and the note", works: true,
+        opts: { between: (b) => b.record("t-1", ON_SYNC, { status: "blocked", changes: { statusVersion: { from: 2, to: 3 } } }) } },
+      { name: "A person on the sync's key repeats the note's text, after the note", works: true, after: (b) => restate(b, ON_SYNC, SYNC_NOTE) },
     ];
     for (const label of [false, true]) for (const row of rows) {
       const name = `${row.name}${label ? ", labelled an escalation" : ""}`;
@@ -1542,7 +1542,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.deepStrictEqual(paperclipBoards({ PAPERCLIP_URL: "https://one.example.com", PAPERCLIP_API_KEY: "k", PAPERCLIP_ESCALATION_LABELS: "" }).boards[0].escalation.labels, []);
   });
 
-  // EM#626: a board attempt runs in a worker that outlives the bot (lib/attempts.js).
+  // A board attempt runs in a worker that outlives the bot (lib/attempts.js).
   const fakeAttempts = (phases = {}) => {
     const stopped = [];
     return { stopped, phases,
@@ -1552,7 +1552,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       stop: (id) => { if (phases[id]?.phase !== "running") return false; stopped.push(id); phases[id] = { phase: "finished", exit: { code: null, cause: "stopped" } }; return true; } };
   };
 
-  await check("EM#626: a restart follows the attempt under way — never run again, never told it was interrupted — and its answer carries the attempt's mark", async () => {
+  await check("a restart follows the attempt under way — never run again, never told it was interrupted — and its answer carries the attempt's mark", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const seen = [];
@@ -1574,7 +1574,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     await poller(b, async () => assert.fail("ran again"), { stateFile, attempts: fakeAttempts() }).tick();
   });
 
-  await check("EM#626: a worker that died after it started is answered blocked from its record — never run again", async () => {
+  await check("a worker that died after it started is answered blocked from its record — never run again", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const seen = [];
@@ -1589,7 +1589,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.ok(!posted.body.comment.includes("PAPERCLIP-OUTCOME"), "the outcome line is read, not shown");
   });
 
-  await check("EM#626: a worker whose task a person cancelled while the bot was away is stopped", async () => {
+  await check("a worker whose task a person cancelled while the bot was away is stopped", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const seen = [];
@@ -1602,7 +1602,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.deepStrictEqual(att.stopped, [id]);
   });
 
-  await check("EM#626: the model's own hand-off is not a reason to stop its worker; a person's is", async () => {
+  await check("the model's own hand-off is not a reason to stop its worker; a person's is", async () => {
     for (const [actor, stops] of [[{ actorType: "agent", actorId: ME.id }, false], [PERSON, true]]) {
       const b = board([task("t-1", { runs: run("r1") })]);
       const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
@@ -1623,7 +1623,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     }
   });
 
-  await check("EM#626: a run lost while the bot was away is reconciled from the attempt's record only once its worker stopped, then the bot wakes itself", async () => {
+  await check("a run lost while the bot was away is reconciled from the attempt's record only once its worker stopped, then the bot wakes itself", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const seen = [];
@@ -1664,7 +1664,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.ok(b.writes.some((x) => x.runId === "w1" && x.body.comment?.startsWith("sent")));
   });
 
-  await check("EM#626: a person's hold mid-run stops the worker; the model's own block, a recovery block, do not", async () => {
+  await check("a person's hold mid-run stops the worker; the model's own block, a recovery block, do not", async () => {
     for (const [actor, stops] of [[PERSON, true], [{ actorType: "agent", actorId: ME.id }, false], [{ actorType: "system" }, false]]) {
       const b = board([task("t-1", { runs: run("r1") })]);
       const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
@@ -1680,7 +1680,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     }
   });
 
-  await check("EM#626: a board restart's recovery block on a card a person set up does not stop the worker", async () => {
+  await check("a board restart's recovery block on a card a person set up does not stop the worker", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     // A person made the card ready: the newest status write before the restart is theirs.
     b.setStatus("t-1", "todo", PERSON);
@@ -1731,7 +1731,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     });
   }
 
-  await check("EM#626: the board loses a durable attempt's run mid-work — nothing said under it, its settlement is reconciled once the worker stops, the answer goes out once under the new run", async () => {
+  await check("the board loses a durable attempt's run mid-work — nothing said under it, its settlement is reconciled once the worker stops, the answer goes out once under the new run", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const att = fakeAttempts();
@@ -1760,7 +1760,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(launches, 1);
   });
 
-  await check("EM#626: the model hands its card on itself, then the bot restarts — the answer is posted once as a comment, and the hand-off stands", async () => {
+  await check("the model hands its card on itself, then the bot restarts — the answer is posted once as a comment, and the hand-off stands", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const seen = [];
@@ -1786,7 +1786,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(b.writes.filter((x) => x.body.comment?.includes(id)).length, 1, "never twice");
   });
 
-  await check("EM#626: the board loses the run and the worker ends before the watch looks — still reconciled, and answered once under the new run", async () => {
+  await check("the board loses the run and the worker ends before the watch looks — still reconciled, and answered once under the new run", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const att = fakeAttempts();
@@ -1804,7 +1804,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.ok(posted[0].body.comment.startsWith(LOST_NOTE_START));
   });
 
-  await check("EM#626: a person holds the card while the bot is away and the board cancels its run — the restarted bot stops the worker", async () => {
+  await check("a person holds the card while the bot is away and the board cancels its run — the restarted bot stops the worker", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const seen = [];
@@ -1820,7 +1820,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(b.issues.get("t-1").status, "blocked", "the person's hold stands");
   });
 
-  await check("EM#626: the board loses the run during a going-on after a wait already done — reconciled, and answered once under the new run", async () => {
+  await check("the board loses the run during a going-on after a wait already done — reconciled, and answered once under the new run", async () => {
     const b = board([task("t-1", { runs: run("r1") }), task("t-2", { assigneeAgentId: null, status: "done" })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const att = fakeAttempts();
@@ -1860,7 +1860,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     }, {}],
   ];
   for (const [name, make, opts] of admitted) {
-    await check(`EM#626: ${name} — its worker runs on, live and across a restart, and its own answer goes out once`, async () => {
+    await check(`${name} — its worker runs on, live and across a restart, and its own answer goes out once`, async () => {
       const b = make();
       const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
       const att = fakeAttempts();
@@ -1883,7 +1883,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     });
   }
 
-  await check("EM#626: the board loses the run, then a person cancels the card — the worker is still stopped", async () => {
+  await check("the board loses the run, then a person cancels the card — the worker is still stopped", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const att = fakeAttempts();
@@ -1898,7 +1898,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.deepStrictEqual(att.stopped, [seen[0].attemptId], "the cancel stops the worker");
   });
 
-  await check("EM#626: the model hands its card on, the bot restarts, the recipient checks it out — the answer is still posted once, and the recipient keeps it", async () => {
+  await check("the model hands its card on, the bot restarts, the recipient checks it out — the answer is still posted once, and the recipient keeps it", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const seen = [];
@@ -1924,7 +1924,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     assert.strictEqual(b.comments.get("t-1").filter((c) => c.body.includes(id)).length, 1, "never twice");
   });
 
-  await check("EM#626: a provider killed outright is answered blocked, naming the kill — never the generic fallback", async () => {
+  await check("a provider killed outright is answered blocked, naming the kill — never the generic fallback", async () => {
     const b = board([task("t-1", { runs: run("r1") })]);
     const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
     const seen = [];
@@ -2454,7 +2454,7 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
     await check("R58: a person's hold, another person's title edit, then the Foreman's note: the hold stands", async () => {
       const b = mirrored();
       move(b);
-      b.reassert("t-1", SYNC);                         // uncredited: Ray's
+      b.reassert("t-1", SYNC);                         // uncredited: a person's
       b.edit("t-1", OTHER, "title", "Retry window, revised");
       noteWrite(b); notePost(b);
       const all = activityOf(b);

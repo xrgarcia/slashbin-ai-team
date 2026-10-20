@@ -1,4 +1,4 @@
-// Board attempts outlive the bot (EM#626): lib/attempts.js and lib/worker-run.js,
+// Board attempts outlive the bot: lib/attempts.js and lib/worker-run.js,
 // with real processes. Run: node test/attempts.test.js
 "use strict";
 const assert = require("assert");
