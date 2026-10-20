@@ -126,6 +126,13 @@ const me = { id: "agent-em", name: "Engineering Manager" };
     assert.match(visible(b).at(-1).body, /goes back to Product Owner, who created it/);
   });
 
+  await check("`blocked on <an agent seat>` hands the card to that agent in the first write", async () => {
+    const b = board(), seat = seatOn(b);
+    await seat(async () => `Needs your call.\n${OUTCOME_MARK} blocked on Product Owner`).tick();
+    assert.strictEqual(b.card.assigneeAgentId, "agent-po", JSON.stringify(b.writes));
+    assert.strictEqual(visible(b).length, 2, "the ask and one answer");
+  });
+
   await check("a card the bot created itself stays with it: nothing to hand to", async () => {
     const b = board({ by: { createdByAgentId: "agent-em" } }), seat = seatOn(b);
     await seat(async () => STUCK).tick();
