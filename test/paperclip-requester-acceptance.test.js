@@ -139,6 +139,15 @@ const seat = (b, answer, extra = {}) => createPaperclipPoller({ url: "https://bo
     assert.strictEqual(b.writes[0].body.executionPolicy, undefined);
   });
 
+  await check("an answer ending `return` to the task's creator goes to that creator's review, not up as a hand-off", async () => {
+    const b = board();
+    await seat(b, async () => `Result is in.\n${OUTCOME_MARK} return`).tick();
+    assert.strictEqual(b.writes.length, 1, JSON.stringify(b.writes));
+    assert.strictEqual(b.writes[0].body.status, "in_review");
+    assert.deepStrictEqual(b.writes[0].body.executionPolicy.stages[0].participants, [{ type: "agent", agentId: "agent-po" }]);
+    assert.strictEqual(b.card.assigneeAgentId, "agent-po");
+  });
+
   await check("the reviewer's plain answer accepts: the task is done", async () => {
     const b = board({ createdBy: { createdByAgentId: "agent-em" }, status: "in_review", returnTo: "agent-po" });
     await seat(b, async () => "Accepted: the evidence checks out.").tick();
