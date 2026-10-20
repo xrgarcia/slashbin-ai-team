@@ -48,6 +48,11 @@ see it.
 | `board` | A Paperclip task under `BOT_BOARD_EXECUTION` `readonly` or `engineering`: least privilege |
 | `parity` | A Paperclip task under `BOT_BOARD_EXECUTION=parity`: built as the Discord session |
 
+A board run reads its card from the prompt, not the board: the task prompt
+carries a "Card now" block (status, assignee, creator, reviewer, unblock owner
+and action, blockers) as the bridge read it just before the run. The board key
+is withheld from the run, so there is no other way for it to read the card.
+
 ## What a command can see, by runtime
 
 - **Claude** has no way to keep a variable in its environment from its
