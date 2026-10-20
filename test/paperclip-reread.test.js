@@ -1251,8 +1251,14 @@ const wake = (b, id) => {
       return [start, i];
     };
     const gate = body("routeGate");
-    const sayAt = src.match(/const say = \(([^)]*)\) => api\("PATCH", [^,]+, \{ comment(: [a-z]+)? \}, [a-zA-Z]+\);/);
+    // say() writes what is said and nothing else: a comment, or — a run that
+    // ends with nothing new (SLA-2088) — the quiet mark, the card's own value.
+    const sayAt = src.match(/const say = \(([^)]*)\) => api\("PATCH", [^,]+, withSaid\(\{\}, comment\), [a-zA-Z]+\);/);
     assert.ok(sayAt, "say() is not a comment-only PATCH");
+    const { QUIET_MARK } = require("../lib/paperclip");
+    assert.strictEqual(QUIET_MARK, "requestDepth", "the quiet mark is no longer the card's request depth");
+    const said = src.match(/const withSaid = [^\n]+\n[^\n]+\n/)?.[0] ?? "";
+    assert.ok(/\[QUIET_MARK\]/.test(said) && /comment: text/.test(said) && !/status|assignee|blocked/.test(said), `withSaid() adds more than what is said: ${said}`);
     const inGate = (i) => i > gate[0] && i < gate[1];
     const patches = [...src.matchAll(/api\("PATCH"/g)].map((m) => m.index);
     const stray = patches.filter((i) => !inGate(i) && i !== sayAt.index + sayAt[0].indexOf('api("PATCH"'));

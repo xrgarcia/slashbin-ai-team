@@ -23,9 +23,11 @@ const PEOPLE = [{ principalId: "user-avery", status: "active", user: { id: "user
 /** One task held by the bot, handed to it by a person, with a live run on it. */
 function board({ description = "Ship the release." } = {}) {
   const card = { id: "c-1", identifier: "SLA-1", title: "Release the change", description,
-    status: "in_progress", assigneeAgentId: "agent-em", assigneeUserId: null, labels: [], createdAt: "2026-01-01T00:00:00Z", createdByUserId: "user-avery" };
+    status: "in_progress", assigneeAgentId: "agent-em", assigneeUserId: null, labels: [], createdAt: "2026-01-01T00:00:00Z", createdByUserId: "user-avery", requestDepth: 0 };
   const activity = [], comments = [], writes = [];
   const runs = [{ id: "r1", agentId: "agent-em", status: "running" }];
+  // Why each run woke, as Paperclip records it (none: the run does not say).
+  const reasons = {};
   let last = 0, ids = 0;
   const now = () => new Date(last = Math.max(Date.now(), last + 1)).toISOString();
   const record = (actor, changes, runId) => activity.unshift({ id: `a${++ids}`, action: "issue.updated", createdAt: now(), ...actor, runId, details: { changes } });
@@ -37,7 +39,7 @@ function board({ description = "Ship the release." } = {}) {
     if (path === "/companies/co-1/agents") return ok(SEATS);
     if (path === "/companies/co-1/user-directory") return ok({ users: PEOPLE });
     if (path === "/agents/me/inbox-lite") return ok(card.assigneeAgentId === "agent-em" ? [{ id: card.id, status: card.status, unresolvedBlockerIssueIds: [] }] : []);
-    if (/^\/heartbeat-runs\/r\d$/.test(path)) return ok({ contextSnapshot: {} });
+    if (/^\/heartbeat-runs\/r\d$/.test(path)) return ok({ contextSnapshot: reasons[path.slice("/heartbeat-runs/".length)] ? { wakeReason: reasons[path.slice("/heartbeat-runs/".length)] } : {} });
     const del = path.match(/^\/issues\/c-1\/comments\/([^/]+)$/);
     if (del && init.method === "DELETE") {
       // As the live board: a deleted comment stays listed, with a blank body.
@@ -75,7 +77,7 @@ function board({ description = "Ship the release." } = {}) {
     return { ok: false, status: 404, text: async () => "" };
   };
   /** A wake the bot caused itself: a new run on the same, unchanged ask. */
-  const wake = (id) => { runs[0] = { id, agentId: "agent-em", status: "running" }; };
+  const wake = (id, reason) => { runs[0] = { id, agentId: "agent-em", status: "running" }; if (reason) reasons[id] = reason; };
   return { card, writes, comments, fetch, wake };
 }
 const seatOn = (b, opts = {}) => {
@@ -150,6 +152,21 @@ const visible = (b) => b.comments.filter((c) => !c.deletedAt);
     assert.ok(later.every((n) => /Escalating: I would only repeat my last answer/.test(n) && !/Nothing has changed since my last/.test(n)), JSON.stringify(later));
     assert.strictEqual(b.card.status, "blocked");
     assert.ok(b.comments.every((c) => c.body.trim()), "an empty comment is on the card");
+  });
+
+  // SLA-2088: a wake Paperclip does not hold to a comment may end with nothing
+  // said, but a re-wake the model looks at decides, and a repeat still goes to
+  // whoever decides: the escalation is posted, never swallowed.
+  await check("a hold on a person re-woken on wakes that need no comment: the looked-at re-wake still escalates, in a comment", async () => {
+    const b = board({ description: "source: org/docs#456\nShip the release." }), seat = seatOn(b, { rewake: 4 });
+    const answer = async () => HELD;
+    await seat(answer).tick();
+    b.wake("r2", "issue_commented"); await seat(answer).tick();
+    b.wake("r3", "issue_review_path_lost"); await seat(answer).tick();
+    const later = b.writes.filter((w) => w.runId !== "r1").map((w) => w.body.comment);
+    assert.strictEqual(later.length, 2, JSON.stringify(later));
+    assert.ok(later.every((n) => /Escalating: I would only repeat my last answer/.test(n)), JSON.stringify(later));
+    assert.ok(!b.writes.some((w) => "requestDepth" in w.body), "an escalation was closed without a comment");
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

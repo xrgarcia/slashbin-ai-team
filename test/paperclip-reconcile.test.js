@@ -7,7 +7,7 @@ const assert = require("assert");
 const { mkdtempSync, readFileSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, writerOf, decisionKind, lastDecision, personSince, markAt, handedWith, statusSetter, reconcilable, handedBack, movable, wakeStep, ESCALATION_KEPT, CARD_CHANGED, NEWER_ASK, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, HANDED_AWAY, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus, ESCALATION_LABELS, parseEscalateTo, paperclipBoards, UNBLOCK_ACTION, revisitNote, revisitAnswer, unchangedNote, isNote, parseIntake, parseRewake, intakeStatus, DEFAULT_INTAKE, CARD_STATUSES } = require("../lib/paperclip");
+const { createPaperclipPoller, writerOf, decisionKind, lastDecision, personSince, markAt, handedWith, statusSetter, reconcilable, handedBack, movable, wakeStep, ESCALATION_KEPT, CARD_CHANGED, NEWER_ASK, outcomeOf, OUTCOME_MARK, TRANSPORT_NOTE, INTERRUPTED_NOTE, HANDED_AWAY, FALLBACK_REPLY, HELD_NOTE, PERSON_STANDS, decidedStatus, ESCALATION_LABELS, parseEscalateTo, paperclipBoards, UNBLOCK_ACTION, revisitNote, revisitAnswer, unchangedNote, isNote, parseIntake, parseRewake, intakeStatus, DEFAULT_INTAKE, CARD_STATUSES, QUIET_MARK, quietWake } = require("../lib/paperclip");
 // How a re-wake on an ask answered as waiting opens its prompt (revisitNote, SLA-1775).
 const REVISIT_LEAD = revisitNote().slice(0, 24);
 // 2.x looked again on every re-wake and forced the escalation after the third; these tests keep that setup.
@@ -127,6 +127,9 @@ function board(tasks) {
       // Whatever lands between the bot's last read and this write.
       if (state.beforeWrite && body.status) { const f = state.beforeWrite; delete state.beforeWrite; f(i); }
       if (body.comment && actorRun) actorRun.status = "succeeded";
+      // ... or once the bot's comment-less close under it carries the quiet
+      // mark, on a wake Paperclip does not hold to a comment (SLA-2088).
+      else if (actorRun && QUIET_MARK in body && quietWake({ reason: state.wakes?.[actorRun.id]?.wakeReason })) actorRun.status = "succeeded";
       writes.push({ id: i.id, body, runId: init.headers["x-paperclip-run-id"] });
       const was = { blockedByIssueIds: i.blockedByIssueIds ?? [], unblockDescriptor: i.unblockDescriptor ?? null };
       const recorded = activity.get(i.id).length;
@@ -3084,6 +3087,56 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
       assert.match(mine[0].body, /^Nothing has changed since my last answer: Need the spec\./);
     }
     assert.strictEqual(prompts.length, 1, "a re-wake started the model");
+  });
+
+  // SLA-2088, the 19:45 burst: an unblock wake for comments the answer
+  // already covered. The same re-wakes on wakes Paperclip does not hold to a
+  // comment end with nothing said, the card back in its block.
+  await check("SLA-2088: with PAPERCLIP_REWAKE off, re-wakes that need no comment end with no comment, the card back in its block", async () => {
+    const mirror = /^source: \S+#\d+$/;
+    const b = board([task("t-1", { description: "source: acme/app#12\nstage review", runs: run("r1"), requestDepth: 0 })]);
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    const prompts = [];
+    const answer = async (p) => { prompts.push(p); return `Need the spec.\n${OUTCOME_MARK} blocked`; };
+    await poller(b, answer, { stateFile, externalWriter: mirror }).tick();
+    const posted = b.comments.get("t-1").length;
+    for (const [r, wakeReason] of [["r2", "issue_unblock_requested"], ["r3", "issue_commented"]]) {
+      b.runs.set("t-1", run(r));
+      b.issues.get("t-1").status = "in_progress";
+      (b.state.wakes ??= {})[r] = { wakeReason };
+      await poller(b, answer, { stateFile, externalWriter: mirror }).tick();
+      await poller(b, answer, { stateFile, externalWriter: mirror }).tick();
+      assert.strictEqual(b.comments.get("t-1").length, posted, `${r}: ${JSON.stringify(b.comments.get("t-1").at(-1))}`);
+      assert.strictEqual(b.issues.get("t-1").status, "blocked", r);
+      assert.strictEqual(b.runs.get("t-1")[0].status, "succeeded", `${r}: the run was not ended`);
+      const mine = b.writes.filter((w) => w.runId === r);
+      assert.ok(mine.length && mine.every((w) => !("comment" in w.body)) && mine.some((w) => w.body[QUIET_MARK] === 0), JSON.stringify(mine));
+    }
+    assert.strictEqual(prompts.length, 1, "a re-wake started the model");
+  });
+
+  // SLA-2088, the 21:18 burst: handed in review, answered, then a wake for the
+  // comments the hand-off came with and Paperclip's review-path recovery.
+  await check("SLA-2088: a card answered in review, then a comment wake and the review-path recovery: no new comment, the review left as it is", async () => {
+    const b = board([task("t-1", { status: "in_review", runs: run("r1"), requestDepth: 0, createdByAgentId: "agent-po",
+      comments: [{ id: "f1", authorAgentId: "agent-po", createdAt: "2026-01-02T00:00:00Z", body: "Review this, please." }] })]);
+    (b.state.wakes ??= {}).r1 = { wakeReason: "issue_assigned" };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let calls = 0;
+    const answer = async () => { calls++; return `Reviewed: it does what the issue asks.\n${OUTCOME_MARK} review`; };
+    await poller(b, answer, { stateFile }).tick();
+    const posted = b.comments.get("t-1").length;
+    assert.strictEqual(b.comments.get("t-1").filter((c) => c.createdByRunId === "r1").length, 1, "the answer");
+    for (const [r, wakeReason] of [["r2", "issue_commented"], ["r3", "issue_review_path_lost"]]) {
+      b.runs.set("t-1", run(r));
+      (b.state.wakes ??= {})[r] = { wakeReason };
+      await poller(b, answer, { stateFile }).tick();
+      assert.strictEqual(b.comments.get("t-1").length, posted, `${r}: ${JSON.stringify(b.comments.get("t-1").at(-1))}`);
+      assert.strictEqual(b.runs.get("t-1")[0].status, "succeeded", `${r}: the run was not ended ${JSON.stringify(b.writes)} ${b.issues.get("t-1").status}`);
+      assert.deepStrictEqual(b.writes.filter((w) => w.runId === r).map((w) => w.body), [{ [QUIET_MARK]: 0 }], r);
+    }
+    assert.strictEqual(b.issues.get("t-1").status, "in_review", JSON.stringify(b.writes));
+    assert.strictEqual(calls, 1);
   });
 
   await check("model-work triggers: PAPERCLIP_REWAKE=2 looks again twice, the second told to escalate, then the note", async () => {

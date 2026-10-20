@@ -46,7 +46,10 @@ sessions can reach — the board run's reply is posted there. The startup log re
 - A board, an agent on it, and that agent's own API key (never one shared with
   another bot, never a board or admin key).
 - The agent's command on the board holds its run open until a comment lands, so the
-  bot can post under the run (see the README's Paperclip section).
+  bot can post under the run (see the README's Paperclip section). On a wake
+  Paperclip does not hold to a comment it also ends on the bot's comment-less
+  close under the run (below): the EM repo's `scripts/paperclip/bridge-waiter.mjs`
+  must be on the seats before the bot that sends it.
 - `CLAUDE_CWD` is the repo board tasks work in — not the harness or state folder,
   nor inside one (the connector stays off otherwise).
 - For `engineering`: Claude Code's sandbox on the host — `bwrap` and `socat` on
@@ -157,6 +160,19 @@ escalation, or the work. The bot escalates on its own an answer that only
 repeats the last one, Paperclip's last disposition repair, a blocker nobody
 works on a wake that finds nothing changed, and a fourth such wake on one ask.
 
+A re-wake that is not looked at again — nothing new since the answer, and the
+model not started — posts nothing on a wake Paperclip does not hold to a
+comment (SLA-2088). A hand-off brought three runs in a minute: its own, one for
+the comments it came with (which the answer already covered), and Paperclip's
+review-path recovery; each later one posted "Nothing has changed since my last
+answer". Now the close the note rode on goes out alone, the card put back as the
+answer left it, carrying the card's own `requestDepth` unchanged (the quiet
+mark, `QUIET_MARK`): the board waiter ends the run on that write. Only
+`issue_assigned` and the `execution_*` review wakes need a comment
+(`COMMENT_WAKES`, as Paperclip's `shouldRequireIssueCommentForWake`); a re-wake
+there still gets the note, and so does a run whose wake reason is not recorded.
+A hand-back to the card's creator is news and is still said.
+
 ## Symptom → fix
 
 | Symptom | Cause | Fix |
@@ -176,6 +192,8 @@ works on a wake that finds nothing changed, and a fourth such wake on one ask.
 | Log: `HTTP 401` | Key wrong or revoked | Issue the agent a new key; update `PAPERCLIP_API_KEY` |
 | Log: `… tested on Codex 0.162.x, this host has …` | A Codex bot on an untested version | Install 0.162.x for board work, or run the bot on Claude |
 | Log: `BOT_BOARD_NETWORK_ALLOW: a host allow list is not available on Codex` | Codex profiles allow all hosts or none | Remove it (the run has no network), or run the bot on Claude |
+| The answer, then "Nothing has changed since my last answer: …" once or twice within the minute | Before SLA-2088's fix: every run ended only on a comment, so the hand-off's comment wake and Paperclip's review-path recovery each got a note | Deploy the waiter to the seats first (`paperclip-infra.mjs agents`), then the bot. Bot first and a quiet run waits on a waiter that ends only on a comment |
+| Run on a card stays `running` after the bot logged `woke again with nothing new — the run is closed without a comment` | The seat's waiter predates SLA-2088 and ends only on a comment | Redeploy the waiter to the seats; the open run ends on the bot's next comment there or when the card leaves the inbox |
 | A card's comments repeat "Nothing has changed since my last comment", nested; Paperclip escalates it to the board after its disposition repairs | Before SLA-1775's fix: a mirrored card answered blocked was left in progress as a comment only, and each re-wake quoted the last note | Deploy the fix. On a card already in the loop, a comment from whoever decides gives the bot a new ask |
 | Log: `Paperclip task changed before its answer ran — nothing run, left for the next wake` | Expected: someone moved, re-assigned, cancelled or commented on the card after the bot read it, so nothing ran on the old snapshot (`docs/board-decisions.md` (d)) | None; the next look works the card as it is now |
 | Task stays `todo`, nothing in the log | Not assigned to this agent, or the connector is off | Check the assignee and the startup log |
