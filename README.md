@@ -96,6 +96,8 @@ Board runs are read-only by default. Choose `engineering` for scoped code work, 
 sessions. The isolated modes keep Discord memory out of board runs; `parity`
 opens the session's files and tools and needs the same trusted audience.
 
+A board run reads its card (status, assignee, creator, reviewer, unblock owner, blockers) from a "Card now" block in its prompt; it has no board key to read it with.
+
 **[Paperclip setup and task lifecycle →](docs/paperclip.md)** ·
 [Board permissions and runtime limits →](docs/paperclip-board-execution.md)
 
