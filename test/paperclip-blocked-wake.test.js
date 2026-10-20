@@ -12,7 +12,7 @@ const assert = require("assert");
 const { mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, outcomeOf, OUTCOME_MARK, buildTaskPrompt, unchangedNote } = require("../lib/paperclip");
+const { createPaperclipPoller, outcomeOf, OUTCOME_MARK, buildTaskPrompt, unchangedNote, COMMENT_WAKES, QUIET_MARK } = require("../lib/paperclip");
 
 let pass = 0, fail = 0;
 async function check(label, fn) {
@@ -26,9 +26,11 @@ const PEOPLE = [{ principalId: "user-avery", status: "active", user: { id: "user
 /** One task held by the bot, handed to it by a person, with a live run on it. */
 function board({ description = "Ship the release.", by = { createdByAgentId: "agent-po" } } = {}) {
   const card = { id: "c-1", identifier: "T-1", title: "Release the change", description,
-    status: "in_progress", assigneeAgentId: "agent-em", assigneeUserId: null, labels: [], createdAt: "2026-01-01T00:00:00Z", ...by };
+    status: "in_progress", assigneeAgentId: "agent-em", assigneeUserId: null, labels: [], createdAt: "2026-01-01T00:00:00Z", requestDepth: 0, ...by };
   const activity = [], comments = [], writes = [];
   const runs = [{ id: "r1", agentId: "agent-em", status: "running" }];
+  // Why each run woke, as Paperclip records it (none: the run does not say).
+  const reasons = {};
   let last = 0, ids = 0, clock = 0;
   const now = () => new Date(last = Math.max(Date.now(), last + 1)).toISOString();
   const record = (actor, changes, runId) => activity.unshift({ id: `a${++ids}`, action: "issue.updated", createdAt: now(), ...actor, runId, details: { changes } });
@@ -40,7 +42,7 @@ function board({ description = "Ship the release.", by = { createdByAgentId: "ag
     if (path === "/companies/co-1/agents") return ok(SEATS);
     if (path === "/companies/co-1/user-directory") return ok({ users: PEOPLE });
     if (path === "/agents/me/inbox-lite") return ok(card.assigneeAgentId === "agent-em" ? [{ id: card.id, status: card.status, unresolvedBlockerIssueIds: [] }] : []);
-    if (/^\/heartbeat-runs\/r\d$/.test(path)) return ok({ contextSnapshot: {} });
+    if (/^\/heartbeat-runs\/r\d$/.test(path)) return ok({ contextSnapshot: reasons[path.slice("/heartbeat-runs/".length)] ? { wakeReason: reasons[path.slice("/heartbeat-runs/".length)] } : {} });
     const del = path.match(/^\/issues\/c-1\/comments\/([^/]+)$/);
     if (del && init.method === "DELETE") {
       // As the live board: a deleted comment stays listed, with a blank body.
@@ -71,6 +73,12 @@ function board({ description = "Ship the release.", by = { createdByAgentId: "ag
         card.assigneeAgentId = body.assigneeAgentId ?? null; card.assigneeUserId = body.assigneeUserId ?? null;
       }
       if ("comment" in body) { comments.push({ id: `c${comments.length}`, authorAgentId: "agent-em", createdAt: now(), body: body.comment, createdByRunId: runId }); runs[0].status = "succeeded"; }
+      // As the live board: the sent fields are on the write's record. The
+      // board waiter ends a run on the quiet mark, on a wake not held to a comment.
+      else if (QUIET_MARK in body) {
+        activity.unshift({ id: `a${++ids}`, action: "issue.updated", createdAt: now(), actorType: "agent", actorId: "agent-em", agentId: "agent-em", runId, details: { ...body, changes: {} } });
+        if (reasons[runId] && !COMMENT_WAKES.includes(reasons[runId]) && runs[0].id === runId) runs[0].status = "succeeded";
+      }
       return ok({});
     }
     if (!m[2]) return ok({ ...card, blockedBy: [] });
@@ -80,12 +88,13 @@ function board({ description = "Ship the release.", by = { createdByAgentId: "ag
     return { ok: false, status: 404, text: async () => "" };
   };
   /** A wake the bot caused itself: a new run on the same, unchanged ask. */
-  const wake = (id) => {
+  const wake = (id, reason) => {
     runs[0] = { id, agentId: "agent-em", status: "running" };
+    if (reason) reasons[id] = reason;
     // The board's checkout of a wake: a blocked card the bot holds is in progress for the run.
     if (card.status === "blocked" && card.assigneeAgentId === "agent-em") { card.status = "in_progress"; card.blockedTransitionAt = null; }
   };
-  return { card, writes, comments, fetch, wake };
+  return { card, writes, comments, fetch, wake, runs };
 }
 const seatOn = (b, opts = {}) => {
   const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
@@ -139,6 +148,55 @@ const me = { id: "agent-em", name: "Engineering Manager" };
     b.wake("r2"); await seat(async () => STUCK).tick();
     assert.strictEqual(b.card.assigneeAgentId, "agent-em");
     assert.match(visible(b).at(-1).body, /^Nothing has changed since my last answer/);
+  });
+
+  // SLA-2088: the board showed the answer, then "Nothing has changed since my
+  // last answer: ..." once or twice within the minute — one wake for comments
+  // the answer already covered, one for Paperclip's review-path recovery.
+  await check("SLA-2088 burst: an answer, then two re-wakes with nothing new: no new comment, the card back in its block, each run ended by the quiet mark", async () => {
+    const b = board({ by: { createdByAgentId: "agent-em" } }), seat = seatOn(b);
+    let calls = 0;
+    const answer = async () => { calls++; return STUCK; };
+    await seat(answer).tick();
+    const posted = visible(b).length;
+    assert.strictEqual(b.card.status, "blocked");
+    for (const [run, reason] of [["r2", "issue_unblock_requested"], ["r3", "issue_review_path_lost"]]) {
+      b.wake(run, reason);
+      assert.strictEqual(b.card.status, "in_progress", "the wake's checkout");
+      await seat(answer).tick();
+      assert.strictEqual(visible(b).length, posted, `${reason} posted: ${visible(b).at(-1).body}`);
+      assert.strictEqual(b.card.status, "blocked", `${reason} left the card ${b.card.status}`);
+      assert.strictEqual(b.runs[0].status, "succeeded", `${reason}: the run was not ended`);
+      const mine = b.writes.filter((w) => w.runId === run);
+      assert.ok(mine.length >= 1 && mine.every((w) => !("comment" in w.body)), JSON.stringify(mine));
+      assert.ok(mine.some((w) => w.body[QUIET_MARK] === 0), `no write of ${run} carried the quiet mark: ${JSON.stringify(mine)}`);
+      // A tick after: nothing more.
+      await seat(answer).tick();
+      assert.strictEqual(visible(b).length, posted);
+    }
+    assert.strictEqual(calls, 1, "a re-wake with nothing new ran the model again");
+  });
+
+  await check("a re-wake with nothing new on a wake Paperclip holds to a comment still gets the note, once", async () => {
+    for (const reason of COMMENT_WAKES) {
+      const b = board({ by: { createdByAgentId: "agent-em" } }), seat = seatOn(b);
+      await seat(async () => STUCK).tick();
+      const posted = visible(b).length;
+      b.wake("r2", reason); await seat(async () => STUCK).tick();
+      assert.strictEqual(visible(b).length, posted + 1, reason);
+      assert.match(visible(b).at(-1).body, /^Nothing has changed since my last answer/, reason);
+      assert.ok(!b.writes.some((w) => QUIET_MARK in w.body), `${reason}: a write carried the quiet mark`);
+    }
+  });
+
+  await check("a new comment from someone else on a quiet wake is still answered", async () => {
+    const b = board({ by: { createdByAgentId: "agent-em" } }), seat = seatOn(b);
+    await seat(async () => STUCK).tick();
+    b.comments.push({ id: "cx", authorAgentId: null, authorUserId: "user-avery", createdAt: new Date(Date.now() + 1000).toISOString(), body: "The decision: ship it." });
+    b.wake("r2", "issue_commented");
+    await seat(async () => `Shipped.\n${OUTCOME_MARK} done`).tick();
+    assert.strictEqual(visible(b).at(-1).body.split("\n")[0], "Shipped.");
+    assert.ok(!b.writes.some((w) => QUIET_MARK in w.body), "an answer carried the quiet mark");
   });
 
   await check("a card waiting on a person is not taken to its creator", async () => {

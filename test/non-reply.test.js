@@ -1,5 +1,5 @@
 // A turn that answers a person with "No response requested." is a failed turn.
-// Both directions matter: missing one leaves Ray unanswered; catching a real
+// Both directions matter: missing one leaves a person unanswered; catching a real
 // reply that merely mentions the phrase would swallow an answer.
 
 const assert = require("assert");

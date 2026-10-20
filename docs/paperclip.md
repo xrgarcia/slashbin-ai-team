@@ -24,7 +24,10 @@ You can run it entirely from Paperclip, with Discord off.
 You need a running Paperclip board, an agent seat on that board, and that agent's
 own API key. You also need the [harness and an authenticated runtime](INSTALL.md#1-prerequisites).
 
-The agent's command on the board must keep its run open until a comment lands.
+The agent's command on the board must keep its run open until a comment lands,
+or, on a wake Paperclip does not hold to a comment, until the connector's
+comment-less close carrying `requestDepth` lands under the run (a re-wake with
+nothing new; see [board execution](paperclip-board-execution.md#outcomes)).
 The connector posts under that run; a task whose run has already ended cannot
 accept the answer under it. See [run ownership troubleshooting](paperclip-board-execution.md#symptom--fix).
 
