@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A board run reads its card from the prompt.** The task prompt carries a
   "Card now" block (status, assignee, creator, reviewer, unblock owner and
-  action, blockers) read from the card the bridge just fetched; the board key
+  action, blockers, and the run's own heartbeat run ID) read from the card the bridge just fetched; the board key
   stays withheld, and `process.work_state` reads process state, not card
   fields. The unchanged-hold note no longer re-quotes an earlier answer that
   said the run could not read the card; it states the card is blocked.

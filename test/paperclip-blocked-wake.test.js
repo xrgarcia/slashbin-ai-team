@@ -155,7 +155,8 @@ const me = { id: "agent-em", name: "Engineering Manager" };
       executionPolicy: { stages: [{ type: "review", participants: [{ type: "agent", agentId: "agent-po" }] }] },
       unblockDescriptor: { owner: { agentId: "agent-em" }, action: "Reply on the card." }, blockedBy: [{ identifier: "T-9", status: "todo" }] };
     const names = (id) => ({ "agent-po": "Product Owner" })[id];
-    const p = buildTaskPrompt(issue, [], me, "u", { names });
+    const p = buildTaskPrompt(issue, [], me, "u", { names, runId: "run-abc-123" });
+    assert.match(p, /This run: run-abc-123/);
     assert.match(p, /Status: in_review/);
     assert.match(p, /Assigned to: Engineering Manager \(you\)/);
     assert.match(p, /Created by: Product Owner/);
