@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A mirrored task's prompt says its hold is the source's.** A run on a task
+  matching `PAPERCLIP_EXTERNAL_WRITER` is told that only the source system
+  releases its hold: never a comment on the card, and never the hold's
+  condition looking met. It releases the hold in the source when that is its to
+  do, or says what does and ends `PAPERCLIP-OUTCOME: blocked`. A run that read
+  the condition as met answered "the hold is cleared", changed nothing, and
+  recorded no outcome, until the board's own recovery gave up.
 - **A board run reads its card from the prompt.** The task prompt carries a
   "Card now" block (status, assignee, creator, reviewer, unblock owner and
   action, blockers, and the run's own heartbeat run ID) read from the card the bridge just fetched; the board key

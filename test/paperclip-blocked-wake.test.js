@@ -175,6 +175,15 @@ const me = { id: "agent-em", name: "Engineering Manager" };
     assert.doesNotMatch(buildTaskPrompt({ identifier: "T-1", title: "Q" }, [], me, "u"), /Card now/, "a card with no read status carries no block");
   });
 
+  await check("a mirrored task's prompt says its hold is the source's to release, never cleared by the run", async () => {
+    const issue = { identifier: "T-1", title: "Q", description: "source: acme/svc#185", status: "blocked" };
+    const p = buildTaskPrompt(issue, [], me, "u", { mirrored: true });
+    assert.match(p, /a hold here is the source's/);
+    assert.match(p, /never call it cleared/);
+    assert.match(p, /PAPERCLIP-OUTCOME: blocked\./);
+    assert.doesNotMatch(buildTaskPrompt(issue, [], me, "u"), /mirrors another system/, "a task of the bot's own carries no such line");
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
