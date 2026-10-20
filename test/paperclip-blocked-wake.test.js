@@ -29,7 +29,7 @@ function board({ description = "Ship the release.", by = { createdByAgentId: "ag
     status: "in_progress", assigneeAgentId: "agent-em", assigneeUserId: null, labels: [], createdAt: "2026-01-01T00:00:00Z", ...by };
   const activity = [], comments = [], writes = [];
   const runs = [{ id: "r1", agentId: "agent-em", status: "running" }];
-  let last = 0, ids = 0;
+  let last = 0, ids = 0, clock = 0;
   const now = () => new Date(last = Math.max(Date.now(), last + 1)).toISOString();
   const record = (actor, changes, runId) => activity.unshift({ id: `a${++ids}`, action: "issue.updated", createdAt: now(), ...actor, runId, details: { changes } });
   comments.push({ id: "c0", authorAgentId: null, authorUserId: "user-avery", createdAt: now(), body: "Handing this to you: release it when it is ready." });
@@ -62,6 +62,8 @@ function board({ description = "Ship the release.", by = { createdByAgentId: "ag
       }
       writes.push({ runId, body });
       const actor = { actorType: "agent", actorId: "agent-em" };
+      // As the live board: entering blocked starts the clock and clears the wake marker.
+      if (body.status === "blocked" && card.status !== "blocked") { card.blockedTransitionAt = ++clock; card.blockedOwnerNotifiedAt = null; }
       if (body.status && body.status !== card.status) { record(actor, { status: { from: card.status, to: body.status } }, runId); card.status = body.status; }
       if (body.unblockDescriptor) card.unblockDescriptor = body.unblockDescriptor;
       if ("assigneeAgentId" in body || "assigneeUserId" in body) {
@@ -78,7 +80,11 @@ function board({ description = "Ship the release.", by = { createdByAgentId: "ag
     return { ok: false, status: 404, text: async () => "" };
   };
   /** A wake the bot caused itself: a new run on the same, unchanged ask. */
-  const wake = (id) => { runs[0] = { id, agentId: "agent-em", status: "running" }; };
+  const wake = (id) => {
+    runs[0] = { id, agentId: "agent-em", status: "running" };
+    // The board's checkout of a wake: a blocked card the bot holds is in progress for the run.
+    if (card.status === "blocked" && card.assigneeAgentId === "agent-em") { card.status = "in_progress"; card.blockedTransitionAt = null; }
+  };
   return { card, writes, comments, fetch, wake };
 }
 const seatOn = (b, opts = {}) => {
@@ -93,19 +99,31 @@ const STUCK = `Nothing here is mine to do; it needs a decision.\n${OUTCOME_MARK}
 const me = { id: "agent-em", name: "Engineering Manager" };
 
 (async () => {
-  await check("a blocked card the bot holds is handed to its creator on the next wake, so no wake of the bot lands on it again", async () => {
+  await check("a plain block on a card another agent created hands it to that agent in the first write: one comment, the clock set once, no wake of the bot", async () => {
     const b = board(), seat = seatOn(b);
     const answer = async () => STUCK;
     await seat(answer).tick();
-    assert.strictEqual(b.card.assigneeAgentId, "agent-em", "the first answer holds the card");
-    b.wake("r2"); await seat(answer).tick();
     assert.strictEqual(b.card.status, "blocked");
     assert.strictEqual(b.card.assigneeAgentId, "agent-po", JSON.stringify(b.writes));
     assert.deepStrictEqual(b.card.unblockDescriptor.owner, { agentId: "agent-em" }, "the board refuses an agent naming anyone else as unblock owner");
     assert.match(visible(b).at(-1).body, /goes back to Product Owner, who created it/);
-    const posted = visible(b).length;
-    b.wake("r3"); await seat(answer).tick();
+    const [posted, clock] = [visible(b).length, b.card.blockedTransitionAt];
+    for (const r of ["r2", "r3"]) { b.wake(r); await seat(answer).tick(); }
     assert.strictEqual(visible(b).length, posted, "a card the creator holds was written to again");
+    assert.strictEqual(b.card.blockedTransitionAt, clock, "the blocked clock moved");
+  });
+
+  await check("a card blocked earlier with the bot as holder is handed to its creator on the next wake", async () => {
+    const b = board(), seat = seatOn(b);
+    // The block of an older version: the bot holds the card.
+    b.card.createdByAgentId = null; b.card.createdByUserId = "user-avery";
+    const answer = async () => STUCK;
+    await seat(answer).tick();
+    assert.strictEqual(b.card.assigneeAgentId, "agent-em");
+    b.card.createdByAgentId = "agent-po"; b.card.createdByUserId = null;
+    b.wake("r2"); await seat(answer).tick();
+    assert.strictEqual(b.card.assigneeAgentId, "agent-po", JSON.stringify(b.writes));
+    assert.match(visible(b).at(-1).body, /goes back to Product Owner, who created it/);
   });
 
   await check("a card the bot created itself stays with it: nothing to hand to", async () => {

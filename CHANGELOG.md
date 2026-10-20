@@ -36,15 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stays withheld, and `process.work_state` reads process state, not card
   fields. The unchanged-hold note no longer re-quotes an earlier answer that
   said the run could not read the card; it states the card is blocked.
-- **A blocked card the bot holds with nothing to clear goes back to its
-  creator.** The board's blocked-owner re-wake fires at the owner who holds the
-  card; each answer re-blocked it and restarted the clock, so the bot woke
-  itself every window. The next wake after a plain `blocked` answer hands the
-  card to whoever created it (not the bot, not a mirrored or escalated card),
-  with the bot still the unblock owner, so no wake lands on the bot again. A
-  card with no resolvable creator is unchanged.
-
-### Added
+- **A plain block on a card another agent created goes to that agent.** The
+  board's blocked-owner re-wake fires at the owner who holds the card; each
+  answer re-blocked it and restarted the clock, so the bot woke itself every
+  window. A plain `blocked` answer (no named wait or person; not escalated,
+  mirrored or in review) now hands the card to the agent that created it in the
+  same write, the bot staying the unblock owner (the board takes no other). A
+  card blocked earlier is handed over on its next wake. A card the bot created
+  itself, or whose creator is no seat, is unchanged. The prompt's card block is
+  read after the bridge's own transitions, not before.
 
 - **A hold that waits on a person ends with that person.** `PAPERCLIP-OUTCOME:
   blocked on <Name>` hands the task to the named board user, still blocked, in
