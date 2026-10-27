@@ -106,6 +106,17 @@ function seat({ stallMinutes = 15, stallCheckMs = 5 * MIN } = {}) {
     assert.strictEqual(b.s.told.length, 1);
   });
 
+  await check("a stretch whose reason changes, error then queued, is said once", async () => {
+    const b = seat();
+    b.s.status = "error";
+    b.s.runs = [b.queuedFor(30)];
+    await b.tick();
+    b.s.status = "idle";
+    b.later(6);
+    await b.tick();
+    assert.deepStrictEqual(b.s.told.map((t) => t.reason), ["error"]);
+  });
+
   await check("stallMinutes 0 never checks", async () => {
     const b = seat({ stallMinutes: 0 });
     b.s.status = "error";
