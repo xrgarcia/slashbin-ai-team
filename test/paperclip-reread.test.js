@@ -942,6 +942,30 @@ const wake = (b, id) => {
     assert.ok(patches.every((p) => !ROUTES({ body: p })), `a routing PATCH went out: ${JSON.stringify(patches)}`);
     keptOnT2(b, "R30", "todo");
   });
+  // A routine's run card: the seat's other run (an interactive session that ran the
+  // same routine) posts the result there while the card's own run works. That is
+  // output, not a decision: the done close goes through. On any other card it is a change.
+  const routineDone = (originKind, more = (x) => x) => async () => {
+    const b = ordinary(originKind ? { originKind } : {});
+    const { answer } = model(b, [(x) => {
+      const c = x.say("t-1", BOT_SEAT, "Completed the routine."); c.createdByRunId = "r0"; x.activity.get("t-1")[0].runId = "r0";
+      x.activity.get("t-1").unshift({ action: "issue.cross_issue_influence_observed", createdAt: x.now(), ...BOT_SEAT, runId: "r0", details: {} });
+      more(x);
+      return `Done.\n${OUTCOME_MARK} done`;
+    }]);
+    await poller(b, answer, { stateFile: stateFileOf() }).tick();
+    return b;
+  };
+  await check("routine card: the seat's other run comments while the answer is made: a done answer still closes it", async () => {
+    assert.strictEqual((await routineDone("routine_execution")()).issues.get("t-1").status, "done");
+  });
+  await check("routine card: a person edits it as well: nothing routed", async () => {
+    const b = await routineDone("routine_execution", (x) => x.edit("t-1", PERSON, "title", "Changed"))();
+    assert.notStrictEqual(b.issues.get("t-1").status, "done", JSON.stringify(b.writes));
+  });
+  await check("ordinary card: the seat's other run comments while the answer is made: still a change, not closed", async () => {
+    assert.notStrictEqual((await routineDone(null)()).issues.get("t-1").status, "done");
+  });
   // R16: a label added while an answer ending `review` is made: no review routing.
   await check("R16: a label added while a review answer is made: no in_review write, no reviewer named", async () => {
     const b = ordinary();
