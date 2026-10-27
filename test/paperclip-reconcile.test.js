@@ -1719,10 +1719,18 @@ const poller = (b, answer, opts = {}) => createPaperclipPoller({ url: "https://b
         return realFetch(url, init);
       };
       const att = fakeAttempts({ [id]: { phase: "finished", exit: { code: 0, cause: null, at: "2026-10-19T02:00:00Z" } } });
-      await poller({ ...b, fetch }, async () => assert.fail("ran"), { stateFile, attempts: att }).tick();
+      const warned = [];
+      const log = { ...silent, warn: (o, m) => warned.push(m), child() { return log; } };
+      const p = poller({ ...b, fetch }, async () => assert.fail("ran"), { stateFile, attempts: att, log });
+      await p.tick();
       if (!settles) {
         assert.strictEqual(resolves.length, 0, "a cancelled run's writes are refused: nothing sent");
         assert.strictEqual(b.wakes.length, 0);
+        // slashbin-ai-team#128: the hold was re-read and warned every poll, forever.
+        await p.tick();
+        await p.tick();
+        assert.strictEqual(warned.filter((m) => m.includes("lost this run to a cancel")).length, 1, "said once, not every poll");
+        assert.strictEqual(resolves.length, 0);
         return;
       }
       assert.strictEqual(resolves.length, 1);
