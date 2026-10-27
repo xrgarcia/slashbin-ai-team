@@ -3406,6 +3406,19 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
           allowedMentions: { parse: ["users"] } });
         pLog.info({ paperclipTask: task, channelId }, "Paperclip escalation — the person was told on Discord");
       },
+      // A seat the board stops starting runs for is said on Discord, once per
+      // stretch: polls keep succeeding, so nothing else would (slashbin-ai-team#128).
+      stallMinutes: envInt("PAPERCLIP_STALL_MINUTES", 15, { min: 0 }),
+      onSeatStalled: async ({ seat, reason, status, queued, oldestMinutes }) => {
+        const channelId = escalation.channel ?? promptChannel;
+        const channel = await resolveBridgeChannel(channelId, { paperclipSeat: seat, stalled: reason });
+        if (!channel) throw new Error(`no Discord channel to tell (${channelId ?? "none set"})`);
+        const why = reason === "error"
+          ? `the board has it in status ${status}`
+          : `${queued} run${queued === 1 ? "" : "s"} queued, the oldest for ${oldestMinutes} minutes`;
+        await channel.send({ content: `${escalation.mention ? `${escalation.mention} ` : ""}Paperclip is not starting ${seat}'s runs: ${why}. Hand-offs to ${seat} wait until it does.\n${board.url}`,
+          allowedMentions: { parse: ["users"] } });
+      },
       // The board's attempts, so a cancel or reassignment stops the worker.
       attempts,
       // The first poll that reaches the board makes it a ready surface.
