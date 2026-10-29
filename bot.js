@@ -14,7 +14,7 @@ const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isNonReply, nonReplyCorrection } = require("./lib/non-reply");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
-const { createRayAsks, announceAsk, answerAsk, routeReply, idsIn, replyContext, whichMessage } = require("./lib/ray-asks");
+const { createOwnerAsks, announceAsk, answerAsk, routeReply, idsIn, replyContext, whichMessage } = require("./lib/owner-asks");
 const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector, parseIntake, parseRewake } = require("./lib/paperclip");
 const { parseContract, toolLine } = require("./lib/handoff-contract");
 const { escalateClientFor, escalateBoard } = require("./lib/process-escalate");
@@ -672,14 +672,14 @@ if (SURFACES.errors.length) {
 for (const note of SURFACES.notes) log.warn(note);
 const DISCORD_ON = SURFACES.discord;
 const PAPERCLIP_BOARDS = SURFACES.paperclip ? CONFIGURED_BOARDS : [];
-// Asks to a person, announced on Discord and answered there (lib/ray-asks.js).
+// Asks to a person, announced on Discord and answered there (lib/owner-asks.js).
 // The store is read whole or the feature is off: read as empty it would
-// announce every ask again. RAY_RELAYS maps a board to the poller's relay.
-let RAY_ASKS = null;
-const RAY_RELAYS = {};
+// announce every ask again. OWNER_RELAYS maps a board to the poller's relay.
+let OWNER_ASKS = null;
+const OWNER_RELAYS = {};
 if (PAPERCLIP_BOARDS.length) {
-  try { RAY_ASKS = createRayAsks({ file: join(STATE_DIR, "ray-asks.json") }); } catch (err) {
-    log.error({ err: err.message }, "Ray-asks state unreadable — asks to a person are not announced on Discord until it is fixed");
+  try { OWNER_ASKS = createOwnerAsks({ file: join(STATE_DIR, "owner-asks.json") }); } catch (err) {
+    log.error({ err: err.message }, "Owner-asks state unreadable — asks to a person are not announced on Discord until it is fixed");
   }
 }
 const PAPERCLIP_EVENTS = eventsSetting(process.env.PAPERCLIP_EVENTS);
@@ -1600,8 +1600,8 @@ client?.on("messageCreate", async (msg) => {
   // The one exception to "mention or monitored": the person an open ask was put
   // to, answering it in the channel it was announced in (a bare yes/no, or a
   // reply to the announcement). Nothing else in that channel is let in.
-  const isAskAnswer = !isDM && !msg.author.bot && RAY_ASKS
-    && routeReply({ registry: RAY_ASKS, channelId: msg.channel.id, text: msg.content, referenceId: msg.reference?.messageId ?? null, userId: msg.author.id }).kind !== "none";
+  const isAskAnswer = !isDM && !msg.author.bot && OWNER_ASKS
+    && routeReply({ registry: OWNER_ASKS, channelId: msg.channel.id, text: msg.content, referenceId: msg.reference?.messageId ?? null, userId: msg.author.id }).kind !== "none";
   if (!isDM && !isMentioned && !isMonitored && !isAskAnswer) return;
 
   // Channel allowlist — if set, only respond in these channels (even for @mentions). DMs still work.
@@ -1646,10 +1646,10 @@ client?.on("messageCreate", async (msg) => {
     }
   }
   let askContext = null;
-  if (!msg.author.bot && RAY_ASKS) {
-    const route = routeReply({ registry: RAY_ASKS, channelId: msg.channel.id, text: prompt, referenceId: msg.reference?.messageId ?? null, userId: msg.author.id });
+  if (!msg.author.bot && OWNER_ASKS) {
+    const route = routeReply({ registry: OWNER_ASKS, channelId: msg.channel.id, text: prompt, referenceId: msg.reference?.messageId ?? null, userId: msg.author.id });
     if (route.kind === "resolve") {
-      const { ok, reply } = await answerAsk({ registry: RAY_ASKS, binding: route.binding, verdict: route.verdict, text: prompt, relays: RAY_RELAYS, link: msg.url, by: { id: msg.author.id, tag: msg.author.tag ?? msg.author.username ?? null } });
+      const { ok, reply } = await answerAsk({ registry: OWNER_ASKS, binding: route.binding, verdict: route.verdict, text: prompt, relays: OWNER_RELAYS, link: msg.url, by: { id: msg.author.id, tag: msg.author.tag ?? msg.author.username ?? null } });
       reqLog.info({ ask: route.binding.key, verdict: route.verdict, ok }, "Ask to a person answered on Discord");
       if (ok) { try { await msg.react(route.verdict === "yes" ? "\u2705" : "\u274C"); } catch { /* the reply says it */ } }
       await msg.reply({ content: reply, allowedMentions: { repliedUser: false } });
@@ -3459,17 +3459,17 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       },
       // A card the seat holds blocked on a decision only the board operator can
       // make is said on Discord once, as one message that a reply of yes or no
-      // answers (lib/ray-asks.js). The binding is kept in the state folder, so
+      // answers (lib/owner-asks.js). The binding is kept in the state folder, so
       // a re-wake or a restart posts nothing twice.
-      onRayAsk: RAY_ASKS ? async (ask) => {
+      onOwnerAsk: OWNER_ASKS ? async (ask) => {
         const channelId = escalation.channel ?? promptChannel;
         // Who may answer: the person the board pings, else the one allowlisted user. Nobody else.
         const mentioned = idsIn(escalation.mention);
         const answerers = mentioned.length ? mentioned : (ALLOWED_USER_IDS.length === 1 ? ALLOWED_USER_IDS : []);
         if (!answerers.length) pLog.warn({ paperclipTask: ask.cardIdentifier }, "Ask to a person has no one who may answer it on Discord — set PAPERCLIP_ESCALATION_MENTION to their <@id>");
-        const channel = await resolveBridgeChannel(channelId, { paperclipTask: ask.cardIdentifier, rayAsk: true });
+        const channel = await resolveBridgeChannel(channelId, { paperclipTask: ask.cardIdentifier, ownerAsk: true });
         if (!channel) return false;
-        const { binding, posted } = await announceAsk({ registry: RAY_ASKS, ask, board: board.id ?? null, channelId,
+        const { binding, posted } = await announceAsk({ registry: OWNER_ASKS, ask, board: board.id ?? null, channelId,
           answerers,
           send: (content) => channel.send({ content: `${escalation.mention ? `${escalation.mention} ` : ""}${content}`, allowedMentions: { parse: ["users"] } }) });
         if (posted) pLog.info({ paperclipTask: ask.cardIdentifier, channelId, messageId: binding.discordMessageId }, "Paperclip ask to a person — announced on Discord");
@@ -3501,7 +3501,7 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
           .then(() => reply.text());
       },
     });
-    if (poller.relayRayAnswer) RAY_RELAYS[board.id ?? "default"] = poller.relayRayAnswer;
+    if (poller.relayOwnerAnswer) OWNER_RELAYS[board.id ?? "default"] = poller.relayOwnerAnswer;
     // Live events wake the seat the moment one of its runs opens; polling stays
     // on as recovery, slower while the socket is live (lib/paperclip-events.js).
     const eventsOn = PAPERCLIP_EVENTS.on && board.events !== false && Boolean(poller.whoami);

@@ -1284,10 +1284,10 @@ const wake = (b, id) => {
     const said = src.match(/const withSaid = [^\n]+\n[^\n]+\n/)?.[0] ?? "";
     assert.ok(/\[QUIET_MARK\]/.test(said) && /comment: text/.test(said) && !/status|assignee|blocked/.test(said), `withSaid() adds more than what is said: ${said}`);
     const inGate = (i) => i > gate[0] && i < gate[1];
-    // relayRayAnswer is the one other writer: it records a person's Discord
+    // relayOwnerAnswer is the one other writer: it records a person's Discord
     // answer on a card with no run and no snapshot to gate against (nothing is
     // being worked), and only moves a card the person's own answer is about.
-    const relay = body("relayRayAnswer");
+    const relay = body("relayOwnerAnswer");
     const inRelay = (i) => i > relay[0] && i < relay[1];
     const patches = [...src.matchAll(/api\("PATCH"/g)].map((m) => m.index);
     const stray = patches.filter((i) => !inGate(i) && !inRelay(i) && i !== sayAt.index + sayAt[0].indexOf('api("PATCH"'));

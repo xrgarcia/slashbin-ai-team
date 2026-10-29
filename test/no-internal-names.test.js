@@ -13,11 +13,13 @@
  * and a real Discord id. An operator's own names (people, customers, issue
  * prefixes) are not listed here, because listing them publishes them. Put one
  * regular expression per line in a gitignored `.internal-names` at the repo
- * root and this gate checks those too.
+ * root (of the main checkout; a linked worktree finds it there) and this gate
+ * checks those too.
  */
 const { execFileSync } = require("child_process");
-const { existsSync, readFileSync } = require("fs");
+const { readFileSync } = require("fs");
 const { join } = require("path");
+const { internalNamesPath } = require("./internal-names-path");
 
 const REPO = join(__dirname, "..");
 const SELF = "test/no-internal-names.test.js";
@@ -27,8 +29,9 @@ const RULES = [
   [/[\w.+-]+@(?!example\.(?:com|invalid)\b|users\.noreply\.github\.com\b)[\w-]+(?:\.[\w-]+)+/i, "a real email address", ["CODE_OF_CONDUCT.md"]],
   [/\b\d{17,20}\b/, "a real Discord id (use 123456789012345678)", []],
 ];
-const LOCAL = join(__dirname, "..", ".internal-names");
-if (existsSync(LOCAL)) {
+// Looked for here, then in the main worktree: a linked worktree has no copy.
+const LOCAL = internalNamesPath(REPO);
+if (LOCAL) {
   for (const line of readFileSync(LOCAL, "utf8").split("\n")) {
     if (line.trim() && !line.startsWith("#")) RULES.push([new RegExp(line.trim(), "i"), "a name listed in .internal-names", ["CODE_OF_CONDUCT.md"]]);
   }
