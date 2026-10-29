@@ -377,7 +377,7 @@ For Claude and Codex differences, read [runtimes.md](docs/runtimes.md).
 | `PAPERCLIP_ESCALATE_BOARD` | the first board | Origin of the board `PAPERCLIP_ESCALATE_URL` serves, e.g. `https://board.example.com`, when that is an extra board. The action belongs to one company, so only that board's hand-offs go through it, with that board's key; a value matching no board is warned and leaves every hand-off a direct write |
 | `PAPERCLIP_ESCALATION_AUTHORITY` | — | One line telling the run what is this bot's to decide, e.g. `scope and mechanism`. Anything outside it is escalated |
 | `PAPERCLIP_ESCALATION_CHANNEL` | the prompt channel | Discord channel pinged when an escalation is handed to a person |
-| `PAPERCLIP_ESCALATION_MENTION` | — | Mention put at the head of that ping, e.g. `<@1234>` |
+| `PAPERCLIP_ESCALATION_MENTION` | — | Mention put at the head of that ping, e.g. `<@1234>` Also the only person whose yes/no answers an ask announced there (Discord user ids in it; with none set, the single `ALLOWED_USERS` entry). |
 | `BOT_BOARD_EXECUTION` | `readonly` | How a board run executes: `readonly`, `engineering` for a bot the board assigns real work, or `parity` for a run built exactly as the bot's Discord session (less the Discord credentials and other channels' conversation). Anything else keeps the connector off |
 | `BOT_BOARD_TOOLS` | `Read,Glob,Grep` | `readonly` board runs: the built-in tools a board run gets |
 | `BOT_BOARD_ENGINEERING_TOOLS` | `Read,Glob,Grep,Edit,Write,Bash` | `engineering` board runs: the built-in tools a board run gets |

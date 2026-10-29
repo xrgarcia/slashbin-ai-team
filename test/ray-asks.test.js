@@ -6,7 +6,7 @@ const assert = require("assert");
 const { readFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { classifyReply, createRayAsks, announceAsk, answerAsk, routeReply, replyContext, whichMessage, sectionOf, RELAYED_MARK } = require("../lib/ray-asks");
+const { idsIn, classifyReply, createRayAsks, announceAsk, answerAsk, routeReply, replyContext, whichMessage, sectionOf, RELAYED_MARK } = require("../lib/ray-asks");
 const { createPaperclipPoller, askOf, buildTaskPrompt } = require("../lib/paperclip");
 
 const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
@@ -18,12 +18,13 @@ async function check(label, fn) {
 const dir = () => mkdtempSync(join(tmpdir(), "ray-asks-"));
 const silent = { info() {}, warn() {}, error() {}, debug() {}, child() { return silent; } };
 const CH = "123456789012345678";
+const RAY = "9000000000000001", COWORKER = "9000000000000002";
 const ASK = (n, extra = {}) => ({ rayCardId: `ray-${n}`, rayCardIdentifier: `R-${n}`, cardIdentifier: `T-${n}`, issueId: `iss-${n}`, marker: `m${n}`,
   decision: `Approve change ${n}?`, recommendation: `ship change ${n} to production`, link: `https://board.example.com/T/issues/R-${n}`, ...extra });
 const fresh = () => createRayAsks({ file: join(dir(), "ray-asks.json") });
 async function post(registry, n, id) {
   const sent = [];
-  const r = await announceAsk({ registry, ask: ASK(n), channelId: CH, send: async (t) => { sent.push(t); return { id }; } });
+  const r = await announceAsk({ registry, ask: ASK(n), channelId: CH, answerers: [RAY], send: async (t) => { sent.push(t); return { id }; } });
   return { ...r, sent };
 }
 
@@ -64,7 +65,7 @@ async function post(registry, n, id) {
 
   await check("a yes replying to a bound ask resolves that ask, even with several open", async () => {
     const r = fresh(); await post(r, 1, "m-1"); await post(r, 2, "m-2");
-    const route = routeReply({ registry: r, channelId: CH, text: "yes", referenceId: "m-2" });
+    const route = routeReply({ registry: r, channelId: CH, text: "yes", referenceId: "m-2", userId: RAY });
     assert.strictEqual(route.kind, "resolve");
     assert.strictEqual(route.binding.cardIdentifier, "T-2");
     assert.strictEqual(route.verdict, "yes");
@@ -72,14 +73,14 @@ async function post(registry, n, id) {
 
   await check("a bare yes with exactly one open ask resolves it", async () => {
     const r = fresh(); await post(r, 1, "m-1");
-    const route = routeReply({ registry: r, channelId: CH, text: "Proceed.", referenceId: null });
+    const route = routeReply({ registry: r, channelId: CH, text: "Proceed.", referenceId: null, userId: RAY });
     assert.strictEqual(route.kind, "resolve");
     assert.strictEqual(route.binding.cardIdentifier, "T-1");
   });
 
   await check("a bare yes with two open asks names them and resolves neither", async () => {
     const r = fresh(); await post(r, 1, "m-1"); await post(r, 2, "m-2");
-    const route = routeReply({ registry: r, channelId: CH, text: "yes", referenceId: null });
+    const route = routeReply({ registry: r, channelId: CH, text: "yes", referenceId: null, userId: RAY });
     assert.strictEqual(route.kind, "which");
     const text = whichMessage(route.open);
     assert.match(text, /Approve change 1\?/); assert.match(text, /Approve change 2\?/);
@@ -88,30 +89,30 @@ async function post(registry, n, id) {
 
   await check("a bare yes with nothing open, or in another channel, is left to the model", async () => {
     const r = fresh(); await post(r, 1, "m-1");
-    assert.strictEqual(routeReply({ registry: r, channelId: "223456789012345678", text: "yes" }).kind, "none");
-    assert.strictEqual(routeReply({ registry: fresh(), channelId: CH, text: "yes" }).kind, "none");
-    assert.strictEqual(routeReply({ registry: r, channelId: CH, text: "yes", referenceId: "unrelated" }).kind, "none");
+    assert.strictEqual(routeReply({ registry: r, channelId: "2234567890123456", text: "yes", userId: RAY }).kind, "none");
+    assert.strictEqual(routeReply({ registry: fresh(), channelId: CH, text: "yes", userId: RAY }).kind, "none");
+    assert.strictEqual(routeReply({ registry: r, channelId: CH, text: "yes", referenceId: "unrelated", userId: RAY }).kind, "none");
   });
 
   await check("no resolves with a no verdict, relays it, marks the ask answered, and a repeat is not guessed onto another ask", async () => {
     const r = fresh(); const { binding } = await post(r, 1, "m-1");
     const calls = [];
     const relays = { default: async (b, verdict, o) => { calls.push([b.issueId, verdict, o.text]); return { woke: true }; } };
-    const route = routeReply({ registry: r, channelId: CH, text: "No", referenceId: "m-1" });
+    const route = routeReply({ registry: r, channelId: CH, text: "No", referenceId: "m-1", userId: RAY });
     assert.strictEqual(route.verdict, "no");
-    const out = await answerAsk({ registry: r, binding: route.binding, verdict: "no", text: "No", relays });
+    const out = await answerAsk({ registry: r, binding: route.binding, verdict: "no", text: "No", relays, by: { id: RAY, tag: "ray" } });
     assert.strictEqual(out.ok, true);
     assert.match(out.reply, /Recorded: no/);
     assert.deepStrictEqual(calls, [["iss-1", "no", "No"]]);
     assert.strictEqual(r.get(binding.key).state, "answered");
     assert.strictEqual(r.get(binding.key).answer.verdict, "no");
-    assert.strictEqual(routeReply({ registry: r, channelId: CH, text: "yes", referenceId: "m-1" }).kind, "closed");
-    assert.strictEqual(routeReply({ registry: r, channelId: CH, text: "yes" }).kind, "none");
+    assert.strictEqual(routeReply({ registry: r, channelId: CH, text: "yes", referenceId: "m-1", userId: RAY }).kind, "closed");
+    assert.strictEqual(routeReply({ registry: r, channelId: CH, text: "yes", userId: RAY }).kind, "none");
   });
 
   await check("a relay that fails leaves the ask open and says nothing was recorded", async () => {
     const r = fresh(); const { binding } = await post(r, 1, "m-1");
-    const out = await answerAsk({ registry: r, binding, verdict: "yes", text: "yes", relays: { default: async () => { throw new Error("HTTP 500 secret-ish detail"); } } });
+    const out = await answerAsk({ registry: r, binding, verdict: "yes", text: "yes", by: { id: RAY }, relays: { default: async () => { throw new Error("HTTP 500 secret-ish detail"); } } });
     assert.strictEqual(out.ok, false);
     assert.doesNotMatch(out.reply, /500|secret/);
     assert.strictEqual(r.get(binding.key).state, "open");
@@ -119,7 +120,7 @@ async function post(registry, n, id) {
 
   await check("reply context carries the replied-to words, and the ask's card and what a yes does", async () => {
     const r = fresh(); const { binding } = await post(r, 1, "m-1");
-    const route = routeReply({ registry: r, channelId: CH, text: "what is the risk?", referenceId: "m-1" });
+    const route = routeReply({ registry: r, channelId: CH, text: "what is the risk?", referenceId: "m-1", userId: RAY });
     assert.strictEqual(route.kind, "context");
     const withAsk = replyContext({ author: "bot", content: "Decision needed: Approve change 1?", binding: route.binding });
     assert.match(withAsk, /reply to bot's message: "Decision needed: Approve change 1\?"/);
@@ -184,10 +185,11 @@ async function post(registry, n, id) {
     const p = poller(b, {});
     const binding = { key: "default:ray-1", issueId: "iss-1", rayCardId: "ray-1", rayCardIdentifier: "R-1", yesAction: "roll out to all stores", steps: {} };
     let saves = 0;
-    const out = await p.relayRayAnswer(binding, "yes", { text: "yes", link: "https://discord.example/x", save: () => saves++ });
+    const out = await p.relayRayAnswer(binding, "yes", { text: "yes", link: "https://discord.example/x", by: { id: RAY, tag: "ray" }, save: () => saves++ });
     assert.strictEqual(out.woke, true);
     assert.deepStrictEqual(b.writes.map((w) => w.key), ["POST /issues/iss-1/comments", "PATCH /issues/ray-1", "PATCH /issues/iss-1"]);
     assert.ok(b.writes[0].body.body.startsWith(RELAYED_MARK));
+    assert.match(b.writes[0].body.body, /by ray \(Discord user 9000000000000001\)/);
     assert.match(b.writes[0].body.body, /Yes\. Go ahead: roll out to all stores/);
     assert.deepStrictEqual([b.writes[1].body, b.writes[2].body], [{ status: "done" }, { status: "todo" }]);
     await p.relayRayAnswer(binding, "yes", { text: "yes", save: () => saves++ });
@@ -212,6 +214,81 @@ async function post(registry, n, id) {
     const p = poller(b, {});
     const out = await p.relayRayAnswer({ key: "k", issueId: "iss-1", rayCardId: "ray-1", yesAction: "x", steps: {} }, "yes", { text: "yes", save() {} });
     assert.strictEqual(out.woke, false);
+  });
+
+  await check("S1: a coworker's bare yes, or reply to the announcement, leaves the ask open and both cards untouched; Ray's answer records who gave it", async () => {
+    const r = fresh(); const { binding } = await post(r, 1, "m-1");
+    const writes = [];
+    const relays = { default: async (b, v, o) => { writes.push([b.issueId, v, o.by]); return { woke: true }; } };
+    assert.strictEqual(routeReply({ registry: r, channelId: CH, text: "yes", userId: COWORKER }).kind, "none");
+    assert.strictEqual(routeReply({ registry: r, channelId: CH, text: "yes", referenceId: "m-1", userId: COWORKER }).kind, "none");
+    assert.strictEqual(routeReply({ registry: r, channelId: CH, text: "yes", referenceId: "m-1" }).kind, "none");
+    // Even if a caller hands the binding straight to answerAsk, the sender is checked again.
+    const out = await answerAsk({ registry: r, binding, verdict: "yes", text: "yes", relays, by: { id: COWORKER, tag: "cw" } });
+    assert.strictEqual(out.ok, false);
+    assert.deepStrictEqual(writes, []);
+    assert.strictEqual(r.get(binding.key).state, "open");
+    assert.strictEqual(r.get(binding.key).answer, undefined);
+    const mine = routeReply({ registry: r, channelId: CH, text: "yes", userId: RAY });
+    assert.strictEqual(mine.kind, "resolve");
+    await answerAsk({ registry: r, binding: mine.binding, verdict: "yes", text: "yes", relays, by: { id: RAY, tag: "ray" } });
+    assert.deepStrictEqual(writes, [["iss-1", "yes", { id: RAY, tag: "ray" }]]);
+    assert.deepStrictEqual(r.get(binding.key).answer.by, { id: RAY, tag: "ray" });
+  });
+
+  await check("S1: an ask with no recorded answerer can be answered by no one; two asks to different people do not make a bare yes ambiguous for either", async () => {
+    const r = fresh();
+    await announceAsk({ registry: r, ask: ASK(1), channelId: CH, send: async () => ({ id: "m-1" }) });
+    assert.strictEqual(routeReply({ registry: r, channelId: CH, text: "yes", userId: RAY }).kind, "none");
+    await announceAsk({ registry: r, ask: ASK(2), channelId: CH, answerers: [COWORKER], send: async () => ({ id: "m-2" }) });
+    assert.strictEqual(routeReply({ registry: r, channelId: CH, text: "yes", userId: COWORKER }).binding.cardIdentifier, "T-2");
+    assert.deepStrictEqual(idsIn("<@9000000000000001> <@!9000000000000002>"), [RAY, COWORKER]);
+    assert.deepStrictEqual(idsIn(""), []);
+  });
+
+  await check("S2: the gate admits only the asked person's answer in the announcement channel, even unmonitored and without a mention", () => {
+    const gate = bot.indexOf("const isAskAnswer");
+    assert.ok(gate > 0, "bot.js computes isAskAnswer");
+    const block = bot.slice(gate, gate + 600);
+    assert.match(block, /!msg\.author\.bot && RAY_ASKS/);
+    assert.match(block, /userId: msg\.author\.id/);
+    assert.match(block, /kind !== "none"/);
+    assert.match(bot, /!isDM && !isMentioned && !isMonitored && !isAskAnswer\) return/);
+    // what it admits: routeReply says "none" for everything but the asked person's answer or reply
+    const r = fresh();
+    return post(r, 1, "m-1").then(() => {
+      const kind = (o) => routeReply({ registry: r, channelId: CH, ...o }).kind;
+      assert.strictEqual(kind({ text: "yes", userId: RAY }), "resolve");
+      assert.strictEqual(kind({ text: "so what do you think?", referenceId: "m-1", userId: RAY }), "context");
+      assert.strictEqual(kind({ text: "yes", userId: COWORKER }), "none");
+      assert.strictEqual(kind({ text: "hello there", userId: RAY }), "none");
+      assert.strictEqual(routeReply({ registry: r, channelId: "2234567890123456", text: "yes", userId: RAY }).kind, "none");
+    });
+  });
+
+  await check("S2: a reply routed to a connected agent carries the replied-to words and the bound-ask context", () => {
+    const src = bot.match(/function routeToAgents\([\s\S]*?\n\}\n/)[0];
+    const sentWs = [];
+    const connectedAgents = new Map([["a1", { channels: { listen: [CH] }, ws: { send: (m) => sentWs.push(JSON.parse(m)) } }]]);
+    const routeToAgents = new Function("connectedAgents", "log", `${src}; return routeToAgents;`)(connectedAgents, silent);
+    const msg = { channel: { id: CH }, author: { id: RAY, username: "ray" }, id: "d1", attachments: { map: () => [] } };
+    const runPrompt = `${replyContext({ author: "bot", content: "Please approve the rollout", binding: { cardIdentifier: "T-1", decision: "Approve?", yesAction: "ship" } })}\n\nyes`;
+    assert.strictEqual(routeToAgents(msg, runPrompt, { messageId: "m-1", author: "bot", content: "Please approve the rollout" }), true);
+    assert.match(sentWs[0].text, /Please approve the rollout/);
+    assert.match(sentWs[0].text, /open ask for a decision on T-1/);
+    assert.strictEqual(sentWs[0].replyTo.content, "Please approve the rollout");
+    assert.match(bot, /routeToAgents\(msg, runPrompt, replied \?/);
+  });
+
+  await check("S3: an ask that could not be announced is tried again after RAY_SCAN_MS, not cached for the life of the process", async () => {
+    const b = board(); let now = 1e6; const calls = [];
+    const p = poller(b, { clock: () => now, onRayAsk: async (a) => { calls.push(a.rayCardId); return calls.length > 1; } });
+    await p.tick(); assert.strictEqual(calls.length, 1);
+    await p.tick(); assert.strictEqual(calls.length, 1, "not retried within the window");
+    now += 301000;
+    await p.tick(); assert.strictEqual(calls.length, 2, "retried once the window passed");
+    now += 301000;
+    await p.tick(); assert.strictEqual(calls.length, 2, "accepted, so never announced again");
   });
 
   await check("section parser and wiring", () => {

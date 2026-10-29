@@ -102,6 +102,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first raised it. A person resolves by commenting and reassigning down; the
   bot is told the card came back with a resolution. `PAPERCLIP-OUTCOME:
   blocked` keeps a card the bot can neither resolve nor escalate.
+- **Only the person asked can answer an ask, wherever it was announced.** The ids
+  come from `PAPERCLIP_ESCALATION_MENTION` (else the single `ALLOWED_USERS`
+  entry) and are fixed on the ask; another allowlisted user's yes or reply
+  changes nothing, and an accepted answer records who gave it, on the ask and in
+  the card comment. That person's bare yes/no, or reply to the announcement, is
+  admitted in the announcement channel even when it is not monitored and the
+  message has no mention. A reply routed to a connected agent now carries the
+  replied-to words and the ask's context, and an announcement that failed is
+  retried every five minutes instead of never.
+
 
 ### Changed
 

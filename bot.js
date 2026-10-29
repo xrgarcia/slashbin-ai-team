@@ -14,7 +14,7 @@ const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isNonReply, nonReplyCorrection } = require("./lib/non-reply");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
-const { createRayAsks, announceAsk, answerAsk, routeReply, replyContext, whichMessage } = require("./lib/ray-asks");
+const { createRayAsks, announceAsk, answerAsk, routeReply, idsIn, replyContext, whichMessage } = require("./lib/ray-asks");
 const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector, parseIntake, parseRewake } = require("./lib/paperclip");
 const { parseContract, toolLine } = require("./lib/handoff-contract");
 const { escalateClientFor, escalateBoard } = require("./lib/process-escalate");
@@ -1079,7 +1079,7 @@ wss.on("connection", (ws) => {
  * Route a Discord message to connected agents.
  * Returns true if at least one agent received it.
  */
-function routeToAgents(discordMsg, prompt) {
+function routeToAgents(discordMsg, prompt, replyTo = null) {
   let routed = false;
   for (const [id, agent] of connectedAgents) {
     const listenChannels = agent.channels?.listen || [];
@@ -1090,6 +1090,7 @@ function routeToAgents(discordMsg, prompt) {
         userId: discordMsg.author.id,
         username: discordMsg.author.username,
         text: prompt,
+        ...(replyTo ? { replyTo } : {}),
         messageId: discordMsg.id,
         attachments: discordMsg.attachments.map(a => ({
           filename: a.name,
@@ -1596,10 +1597,15 @@ client?.on("messageCreate", async (msg) => {
   const isDM = !msg.guild;
   const isMentioned = msg.mentions.has(client.user);
   const isMonitored = MONITOR_CHANNELS.includes(msg.channel.id);
-  if (!isDM && !isMentioned && !isMonitored) return;
+  // The one exception to "mention or monitored": the person an open ask was put
+  // to, answering it in the channel it was announced in (a bare yes/no, or a
+  // reply to the announcement). Nothing else in that channel is let in.
+  const isAskAnswer = !isDM && !msg.author.bot && RAY_ASKS
+    && routeReply({ registry: RAY_ASKS, channelId: msg.channel.id, text: msg.content, referenceId: msg.reference?.messageId ?? null, userId: msg.author.id }).kind !== "none";
+  if (!isDM && !isMentioned && !isMonitored && !isAskAnswer) return;
 
   // Channel allowlist — if set, only respond in these channels (even for @mentions). DMs still work.
-  if (!isDM && ALLOWED_CHANNELS.length > 0 && !ALLOWED_CHANNELS.includes(msg.channel.id)) {
+  if (!isDM && !isAskAnswer && ALLOWED_CHANNELS.length > 0 && !ALLOWED_CHANNELS.includes(msg.channel.id)) {
     log.debug({ channel: msg.channel.id, bot: BOT_NAME }, "Message ignored — channel not in ALLOWED_CHANNELS");
     return;
   }
@@ -1641,9 +1647,9 @@ client?.on("messageCreate", async (msg) => {
   }
   let askContext = null;
   if (!msg.author.bot && RAY_ASKS) {
-    const route = routeReply({ registry: RAY_ASKS, channelId: msg.channel.id, text: prompt, referenceId: msg.reference?.messageId ?? null });
+    const route = routeReply({ registry: RAY_ASKS, channelId: msg.channel.id, text: prompt, referenceId: msg.reference?.messageId ?? null, userId: msg.author.id });
     if (route.kind === "resolve") {
-      const { ok, reply } = await answerAsk({ registry: RAY_ASKS, binding: route.binding, verdict: route.verdict, text: prompt, relays: RAY_RELAYS, link: msg.url });
+      const { ok, reply } = await answerAsk({ registry: RAY_ASKS, binding: route.binding, verdict: route.verdict, text: prompt, relays: RAY_RELAYS, link: msg.url, by: { id: msg.author.id, tag: msg.author.tag ?? msg.author.username ?? null } });
       reqLog.info({ ask: route.binding.key, verdict: route.verdict, ok }, "Ask to a person answered on Discord");
       if (ok) { try { await msg.react(route.verdict === "yes" ? "\u2705" : "\u274C"); } catch { /* the reply says it */ } }
       await msg.reply({ content: reply, allowedMentions: { repliedUser: false } });
@@ -1665,7 +1671,7 @@ client?.on("messageCreate", async (msg) => {
   }
 
   // --- Bridge routing: if a connected agent is listening on this channel, route to it ---
-  if (routeToAgents(msg, prompt)) {
+  if (routeToAgents(msg, runPrompt, replied ? { messageId: replied.id ?? null, author: replied.author?.username ?? null, content: replied.content ?? "" } : null)) {
     reqLog.info("Message routed to connected agent via WebSocket");
     return;
   }
@@ -3457,9 +3463,14 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       // a re-wake or a restart posts nothing twice.
       onRayAsk: RAY_ASKS ? async (ask) => {
         const channelId = escalation.channel ?? promptChannel;
+        // Who may answer: the person the board pings, else the one allowlisted user. Nobody else.
+        const mentioned = idsIn(escalation.mention);
+        const answerers = mentioned.length ? mentioned : (ALLOWED_USER_IDS.length === 1 ? ALLOWED_USER_IDS : []);
+        if (!answerers.length) pLog.warn({ paperclipTask: ask.cardIdentifier }, "Ask to a person has no one who may answer it on Discord — set PAPERCLIP_ESCALATION_MENTION to their <@id>");
         const channel = await resolveBridgeChannel(channelId, { paperclipTask: ask.cardIdentifier, rayAsk: true });
         if (!channel) return false;
         const { binding, posted } = await announceAsk({ registry: RAY_ASKS, ask, board: board.id ?? null, channelId,
+          answerers,
           send: (content) => channel.send({ content: `${escalation.mention ? `${escalation.mention} ` : ""}${content}`, allowedMentions: { parse: ["users"] } }) });
         if (posted) pLog.info({ paperclipTask: ask.cardIdentifier, channelId, messageId: binding.discordMessageId }, "Paperclip ask to a person — announced on Discord");
         return Boolean(binding.discordMessageId);
