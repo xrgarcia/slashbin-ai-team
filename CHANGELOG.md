@@ -30,6 +30,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An ask only a person can decide reaches them on Discord, and a bare "yes"
+  answers it.** A seat that concludes a decision is only the board operator's
+  makes it with `process.escalate request_ray_action`, which opens one card for
+  that person and blocks the seat's card on it. Nothing told him (the policy
+  reports no notification): a card waited "for a yes" for days, 2026-10-21.
+  The poller now notices a held card whose latest hop is that request with the
+  person's card still open, and the bot posts one message to the board's
+  escalation channel (else its prompt channel): the decision, what a yes will
+  do (the seat's recommendation), and a card link. The message is bound to the
+  card in `ray-asks.json` in the state folder, keyed by board and the person's
+  card, so a re-wake or a restart posts nothing twice (a crash between the
+  binding and the post retries the post: at least once, never lost).
+  A human message in that channel that is a Discord reply to a bound ask, or a
+  bare yes or no (yes, y, yep, proceed, go, go ahead, approved, do it, ship it;
+  no, n, hold, don't) while exactly one ask is open there, answers it: the
+  answer is relayed onto the seat's card as its newest ask, the person's card
+  is closed, the seat's card goes back to todo so a run opens, and the bot
+  reacts and replies. A bare yes with several asks open names them and asks
+  which; it never guesses. `stop` is still a stop. `record_answer` is not used:
+  it copies only a comment the board operator wrote on his own card with his
+  own login, which a seat's key cannot produce.
+- **A reply carries the words it replies to.** Any message that is a Discord
+  reply now reaches the model with the replied-to message's text (and, for a
+  bound ask, its card and what a yes does), not only its attachments. A fresh
+  session handed a bare "yes" asked "What are you saying yes to?".
 - **A mirrored task's prompt says its hold is the source's.** A run on a task
   matching `PAPERCLIP_EXTERNAL_WRITER` is told that only the source system
   releases its hold: never a comment on the card, and never the hold's

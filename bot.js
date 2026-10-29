@@ -14,6 +14,7 @@ const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isNonReply, nonReplyCorrection } = require("./lib/non-reply");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
+const { createRayAsks, announceAsk, answerAsk, routeReply, replyContext, whichMessage } = require("./lib/ray-asks");
 const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector, parseIntake, parseRewake } = require("./lib/paperclip");
 const { parseContract, toolLine } = require("./lib/handoff-contract");
 const { escalateClientFor, escalateBoard } = require("./lib/process-escalate");
@@ -671,6 +672,16 @@ if (SURFACES.errors.length) {
 for (const note of SURFACES.notes) log.warn(note);
 const DISCORD_ON = SURFACES.discord;
 const PAPERCLIP_BOARDS = SURFACES.paperclip ? CONFIGURED_BOARDS : [];
+// Asks to a person, announced on Discord and answered there (lib/ray-asks.js).
+// The store is read whole or the feature is off: read as empty it would
+// announce every ask again. RAY_RELAYS maps a board to the poller's relay.
+let RAY_ASKS = null;
+const RAY_RELAYS = {};
+if (PAPERCLIP_BOARDS.length) {
+  try { RAY_ASKS = createRayAsks({ file: join(STATE_DIR, "ray-asks.json") }); } catch (err) {
+    log.error({ err: err.message }, "Ray-asks state unreadable — asks to a person are not announced on Discord until it is fixed");
+  }
+}
 const PAPERCLIP_EVENTS = eventsSetting(process.env.PAPERCLIP_EVENTS);
 if (PAPERCLIP_BOARDS.length && PAPERCLIP_EVENTS.problem) log.warn(PAPERCLIP_EVENTS.problem);
 if (!DISCORD_ON) log.info(discordOffReason(SURFACES));
@@ -1619,6 +1630,40 @@ client?.on("messageCreate", async (msg) => {
 
   const reqLog = log.child({ channel: msg.channel.id, user: msg.author.tag, prompt: prompt.substring(0, 80) });
 
+  // --- Replies: an answer to an ask we posted, and the words being replied to ---
+  // A fresh session handed a bare "yes" has nothing to say yes to (a person
+  // replied "yes" to a posted ask and was asked "What are you saying yes to?").
+  let replied = null;
+  if (msg.reference?.messageId) {
+    try { replied = await msg.fetchReference(); } catch (err) {
+      reqLog.debug({ err: err.message }, "Could not fetch replied-to message for context");
+    }
+  }
+  let askContext = null;
+  if (!msg.author.bot && RAY_ASKS) {
+    const route = routeReply({ registry: RAY_ASKS, channelId: msg.channel.id, text: prompt, referenceId: msg.reference?.messageId ?? null });
+    if (route.kind === "resolve") {
+      const { ok, reply } = await answerAsk({ registry: RAY_ASKS, binding: route.binding, verdict: route.verdict, text: prompt, relays: RAY_RELAYS, link: msg.url });
+      reqLog.info({ ask: route.binding.key, verdict: route.verdict, ok }, "Ask to a person answered on Discord");
+      if (ok) { try { await msg.react(route.verdict === "yes" ? "\u2705" : "\u274C"); } catch { /* the reply says it */ } }
+      await msg.reply({ content: reply, allowedMentions: { repliedUser: false } });
+      return;
+    }
+    if (route.kind === "which") {
+      await msg.reply({ content: whichMessage(route.open), allowedMentions: { repliedUser: false } });
+      return;
+    }
+    if (route.kind === "closed") {
+      await msg.reply({ content: "That decision was already answered.", allowedMentions: { repliedUser: false } });
+      return;
+    }
+    if (route.kind === "context") askContext = route.binding;
+  }
+  let runPrompt = prompt;
+  if (replied) {
+    runPrompt = `${replyContext({ author: replied.author?.username ?? null, content: replied.content, binding: askContext })}\n\n${prompt}`;
+  }
+
   // --- Bridge routing: if a connected agent is listening on this channel, route to it ---
   if (routeToAgents(msg, prompt)) {
     reqLog.info("Message routed to connected agent via WebSocket");
@@ -1666,7 +1711,7 @@ client?.on("messageCreate", async (msg) => {
       if (typeof item === "string" && isNonReply(item)) { skipped = true; return; }
       sendQueue.enqueue(item);
     };
-    let responseText = await runClaude(prompt, msg.channel.id, reqLog, enqueue, { fileRefs, attachmentFailures }, channelName, progress);
+    let responseText = await runClaude(runPrompt, msg.channel.id, reqLog, enqueue, { fileRefs, attachmentFailures }, channelName, progress);
     if (skipped) {
       reqLog.warn("Run answered a person with a non-reply — re-asking once");
       responseText = await runClaude(nonReplyCorrection(msg.author.username, msg.content), msg.channel.id, reqLog, sendQueue.enqueue, {}, channelName, null);
@@ -3406,6 +3451,19 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
           allowedMentions: { parse: ["users"] } });
         pLog.info({ paperclipTask: task, channelId }, "Paperclip escalation — the person was told on Discord");
       },
+      // A card the seat holds blocked on a decision only the board operator can
+      // make is said on Discord once, as one message that a reply of yes or no
+      // answers (lib/ray-asks.js). The binding is kept in the state folder, so
+      // a re-wake or a restart posts nothing twice.
+      onRayAsk: RAY_ASKS ? async (ask) => {
+        const channelId = escalation.channel ?? promptChannel;
+        const channel = await resolveBridgeChannel(channelId, { paperclipTask: ask.cardIdentifier, rayAsk: true });
+        if (!channel) return false;
+        const { binding, posted } = await announceAsk({ registry: RAY_ASKS, ask, board: board.id ?? null, channelId,
+          send: (content) => channel.send({ content: `${escalation.mention ? `${escalation.mention} ` : ""}${content}`, allowedMentions: { parse: ["users"] } }) });
+        if (posted) pLog.info({ paperclipTask: ask.cardIdentifier, channelId, messageId: binding.discordMessageId }, "Paperclip ask to a person — announced on Discord");
+        return Boolean(binding.discordMessageId);
+      } : null,
       // A seat the board stops starting runs for is said on Discord, once per
       // stretch: polls keep succeeding, so nothing else would (slashbin-ai-team#128).
       stallMinutes: envInt("PAPERCLIP_STALL_MINUTES", 15, { min: 0 }),
@@ -3432,6 +3490,7 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
           .then(() => reply.text());
       },
     });
+    if (poller.relayRayAnswer) RAY_RELAYS[board.id ?? "default"] = poller.relayRayAnswer;
     // Live events wake the seat the moment one of its runs opens; polling stays
     // on as recovery, slower while the socket is live (lib/paperclip-events.js).
     const eventsOn = PAPERCLIP_EVENTS.on && board.events !== false && Boolean(poller.whoami);
