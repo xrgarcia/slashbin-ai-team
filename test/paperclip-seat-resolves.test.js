@@ -211,7 +211,7 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
   // started or used up.
   const marker = (record) => `<!-- process.escalate:${Buffer.from(JSON.stringify(record)).toString("base64url")} -->`;
   function routes() {
-    const r = { calls: [], asks: [], warns: [], board: null };
+    const r = { calls: [], asks: [], warns: [], errors: [], board: null };
     // As the live action: an ask records its hop and the owner's card on the seat's card; a hand-up gives it to the manager.
     r.escalate = async (body) => {
       r.calls.push(body);
@@ -225,7 +225,7 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
       } else if (body.operation === "hand_up") { b.card.assigneeAgentId = "agent-po"; b.card.status = "blocked"; }
       return { ok: true, operation: body.operation, holder: { id: "agent-po" }, hops: [] };
     };
-    r.log = { ...silent, warn: (_o, m) => r.warns.push(String(m ?? _o)), child() { return r.log; } };
+    r.log = { ...silent, warn: (_o, m) => r.warns.push(String(m ?? _o)), error: (_o, m) => r.errors.push(String(m ?? _o)), child() { return r.log; } };
     r.onOwnerAsk = async (a) => { r.asks.push(a); return true; };
     return r;
   }
@@ -544,7 +544,8 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
         hops.push({ from: "agent-em", to: "agent-po", operation: "hand_up", idempotencyKey: body.idempotencyKey });
         b.card.assigneeAgentId = "agent-po"; b.card.status = "blocked";
       } else {
-        const id = rayCard ?? `own-${++made}`;
+        // As the action does today, the record's owner card is reused even closed; `r.fixed` reuses it only open.
+        const id = rayCard && !(r.fixed && ["done", "cancelled"].includes(b.owners[rayCard].status)) ? rayCard : `own-${++made}`;
         b.owners[id] ??= ownerCard(made);
         rayCard = id;
         hops.push({ from: "agent-em", to: "user-avery", operation: ASK_OPERATION, idempotencyKey: body.idempotencyKey, [ASK_CARD_FIELD]: id });
@@ -604,7 +605,7 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     assert.ok(t.b.card.blockedBy.some((x) => x.id === "own-2" && x.status === "todo"), "the card does not wait on the new ask");
   });
 
-  await check("after an earlier ask is answered from chat (the record still names its closed card), a newer look's ask that comes back closed is never taken for an ask: handed up, else said and not repeated", async () => {
+  await check("after an earlier ask is answered from chat (the record still names its closed card), a newer look's ask that comes back closed is never taken for an ask: handed up, else put back and asked again under a new key", async () => {
     const up = await newerAnswer({ recorded: false, reportsTo: "agent-po" });
     assert.ok(up.r.warns.some((w) => /already closed/.test(w)), `warns ${up.r.warns}`);
     assert.strictEqual(up.b.card.assigneeAgentId, "agent-po", "the card was not handed up");
@@ -612,9 +613,28 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     const none = await newerAnswer({ recorded: false });
     assert.strictEqual(none.b.card.assigneeAgentId, "agent-em");
     assert.deepStrictEqual(none.r.asks.map((a) => a.ownerCardId), ["own-1"], "a closed card was announced as an ask");
-    // Every retry would get the same closed card back: the next wake does not run the model again.
+    assert.ok(none.r.errors.some((e) => /asks again under a new key/.test(e)), `errors ${none.r.errors}`);
+    // Not used up: the next wake looks again, under a key of its own, so a
+    // replay cannot hand back the same closed card.
     none.b.wake("r5"); await none.seat(none.answer).tick();
-    assert.strictEqual(none.prompts.length, 4, "the look was repeated on a closed ask");
+    assert.strictEqual(none.prompts.length, 5, "an unfinished look was not retried");
+    assert.match(none.prompts[4], LOOK);
+    let keys = askCalls(none.r).map((c) => c.idempotencyKey);
+    assert.strictEqual(keys.length, 3, `asks ${keys}`);
+    assert.strictEqual(new Set(keys).size, 3, `a retry replayed a key: ${keys}`);
+    assert.deepStrictEqual(none.r.asks.map((a) => a.ownerCardId), ["own-1"], "a closed card was announced as an ask");
+    // Once the action opens a new owner card in place of a closed one, the next retry's ask is announced and the card waits on it.
+    none.r.fixed = true;
+    none.b.wake("r6"); await none.seat(none.answer).tick();
+    assert.strictEqual(none.prompts.length, 6);
+    keys = askCalls(none.r).map((c) => c.idempotencyKey);
+    assert.strictEqual(new Set(keys).size, 4, `a retry replayed a key: ${keys}`);
+    assert.deepStrictEqual(none.r.asks.map((a) => a.ownerCardId), ["own-1", "own-2"], "the open ask was not announced in its wake");
+    assert.ok(none.b.card.blockedBy.some((x) => x.id === "own-2" && x.status === "todo"), "the card does not wait on the new ask");
+    assert.strictEqual(none.b.card.status, "blocked");
+    // Delivered: the look is used up and is not repeated.
+    none.b.wake("r7"); await none.seat(none.answer).tick();
+    assert.strictEqual(none.prompts.length, 6, "a delivered look was repeated");
   });
 
   await check("a newer answer's look that ends done is left done, whatever ask the record still names", async () => {

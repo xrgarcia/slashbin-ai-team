@@ -89,7 +89,10 @@ its own ask, and a retry of the same look reuses the one it made, with the card
 blocked on its owner card again. While the card is still blocked with the seat,
 an ask that comes back as an owner card already closed asks no one: the card is
 handed up instead. If it cannot be handed up, an error says so and the look is
-used up, because every retry would get the same closed card back. A card the
+not used up: the next wake looks again, and its ask uses a new key, because a
+replay of the old key would return the same closed card. Whether that retry
+reaches an open owner card depends on `process.escalate` opening a new one in
+place of a closed one. A card the
 look finished, or handed on, is left as it is.
 
 Cards a different writer keeps in step (`PAPERCLIP_EXTERNAL_WRITER`, a mirror of
