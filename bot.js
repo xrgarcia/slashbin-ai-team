@@ -3428,6 +3428,11 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
     setSurface("board", "not ready", tag);
     const escalate = escalateClientFor(board, { boards: PAPERCLIP_BOARDS });
     if (escalate) pLog.info({ escalateBoard: board.url }, "Paperclip hand-offs on this board go through the shared escalate action");
+    // The poller refuses PAPERCLIP_RESOLVE_OWN with no route; a board that has none is left off, the others run.
+    if (BOARD_TRIGGERS.resolveOwn && !escalate && !escalation.escalateTo) {
+      pLog.error({ board: board.id ?? null }, "PAPERCLIP_RESOLVE_OWN is on, but this board has no escalate action and no escalateTo — its board tasks are off");
+      continue;
+    }
     const poller = createPaperclipPoller({
       url: board.url,
       apiKey: board.apiKey,

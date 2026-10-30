@@ -71,11 +71,22 @@ without the ask channel it hands the card up the reporting line through
 `PAPERCLIP_ESCALATE_TO`. The model's own choice, when it makes one, stands (an
 ask it made is announced in that wake too).
 
+An ask counts as made only when a chat message is bound to it. If it could
+not be announced (no channel), the code hands the card up through
+`process.escalate` in that same wake instead; if that cannot be done either, the
+look is not used up, a warning says so, and the next wake looks again.
+
+Cards a different writer keeps in step (`PAPERCLIP_EXTERNAL_WRITER`, a mirror of
+an issue tracker, say) have these routes too: a hand-up or an ask puts the card
+with its owner and is not a second writer on its status. The pattern still
+guards every other write to such a card: plain blocks to the creator,
+hand-backs, person waits, done closes, and link and status repair.
+
 With `on` and none of those routes (no escalate action, no
-`PAPERCLIP_ESCALATE_TO`), the setting is a startup problem: the board connector
-stays off and `npm run doctor` fails the check. If a card still reaches a wake
-with no route (the seat has no manager, say), the model is not started, nothing
-is saved, and a warning names the settings; the next wake looks again.
+`PAPERCLIP_ESCALATE_TO`), the setting is refused: it is a startup problem (the
+board connector stays off, and `npm run doctor` fails the check), and the
+poller throws when built, so no wake can run in that state. A board with no
+route of its own is left off while the others run.
 
 An unreadable value in any of these settings turns the board connector off and logs the
 reason. The harness does not guess.

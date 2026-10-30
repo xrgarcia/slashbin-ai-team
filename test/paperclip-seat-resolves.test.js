@@ -307,29 +307,109 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     assert.strictEqual(r.asks.length, 1, "the model's ask was announced in that wake");
   });
 
-  await check("no route: nothing is started or used up, a warning names the setting, and the next wake with a route starts the model", async () => {
-    for (const held of [false, true]) {
+  await check("no route is refused at construction: the poller is not built with the setting on and nowhere to send a card", () => {
+    const mk = (extra) => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile: join(mkdtempSync(join(tmpdir(), "pc-")), "s.json"),
+      log: silent, fetch: async () => ({ ok: false, status: 404, text: async () => "" }), answer: async () => STUCK, resolveOwn: true, ...extra });
+    assert.throws(() => mk({}), /PAPERCLIP_RESOLVE_OWN.*PAPERCLIP_ESCALATE_URL.*PAPERCLIP_ESCALATE_TO/);
+    const r = routes();
+    for (const route of [{ escalate: r.escalate }, ROUTE]) assert.doesNotThrow(() => mk(route));
+    assert.doesNotThrow(() => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile: join(mkdtempSync(join(tmpdir(), "pc-")), "s.json"),
+      log: silent, fetch: async () => ({ ok: false, status: 404, text: async () => "" }), answer: async () => STUCK }), "setting off needs no route");
+  });
+
+  // A Foreman-style card: its description's first line names the writer that
+  // keeps its status (PAPERCLIP_EXTERNAL_WRITER). Recovery still has its routes.
+  const FOREMAN = "source: acme/service#42\nThe escalation body.";
+  await check("a Foreman-style (external-writer) card: self-block recovery asks the owner, hands up, or goes to the holder", async () => {
+    for (const mode of ["ask", "hand_up", "holder"]) {
       const r = routes();
-      const b = held ? heldBoard() : board({ by: { createdByAgentId: "agent-em" } });
+      const b = board({ description: FOREMAN, by: { createdByAgentId: "agent-em" }, reportsTo: "agent-po" });
       r.board = b;
-      const dir = mkdtempSync(join(tmpdir(), "pc-"));
-      const stateFile = join(dir, "s.json");
-      const mk = (answer, extra) => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: r.log, fetch: b.fetch, answer,
-        externalWriter: /^source: \S+#\d+$/, resolveOwn: true, ...extra });
+      const opts = mode === "ask" ? { escalate: r.escalate, onOwnerAsk: r.onOwnerAsk } : mode === "hand_up" ? { escalate: r.escalate } : ROUTE;
+      const seat = seatOn(b, { resolveOwn: true, log: r.log, ...opts });
       const prompts = [];
       const answer = async (p) => { prompts.push(p); return STUCK; };
-      if (held) { b.wake("r1"); await mk(answer, {}).tick(); } else { await mk(answer, {}).tick(); blockAgain(b, SEAT, "rJob"); b.wake("r2"); }
+      await seat(answer).tick();
+      blockAgain(b, SEAT, "rJob"); b.wake("r2");
+      await seat(answer).tick();
+      assert.strictEqual(prompts.length, 2, `${mode}: the model was not started`);
+      if (mode === "ask") { assert.strictEqual(askCalls(r).length, 1, `${mode}: ${r.calls.map((c) => c.operation)}`); assert.strictEqual(r.asks.length, 1); }
+      else if (mode === "hand_up") assert.deepStrictEqual(r.calls.map((c) => c.operation), ["hand_up"]);
+      else assert.strictEqual(b.card.assigneeUserId, "user-avery");
+    }
+  });
+
+  await check("a Foreman-style (external-writer) held escalation: the second look asks the owner, hands up, or goes to the holder", async () => {
+    for (const mode of ["ask", "hand_up", "holder"]) {
+      const r = routes();
+      const b = heldBoard();
+      b.card.description = FOREMAN;
+      r.board = b;
+      const opts = mode === "ask" ? { escalate: r.escalate, onOwnerAsk: r.onOwnerAsk } : mode === "hand_up" ? { escalate: r.escalate } : ROUTE;
+      const seat = seatOn(b, { resolveOwn: true, log: r.log, ...opts });
+      const prompts = [];
+      await heldTicks(b, seat, async (p) => { prompts.push(p); return STUCK; });
+      assert.strictEqual(prompts.length, 2, `${mode}: ${prompts.length} runs`);
+      if (mode === "ask") { assert.strictEqual(askCalls(r).length, 1, `${mode}: ${r.calls.map((c) => c.operation)}`); assert.strictEqual(r.asks.length, 1); }
+      else if (mode === "hand_up") assert.deepStrictEqual(r.calls.map((c) => c.operation), ["hand_up"]);
+      else assert.strictEqual(b.card.assigneeUserId, "user-avery");
+    }
+  });
+
+  // An ask counts only when announcing it returned true (a message is bound).
+  const unbound = (r) => async (a) => { r.asks.push(a); return false; };
+  await check("an ask that could not be announced (no chat channel) is handed up through process.escalate in that wake, on both paths", async () => {
+    for (const path of ["self-block", "held"]) {
+      const r = routes();
+      r.onOwnerAsk = unbound(r);
+      const prompts = [];
+      const answer = async (p) => { prompts.push(p); return STUCK; };
+      let b, seat;
+      if (path === "held") { b = heldBoard(); r.board = b; seat = seatOn(b, { resolveOwn: true, log: r.log, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk }); await heldTicks(b, seat, answer); }
+      else {
+        b = board({ by: { createdByAgentId: "agent-em" }, reportsTo: "agent-po" }); r.board = b;
+        seat = seatOn(b, { resolveOwn: true, log: r.log, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk });
+        await seat(answer).tick(); blockAgain(b, SEAT, "rJob"); b.wake("r2"); await seat(answer).tick();
+      }
+      assert.deepStrictEqual(r.calls.map((c) => c.operation), [ASK_OPERATION, "hand_up"], `${path}: ${r.calls.map((c) => c.operation)}`);
+      assert.match(r.calls[1].blocker, /Handed up instead/);
+      assert.strictEqual(b.card.assigneeAgentId, "agent-po", `${path}: not handed up`);
+      // The recovery was used: the next wakes do not start the model again.
+      const n = prompts.length;
+      b.wake("r9"); await seat(answer).tick();
+      assert.strictEqual(prompts.length, n, `${path}: looked again after a hand-up`);
+    }
+  });
+
+  await check("an ask that could not be announced and cannot be handed up leaves nothing used up: warned, and the next wake tries again", async () => {
+    for (const path of ["self-block", "held"]) {
+      const r = routes();
+      r.onOwnerAsk = unbound(r);
+      const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+      const prompts = [];
+      const answer = async (p) => { prompts.push(p); return STUCK; };
+      // No reporting line: nowhere to hand up to.
+      const b = path === "held" ? heldBoard() : board({ by: { createdByAgentId: "agent-em" } });
+      r.board = b;
+      const noLine = async (url, init) => {
+        const out = await b.fetch(url, init);
+        if (/\/agents\/me$/.test(url)) return { ok: true, text: async () => JSON.stringify({ id: "agent-em", name: "Engineering Manager", companyId: "co-1" }) };
+        return out;
+      };
+      const mkNoLine = (extra = {}) => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: r.log, fetch: noLine, answer,
+        externalWriter: /^source: \S+#\d+$/, resolveOwn: true, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk, ...extra });
+      if (path === "held") { for (const id of ["r1", "r2"]) { b.wake(id); await mkNoLine().tick(); } }
+      else { await mkNoLine().tick(); blockAgain(b, SEAT, "rJob"); b.wake("r2"); await mkNoLine().tick(); }
       const before = prompts.length;
-      if (held) { for (const id of ["r2", "r3"]) { b.wake(id); await mk(answer, {}).tick(); } } else await mk(answer, {}).tick();
-      assert.strictEqual(prompts.length, before, `held ${held}: the model was started with no route`);
-      assert.ok(r.warns.some((w) => /PAPERCLIP_ESCALATE_URL.*PAPERCLIP_ESCALATE_TO/.test(w)), `held ${held}: warns ${r.warns}`);
+      assert.strictEqual(before, 2, `${path}: ${before} runs`);
+      assert.ok(r.warns.some((w) => /nothing is used up, the next wake tries again/.test(w)), `${path}: warns ${r.warns}`);
       const saved = JSON.parse(readFileSync(stateFile, "utf8"));
-      assert.ok(!JSON.stringify(saved).match(/ownLook|ownRun|heldLook/), `held ${held}: recovery state was persisted`);
-      // A route appears: the very next wake looks again.
-      if (held) b.wake("r4"); else b.wake("r3");
-      await mk(answer, { escalate: r.escalate, onOwnerAsk: r.onOwnerAsk }).tick();
-      assert.strictEqual(prompts.length, before + 1, `held ${held}: the next wake did not start the model`);
-      assert.strictEqual(askCalls(r).length, 1, `held ${held}: ask calls ${r.calls.map((c) => c.operation)}`);
+      assert.ok(!JSON.stringify(saved).match(/ownLook|ownRun|heldLook/), `${path}: the look was persisted as used`);
+      // The channel is back: the next wake looks again.
+      r.onOwnerAsk = async (a) => { r.asks.push(a); return true; };
+      b.wake("r10");
+      await mkNoLine({ onOwnerAsk: r.onOwnerAsk }).tick();
+      assert.strictEqual(prompts.length, before + 1, `${path}: the next wake did not start the model`);
     }
   });
 
