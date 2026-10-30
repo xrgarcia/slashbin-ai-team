@@ -50,7 +50,45 @@ on. With `N` set, the model looks again up to `N` times on that one ask. It is
 told what it said and how each card it waits on stands now. The last look is
 told to escalate. Any wake after that gets the note.
 
-An unreadable value in either setting turns the board connector off and logs the
+**`PAPERCLIP_RESOLVE_OWN`** is `on` or `off` (the default). A card the seat
+itself left blocked is no one's hold: a scheduled job that failed ended it
+blocked, or the board blocked it when a run was lost. With `on`, the model is
+started on such a card, once per block, and must end it fixed, handed to its
+owner through `process.escalate`, or put to the owner as a yes or no question.
+A block the model's own answer set is that answer's wait and is left to
+`PAPERCLIP_REWAKE`. A block a person set, and a card in the board's legacy
+reconciliation hold, stay untouched. The same setting makes an escalation the
+model ruled would stand, with nothing done on the card since, get one more
+look with the same three ways out, so a ruling of "hold stands" cannot be the
+end of it.
+
+The three ways out are enforced in code, not left to the prompt. When either
+look ends in a plain blocked reply, with no hand-off or ask made during the run
+and the card not resumed, the code puts the model's reply to the owner as an ask
+and announces it in that same wake (the scan skips an ask already announced);
+without the ask channel it hands the card up the reporting line through
+`process.escalate`; without a reporting line it escalates to
+`PAPERCLIP_ESCALATE_TO`. The model's own choice, when it makes one, stands (an
+ask it made is announced in that wake too).
+
+An ask counts as made only when a chat message is bound to it. If it could
+not be announced (no channel), the code hands the card up through
+`process.escalate` in that same wake instead; if that cannot be done either, the
+look is not used up, a warning says so, and the next wake looks again.
+
+Cards a different writer keeps in step (`PAPERCLIP_EXTERNAL_WRITER`, a mirror of
+an issue tracker, say) have these routes too: a hand-up or an ask puts the card
+with its owner and is not a second writer on its status. The pattern still
+guards every other write to such a card: plain blocks to the creator,
+hand-backs, person waits, done closes, and link and status repair.
+
+With `on` and none of those routes (no escalate action, no
+`PAPERCLIP_ESCALATE_TO`), the setting is refused: it is a startup problem (the
+board connector stays off, and `npm run doctor` fails the check), and the
+poller throws when built, so no wake can run in that state. A board with no
+route of its own is left off while the others run.
+
+An unreadable value in any of these settings turns the board connector off and logs the
 reason. The harness does not guess.
 
 ## Recommended setup: quiet waiting
