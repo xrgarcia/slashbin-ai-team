@@ -82,6 +82,11 @@ An ask counts as made only when a chat message is bound to it. If it could
 not be announced (no channel), the code hands the card up through
 `process.escalate` in that same wake instead; if that cannot be done either, the
 look is not used up, a warning says so, and the next wake looks again.
+An ask an earlier answer made counts for nothing here: a hand-off or ask made
+during the run is one the card did not carry when the run began, an ask whose
+owner card is already closed asks no one, and an answer look's hand-offs are
+keyed to the answer it looks at, so a newer answer gets its own ask while a
+retry of the same look reuses the one it made.
 
 Cards a different writer keeps in step (`PAPERCLIP_EXTERNAL_WRITER`, a mirror of
 an issue tracker, say) have these routes too: a hand-up or an ask puts the card
