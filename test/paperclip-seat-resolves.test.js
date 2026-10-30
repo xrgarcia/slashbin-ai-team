@@ -68,6 +68,7 @@ function board({ description = "Ship the release.", by = { createdByAgentId: "ag
       if (body.status === "blocked" && card.status !== "blocked") { card.blockedTransitionAt = ++clock; card.blockedOwnerNotifiedAt = null; }
       if (body.status && body.status !== card.status) { record(actor, { status: { from: card.status, to: body.status } }, runId); card.status = body.status; }
       if (body.unblockDescriptor) card.unblockDescriptor = body.unblockDescriptor;
+      if (Array.isArray(body.blockedByIssueIds)) card.blockedBy = body.blockedByIssueIds.map((id) => (card.blockedBy ?? []).find((x) => x.id === id) ?? { id, identifier: id, status: "todo" });
       if ("assigneeAgentId" in body || "assigneeUserId" in body) {
         record(actor, { assigneeAgentId: { from: card.assigneeAgentId, to: body.assigneeAgentId ?? null }, assigneeUserId: { from: card.assigneeUserId, to: body.assigneeUserId ?? null } }, runId);
         card.assigneeAgentId = body.assigneeAgentId ?? null; card.assigneeUserId = body.assigneeUserId ?? null;
@@ -211,6 +212,8 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
         b.comments.push({ id: `m${b.comments.length}`, authorAgentId: "agent-em", createdAt: new Date(Date.now() + b.comments.length).toISOString(), createdByRunId: "r2",
           body: marker({ card: "c-1", [ASK_CARD_FIELD]: "own-1", [ASK_CARD_IDENTIFIER_FIELD]: "R-1", hops: [{ from: "agent-em", to: "user-avery", operation: ASK_OPERATION, idempotencyKey: body.idempotencyKey, [ASK_CARD_FIELD]: "own-1" }] }) });
         b.card.status = "blocked";
+        // As the real action: the owner's card is added to the card's blockers.
+        b.card.blockedBy = [...(b.card.blockedBy ?? []), { id: "own-1", identifier: "R-1", status: "todo" }];
       } else if (body.operation === "hand_up") { b.card.assigneeAgentId = "agent-po"; b.card.status = "blocked"; }
       return { ok: true, operation: body.operation, holder: { id: "agent-po" }, hops: [] };
     };
@@ -405,6 +408,7 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
       assert.ok(r.warns.some((w) => /nothing is used up, the next wake tries again/.test(w)), `${path}: warns ${r.warns}`);
       const saved = JSON.parse(readFileSync(stateFile, "utf8"));
       assert.ok(!JSON.stringify(saved).match(/ownLook|ownRun|heldLook/), `${path}: the look was persisted as used`);
+      assert.deepStrictEqual(b.card.blockedBy ?? [], [], `${path}: the owner card is still a blocker`);
       // The channel is back: the next wake looks again.
       r.onOwnerAsk = async (a) => { r.asks.push(a); return true; };
       b.wake("r10");
