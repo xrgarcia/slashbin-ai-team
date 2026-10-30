@@ -529,10 +529,13 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
 
   // As the live action (process.escalate request_ray_action): a key it has
   // recorded replays that hop; otherwise it reuses the record's owner card
-  // when the record names one (closed or not), else opens a new one. The
+  // only while it is open (a done or cancelled one is replaced by a new open
+  // card, as shipped in the services' release of #399), else opens a new one.
+  // `legacy` models the earlier build, which reused a closed card. The
   // owner's card is added to the card's blockers only when it is not there.
-  function liveAsks() {
+  function liveAsks({ legacy = false } = {}) {
     const r = routes();
+    r.legacy = legacy;
     let made = 0, rayCard = null;
     const hops = [];
     r.escalate = async (body) => {
@@ -544,8 +547,8 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
         hops.push({ from: "agent-em", to: "agent-po", operation: "hand_up", idempotencyKey: body.idempotencyKey });
         b.card.assigneeAgentId = "agent-po"; b.card.status = "blocked";
       } else {
-        // As the action does today, the record's owner card is reused even closed; `r.fixed` reuses it only open.
-        const id = rayCard && !(r.fixed && ["done", "cancelled"].includes(b.owners[rayCard].status)) ? rayCard : `own-${++made}`;
+        // The record's owner card is reused only while open; `r.legacy` reuses it even closed.
+        const id = rayCard && (r.legacy || !["done", "cancelled"].includes(b.owners[rayCard].status)) ? rayCard : `own-${++made}`;
         b.owners[id] ??= ownerCard(made);
         rayCard = id;
         hops.push({ from: "agent-em", to: "user-avery", operation: ASK_OPERATION, idempotencyKey: body.idempotencyKey, [ASK_CARD_FIELD]: id });
@@ -574,8 +577,8 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     return r;
   }
   /** An answered wait looked at and put to the owner; the owner answers; the newer ask is answered blocked (r3); the next wake (r4) is its look. */
-  async function newerAnswer({ recorded, reportsTo = null, bound = () => true, look = STUCK }) {
-    const r = liveAsks();
+  async function newerAnswer({ recorded, reportsTo = null, bound = () => true, look = STUCK, legacy = false }) {
+    const r = liveAsks({ legacy });
     const onOwnerAsk = async (a) => { r.asks.push(a); return bound(); };
     let n = 0;
     const answer = async (p) => { t.prompts.push(p); return ++n === 4 ? look : STUCK; };
@@ -605,12 +608,20 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     assert.ok(t.b.card.blockedBy.some((x) => x.id === "own-2" && x.status === "todo"), "the card does not wait on the new ask");
   });
 
-  await check("after an earlier ask is answered from chat (the record still names its closed card), a newer look's ask that comes back closed is never taken for an ask: handed up, else put back and asked again under a new key", async () => {
-    const up = await newerAnswer({ recorded: false, reportsTo: "agent-po" });
+  await check("after an earlier ask is answered from chat (the record still names its closed card), the action opens a new card for the newer look: announced in that wake, and the card waits on it", async () => {
+    const t = await newerAnswer({ recorded: false, reportsTo: "agent-po" });
+    assert.deepStrictEqual(t.r.asks.map((a) => a.ownerCardId), ["own-1", "own-2"], "the newer ask was not announced in its wake");
+    assert.ok(t.b.card.blockedBy.some((x) => x.id === "own-2" && x.status === "todo"), "the card does not wait on the new ask");
+    assert.ok(!t.r.calls.some((c) => c.operation === "hand_up"), "a delivered ask was handed up");
+    assert.strictEqual(t.b.card.status, "blocked");
+  });
+
+  await check("legacy action (reuses a closed owner card): a newer look's ask that comes back closed is never taken for an ask: handed up, else put back and asked again under a new key", async () => {
+    const up = await newerAnswer({ recorded: false, reportsTo: "agent-po", legacy: true });
     assert.ok(up.r.warns.some((w) => /already closed/.test(w)), `warns ${up.r.warns}`);
     assert.strictEqual(up.b.card.assigneeAgentId, "agent-po", "the card was not handed up");
     assert.deepStrictEqual(up.r.calls.map((c) => c.operation), [ASK_OPERATION, ASK_OPERATION, "hand_up"]);
-    const none = await newerAnswer({ recorded: false });
+    const none = await newerAnswer({ recorded: false, legacy: true });
     assert.strictEqual(none.b.card.assigneeAgentId, "agent-em");
     assert.deepStrictEqual(none.r.asks.map((a) => a.ownerCardId), ["own-1"], "a closed card was announced as an ask");
     assert.ok(none.r.errors.some((e) => /asks again under a new key/.test(e)), `errors ${none.r.errors}`);
@@ -624,7 +635,7 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     assert.strictEqual(new Set(keys).size, 3, `a retry replayed a key: ${keys}`);
     assert.deepStrictEqual(none.r.asks.map((a) => a.ownerCardId), ["own-1"], "a closed card was announced as an ask");
     // Once the action opens a new owner card in place of a closed one, the next retry's ask is announced and the card waits on it.
-    none.r.fixed = true;
+    none.r.legacy = false;
     none.b.wake("r6"); await none.seat(none.answer).tick();
     assert.strictEqual(none.prompts.length, 6);
     keys = askCalls(none.r).map((c) => c.idempotencyKey);
@@ -660,6 +671,11 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     assert.strictEqual(t.r.asks.at(-1).ownerCardId, "own-2", "the retry's ask was not announced");
     assert.ok(t.b.card.blockedBy.some((x) => x.id === "own-2"), "the card does not wait on the retried ask, so its answer would not resume it");
     assert.strictEqual(t.b.card.status, "blocked");
+    // The replayed wake is settled, not left running: its heartbeat ends, and the owner's answer then resumes model work.
+    assert.notStrictEqual(t.b.runs[0].status, "running", "the replayed wake's heartbeat is still running");
+    t.r.answered(t.b, { recorded: false });
+    t.b.wake("r6"); await t.seat(t.answer).tick();
+    assert.ok(t.prompts.length > 5, "the owner's answer to the replayed ask started no model work");
   });
 
   await check("an answered ask's wait on an open linked card, a person's hold, or the reconciliation hold is untouched, setting on", async () => {
