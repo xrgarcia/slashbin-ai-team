@@ -4,7 +4,8 @@
  * on that block is no one's hold, and the model is started to fix the card,
  * hand it to its owner or put it to the owner. A block a person set, and a card
  * in Paperclip's reconciliation hold, stay untouched. An escalation ruled to
- * stand gets one more look.
+ * stand gets one more look, and so does an ask the seat answered as waiting
+ * with nothing open it waits on, once per answer.
  */
 const assert = require("assert");
 const { ASK_OPERATION, ASK_CARD_FIELD, ASK_CARD_IDENTIFIER_FIELD } = require("../lib/owner-asks");
@@ -433,6 +434,113 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     assert.strictEqual(checkResolveOwn({ PAPERCLIP_RESOLVE_OWN: "on", PAPERCLIP_ESCALATE_TO: "agent:x" }).status, PASS);
     assert.strictEqual(checkResolveOwn({}), null);
     assert.strictEqual(checkResolveOwn({ PAPERCLIP_RESOLVE_OWN: "maybe" }).status, FAIL);
+  });
+
+  // An ask the seat answered as waiting (its own run ended it blocked), woken
+  // again with nothing open it waits on: with the setting on, one look per
+  // answer, ending in the same three ways out as a seat's own block.
+  /** The seat answers the ask blocked (r1); `mutate` changes the board; the board wakes it again (r2). */
+  async function answeredWait({ opts = {}, reportsTo = null, mutate = () => {}, r = null } = {}) {
+    const b = board({ by: { createdByAgentId: "agent-em" }, reportsTo });
+    if (r) r.board = b;
+    const seat = seatOn(b, opts);
+    const prompts = [];
+    const answer = async (p) => { prompts.push(p); return STUCK; };
+    await seat(answer).tick();
+    mutate(b);
+    b.wake("r2");
+    await seat(answer).tick();
+    return { b, seat, prompts, answer };
+  }
+  const LOOK = /You answered this card earlier that it waits/;
+
+  await check("an answered ask's wait, setting on: the model looks once, told the three ways out", async () => {
+    const t = await answeredWait({ opts: { resolveOwn: true, ...ROUTE } });
+    assert.strictEqual(t.prompts.length, 2, `${t.prompts.length} runs`);
+    const p = t.prompts[1];
+    assert.match(p, LOOK);
+    assert.match(p, /Nothing here is mine to do; it needs a decision\./, "the look is not told what it answered");
+    assert.match(p, /Fixed:/);
+    assert.match(p, /Handed to its owner: call process\.escalate/);
+    assert.match(p, /Put to the owner: .*with the operation/);
+  });
+
+  await check("an answered ask's look that ends in a plain block is routed by the code: ask (announced in that wake), hand-up, or the holder", async () => {
+    for (const mode of ["ask", "hand_up", "holder"]) {
+      const r = routes();
+      const opts = mode === "ask" ? { escalate: r.escalate, onOwnerAsk: r.onOwnerAsk } : mode === "hand_up" ? { escalate: r.escalate } : ROUTE;
+      const t = await answeredWait({ opts: { resolveOwn: true, log: r.log, ...opts }, reportsTo: "agent-po", r });
+      assert.strictEqual(t.prompts.length, 2, `${mode}: ${t.prompts.length} runs`);
+      if (mode === "ask") {
+        assert.deepStrictEqual(r.calls.map((c) => c.operation), [ASK_OPERATION]);
+        assert.match(askCalls(r)[0].decision, /Nothing here is mine to do; it needs a decision\./);
+        assert.strictEqual(r.asks.length, 1, "not announced in the look's wake");
+        assert.strictEqual(r.asks[0].ownerCardId, "own-1");
+      } else if (mode === "hand_up") {
+        assert.deepStrictEqual(r.calls.map((c) => c.operation), ["hand_up"]);
+        assert.strictEqual(t.b.card.assigneeAgentId, "agent-po");
+      } else {
+        assert.strictEqual(r.calls.length, 0);
+        assert.strictEqual(t.b.card.assigneeUserId, "user-avery", "not escalated to the configured holder");
+        assert.strictEqual(t.b.card.status, "blocked");
+      }
+    }
+  });
+
+  await check("an answered ask's look whose ask could not be announced and cannot be handed up is not used up: the next wake looks again", async () => {
+    const r = routes();
+    r.onOwnerAsk = unbound(r);
+    const t = await answeredWait({ opts: { resolveOwn: true, log: r.log, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk }, r });
+    assert.strictEqual(t.prompts.length, 2);
+    assert.ok(r.warns.some((w) => /nothing is used up, the next wake tries again/.test(w)), `warns ${r.warns}`);
+    assert.deepStrictEqual(t.b.card.blockedBy ?? [], [], "the owner card is still a blocker");
+    t.b.wake("r3"); await t.seat(t.answer).tick();
+    assert.strictEqual(t.prompts.length, 3, "the next wake did not look again");
+    assert.match(t.prompts[2], LOOK);
+  });
+
+  await check("a second wake on the same answer gets the note; a newer answer re-arms the look", async () => {
+    const r = routes();
+    const t = await answeredWait({ opts: { resolveOwn: true, log: r.log, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk }, r });
+    assert.strictEqual(t.prompts.length, 2);
+    // The owner's card is taken off the card's links undone: the look's own answer is what stands.
+    t.b.card.blockedBy = [];
+    const before = t.b.writes.length;
+    t.b.wake("r3"); await t.seat(t.answer).tick();
+    assert.strictEqual(t.prompts.length, 2, "the same answer was looked at twice");
+    assert.ok(t.b.writes.slice(before).some((w) => w.runId === "r3"), "the wake was not answered by the note");
+    // A newer ask, answered blocked again: its wait gets its own look.
+    t.b.comments.push({ id: `c${t.b.comments.length}`, authorAgentId: null, authorUserId: "user-avery", createdAt: new Date(Date.now() + 60000).toISOString(), body: "Anything new on this?" });
+    t.b.wake("r4"); await t.seat(t.answer).tick();
+    assert.strictEqual(t.prompts.length, 3, "the newer ask was not run");
+    assert.doesNotMatch(t.prompts[2], LOOK, "a new ask was run as a look");
+    t.b.card.blockedBy = [];
+    t.b.wake("r5"); await t.seat(t.answer).tick();
+    assert.strictEqual(t.prompts.length, 4, "the newer answer did not re-arm the look");
+    assert.match(t.prompts[3], LOOK);
+  });
+
+  await check("an answered ask's wait on an open linked card, a person's hold, or the reconciliation hold is untouched, setting on", async () => {
+    const cases = {
+      "open link": (b) => { b.card.blockedBy = [{ id: "c-9", identifier: "T-9", status: "todo" }]; },
+      "person's hold": (b) => { blockAgain(b, PERSON, null); },
+      "reconciliation hold": (b) => { b.card.executionBlocker = { cause: "legacy_execution_requires_reconciliation", runId: "r1", recoveryActionId: "ra-1" }; },
+    };
+    for (const [name, mutate] of Object.entries(cases)) {
+      const t = await answeredWait({ opts: { resolveOwn: true, ...ROUTE }, mutate });
+      assert.strictEqual(t.prompts.length, 1, `${name}: the model was started`);
+      assert.strictEqual(t.b.card.assigneeAgentId, "agent-em", `${name}: the card was handed on`);
+    }
+  });
+
+  await check("setting off: an answered ask's wait gets the note, no model run, as before; PAPERCLIP_REWAKE still decides its looks", async () => {
+    const off = await answeredWait();
+    assert.strictEqual(off.prompts.length, 1, "off: the model was started");
+    assert.strictEqual(off.b.card.assigneeAgentId, "agent-em");
+    assert.strictEqual(off.b.card.status, "blocked");
+    const rewake = await answeredWait({ opts: { rewake: 1 } });
+    assert.strictEqual(rewake.prompts.length, 2, "PAPERCLIP_REWAKE=1: no look");
+    assert.doesNotMatch(rewake.prompts[1], LOOK, "PAPERCLIP_REWAKE's look was told the resolve-own note");
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

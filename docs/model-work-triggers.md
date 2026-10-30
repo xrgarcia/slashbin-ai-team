@@ -55,15 +55,22 @@ itself left blocked is no one's hold: a scheduled job that failed ended it
 blocked, or the board blocked it when a run was lost. With `on`, the model is
 started on such a card, once per block, and must end it fixed, handed to its
 owner through `process.escalate`, or put to the owner as a yes or no question.
-A block the model's own answer set is that answer's wait and is left to
-`PAPERCLIP_REWAKE`. A block a person set, and a card in the board's legacy
+A block the model's own answer set is that answer's wait. With `on`, a wake
+on that wait which `PAPERCLIP_REWAKE` does not look at (it is off, or its looks
+are used up) gets one look of its own, with the same three ways out: once per
+answer, and only while nothing it waits on is an open card (a linked card, or
+one the answer named), the seat still holds the card, and the card is not in
+review. A look that ends blocked again is not a newer answer; an answer made
+since (the card resumed, or was asked something new, and waits again) is, and
+gets its own look. A wait on an open linked card is left as it is: it resumes
+when that card is done. A block a person set, and a card in the board's legacy
 reconciliation hold, stay untouched. The same setting makes an escalation the
 model ruled would stand, with nothing done on the card since, get one more
 look with the same three ways out, so a ruling of "hold stands" cannot be the
 end of it.
 
-The three ways out are enforced in code, not left to the prompt. When either
-look ends in a plain blocked reply, with no hand-off or ask made during the run
+The three ways out are enforced in code, not left to the prompt. When any of
+these looks ends in a plain blocked reply, with no hand-off or ask made during the run
 and the card not resumed, the code puts the model's reply to the owner as an ask
 and announces it in that same wake (the scan skips an ask already announced);
 without the ask channel it hands the card up the reporting line through
