@@ -62,6 +62,14 @@ model ruled would stand, with nothing done on the card since, get one more
 look with the same three ways out, so a ruling of "hold stands" cannot be the
 end of it.
 
+The three ways out are enforced in code, not left to the prompt. When either
+look ends in a plain blocked reply, with no hand-off or ask made during the run
+and the card not resumed, the code puts the model's reply to the owner as an ask
+(announced by the existing ask scan) when the ask channel is configured; else it
+escalates to `PAPERCLIP_ESCALATE_TO` (or up the reporting line); with neither it
+logs a warning and leaves the card. The model's own choice, when it makes one,
+stands.
+
 An unreadable value in any of these settings turns the board connector off and logs the
 reason. The harness does not guess.
 

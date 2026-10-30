@@ -10,7 +10,7 @@ const assert = require("assert");
 const { mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, parseResolveOwn, OUTCOME_MARK, COMMENT_WAKES, QUIET_MARK } = require("../lib/paperclip");
+const { createPaperclipPoller, parseResolveOwn, parseEscalateTo, OUTCOME_MARK, COMMENT_WAKES, QUIET_MARK } = require("../lib/paperclip");
 
 let pass = 0, fail = 0;
 async function check(label, fn) {
@@ -193,6 +193,61 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
       assert.strictEqual(prompts.length, on ? 2 : 1, `resolveOwn ${on}: ${prompts.length} runs`);
       if (on) assert.match(prompts[1], /the hold stands, and nothing on the card has changed since/);
       assert.strictEqual(b.card.status, "blocked");
+    }
+  });
+
+  // The model's plain blocked reply on a recovery run is not an ending: the
+  // code puts the question to the owner (announced), else escalates, else warns.
+  function routes() {
+    const calls = [], asks = [], warns = [];
+    const escalate = async (body) => { calls.push(body); return { ok: true, operation: body.operation, holder: { id: "user-avery" }, hops: [] }; };
+    const log = { ...silent, warn: (_o, m) => warns.push(String(m ?? _o)), child() { return log; } };
+    return { calls, asks, warns, escalate, log, onOwnerAsk: async (a) => { asks.push(a); return true; } };
+  }
+  const opsOf = (r) => r.calls.map((c) => c.operation);
+
+  await check("R1: a self-block second look ending in a plain blocked reply puts the reply to the owner as an ask", async () => {
+    const r = routes();
+    const t = await blockedLater(SEAT, { opts: { resolveOwn: true, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk, log: r.log } });
+    assert.strictEqual(t.prompts.length, t.first + 1);
+    const asked = r.calls.filter((c) => c.operation !== "hand_up" && c.operation !== "resolve" && c.operation !== "return");
+    assert.strictEqual(asked.length, 1, `calls: ${opsOf(r)}`);
+    assert.match(asked[0].decision, /Nothing here is mine to do; it needs a decision\./);
+    assert.ok(asked[0].evidence && asked[0].recommendation, "the ask carries its evidence and recommendation");
+  });
+
+  await check("R2: with no owner-ask channel, the same reply escalates to the configured holder", async () => {
+    const r = routes();
+    const t = await blockedLater(SEAT, { opts: { resolveOwn: true, escalate: r.escalate, log: r.log, escalateTo: parseEscalateTo("user:user-avery|Avery") } });
+    assert.strictEqual(opsOf(r).length, 0, `no ask expected: ${opsOf(r)}`);
+    assert.strictEqual(t.b.card.assigneeUserId, "user-avery", "the card went to the escalation holder");
+    assert.strictEqual(t.b.card.status, "blocked");
+  });
+
+  await check("R3: with neither an ask channel nor an escalation holder, a warning is logged and the card is left", async () => {
+    const r = routes();
+    const t = await blockedLater(SEAT, { opts: { resolveOwn: true, log: r.log } });
+    assert.strictEqual(t.b.card.assigneeAgentId, "agent-em");
+    assert.ok(r.warns.some((w) => /no owner ask or escalation is configured/.test(w)), `warns: ${r.warns}`);
+  });
+
+  await check("R4: a held escalation's second look ending in a plain blocked reply is put to the owner; without a channel it escalates", async () => {
+    for (const mode of ["ask", "escalate"]) {
+      const r = routes();
+      const b = board({ by: { createdByAgentId: "agent-po" } });
+      b.card.labels = [{ name: "Needs EM ruling" }];
+      b.card.status = "blocked";
+      b.record(PERSON, { status: { from: "in_progress", to: "blocked" } }, null);
+      const opts = mode === "ask" ? { escalate: r.escalate, onOwnerAsk: r.onOwnerAsk } : { escalateTo: parseEscalateTo("user:user-avery|Avery") };
+      const seat = seatOn(b, { resolveOwn: true, log: r.log, ...opts });
+      const answer = async () => STUCK;
+      b.wake("r1"); await seat(answer).tick();
+      for (const id of ["r2", "r3"]) { b.wake(id); await seat(answer).tick(); }
+      if (mode === "ask") {
+        assert.deepStrictEqual(r.calls.filter((c) => c.operation !== "resolve" && c.operation !== "return" && c.operation !== "hand_up").length, 1, `calls: ${opsOf(r)}`);
+      } else {
+        assert.strictEqual(b.card.assigneeUserId, "user-avery", "escalated to the configured holder");
+      }
     }
   });
 
