@@ -50,7 +50,19 @@ on. With `N` set, the model looks again up to `N` times on that one ask. It is
 told what it said and how each card it waits on stands now. The last look is
 told to escalate. Any wake after that gets the note.
 
-An unreadable value in either setting turns the board connector off and logs the
+**`PAPERCLIP_RESOLVE_OWN`** is `on` or `off` (the default). A card the seat
+itself left blocked is no one's hold: a scheduled job that failed ended it
+blocked, or the board blocked it when a run was lost. With `on`, the model is
+started on such a card, once per block, and must end it fixed, handed to its
+owner through `process.escalate`, or put to the owner as a yes or no question.
+A block the model's own answer set is that answer's wait and is left to
+`PAPERCLIP_REWAKE`. A block a person set, and a card in the board's legacy
+reconciliation hold, stay untouched. The same setting makes an escalation the
+model ruled would stand, with nothing done on the card since, get one more
+look with the same three ways out, so a ruling of "hold stands" cannot be the
+end of it.
+
+An unreadable value in any of these settings turns the board connector off and logs the
 reason. The harness does not guess.
 
 ## Recommended setup: quiet waiting

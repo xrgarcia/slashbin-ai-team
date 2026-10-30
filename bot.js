@@ -15,7 +15,7 @@ const { isNonReply, nonReplyCorrection } = require("./lib/non-reply");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
 const { createOwnerAsks, announceAsk, answerAsk, routeReply, idsIn, replyContext, whichMessage } = require("./lib/owner-asks");
-const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector, parseIntake, parseRewake } = require("./lib/paperclip");
+const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector, parseIntake, parseRewake, parseResolveOwn } = require("./lib/paperclip");
 const { parseContract, toolLine } = require("./lib/handoff-contract");
 const { escalateClientFor, escalateBoard } = require("./lib/process-escalate");
 const { createAttempts } = require("./lib/attempts");
@@ -3362,9 +3362,10 @@ if (SURFACES.paperclip) for (const warning of PAPERCLIP_WARNINGS) log.warn(`Pape
 // and how often it looks again at an ask answered as waiting
 // (docs/model-work-triggers.md). A setting that cannot be read turns board
 // pickup off rather than guessing.
-const BOARD_TRIGGERS = { intake: undefined, rewake: 0, problems: [] };
+const BOARD_TRIGGERS = { intake: undefined, rewake: 0, resolveOwn: false, problems: [] };
 try { BOARD_TRIGGERS.intake = parseIntake(process.env.PAPERCLIP_INTAKE); } catch (err) { BOARD_TRIGGERS.problems.push(err.message); }
 try { BOARD_TRIGGERS.rewake = parseRewake(process.env.PAPERCLIP_REWAKE); } catch (err) { BOARD_TRIGGERS.problems.push(err.message); }
+try { BOARD_TRIGGERS.resolveOwn = parseResolveOwn(process.env.PAPERCLIP_RESOLVE_OWN); } catch (err) { BOARD_TRIGGERS.problems.push(err.message); }
 const BOARD_POLICY_PROBLEMS = [
   ...BOARD_TRIGGERS.problems,
   ...boardPolicyProblems(BOARD_POLICY, boardDeniedPaths(), CLAUDE_CWD),
@@ -3434,6 +3435,7 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       resumeInterrupted: process.env.PAPERCLIP_RESUME_INTERRUPTED === "1",
       intake: BOARD_TRIGGERS.intake,
       rewake: BOARD_TRIGGERS.rewake,
+      resolveOwn: BOARD_TRIGGERS.resolveOwn,
       externalWriter,
       // A blocked card held by this bot with an escalation label is worked and
       // left blocked; one it resolves goes back down (escalationReturnTo, else
