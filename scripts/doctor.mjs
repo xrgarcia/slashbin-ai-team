@@ -14,7 +14,7 @@ import {
   checkNode, checkRuntimeCli, checkDiscordToken, checkMessageContentIntent,
   checkClaudeCwd, checkPortFree, checkAllowlist, checkEcosystem, checkStateDir,
   checkReservedCommands, checkScheduleCadence, checkRunningCodeFresh,
-  checkBillingKeyAbsent, checkFleet, parseFleet, render, skip, bad,
+  checkBillingKeyAbsent, checkResolveOwn, checkFleet, parseFleet, render, skip, bad,
 } from "./lib/checks.mjs";
 import { createRequire } from "module";
 
@@ -79,6 +79,7 @@ if (PER_BOT_ENV) {
 // Upgrade readiness — what bites on the next restart, which is the question an
 // operator actually has and the one nothing used to answer.
 results.push(checkBillingKeyAbsent(process.env));
+if (!PER_BOT_ENV) { const resolveOwn = checkResolveOwn(process.env); if (resolveOwn) results.push(resolveOwn); }
 results.push(checkScheduleCadence(process.env.BOT_STATE_DIR, process.env.BOT_HISTORY_DIR, HARNESS, SESSION_TIMEOUT_MS));
 results.push(checkRunningCodeFresh(HARNESS, process.env.BOT_NAME));
 results.push(...checkEcosystem(ECOSYSTEM, HARNESS));

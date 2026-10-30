@@ -65,10 +65,17 @@ end of it.
 The three ways out are enforced in code, not left to the prompt. When either
 look ends in a plain blocked reply, with no hand-off or ask made during the run
 and the card not resumed, the code puts the model's reply to the owner as an ask
-(announced by the existing ask scan) when the ask channel is configured; else it
-escalates to `PAPERCLIP_ESCALATE_TO` (or up the reporting line); with neither it
-logs a warning and leaves the card. The model's own choice, when it makes one,
-stands.
+and announces it in that same wake (the scan skips an ask already announced);
+without the ask channel it hands the card up the reporting line through
+`process.escalate`; without a reporting line it escalates to
+`PAPERCLIP_ESCALATE_TO`. The model's own choice, when it makes one, stands (an
+ask it made is announced in that wake too).
+
+With `on` and none of those routes (no escalate action, no
+`PAPERCLIP_ESCALATE_TO`), the setting is a startup problem: the board connector
+stays off and `npm run doctor` fails the check. If a card still reaches a wake
+with no route (the seat has no manager, say), the model is not started, nothing
+is saved, and a warning names the settings; the next wake looks again.
 
 An unreadable value in any of these settings turns the board connector off and logs the
 reason. The harness does not guess.

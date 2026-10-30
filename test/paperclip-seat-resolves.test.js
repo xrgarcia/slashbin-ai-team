@@ -7,10 +7,11 @@
  * stand gets one more look.
  */
 const assert = require("assert");
-const { mkdtempSync } = require("fs");
+const { ASK_OPERATION, ASK_CARD_FIELD, ASK_CARD_IDENTIFIER_FIELD } = require("../lib/owner-asks");
+const { mkdtempSync, readFileSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { createPaperclipPoller, parseResolveOwn, parseEscalateTo, OUTCOME_MARK, COMMENT_WAKES, QUIET_MARK } = require("../lib/paperclip");
+const { createPaperclipPoller, parseResolveOwn, resolveOwnRouteProblem, parseEscalateTo, OUTCOME_MARK, COMMENT_WAKES, QUIET_MARK } = require("../lib/paperclip");
 
 let pass = 0, fail = 0;
 async function check(label, fn) {
@@ -22,7 +23,7 @@ const SEATS = [{ id: "agent-em", name: "Engineering Manager" }, { id: "agent-po"
 const PEOPLE = [{ principalId: "user-avery", status: "active", user: { id: "user-avery", name: "Avery" } }];
 
 /** One task held by the bot, handed to it by a person, with a live run on it. */
-function board({ description = "Ship the release.", by = { createdByAgentId: "agent-po" } } = {}) {
+function board({ description = "Ship the release.", by = { createdByAgentId: "agent-po" }, reportsTo = null } = {}) {
   const card = { id: "c-1", identifier: "T-1", title: "Release the change", description,
     status: "in_progress", assigneeAgentId: "agent-em", assigneeUserId: null, labels: [], createdAt: "2026-01-01T00:00:00Z", requestDepth: 0, ...by };
   const activity = [], comments = [], writes = [];
@@ -36,7 +37,8 @@ function board({ description = "Ship the release.", by = { createdByAgentId: "ag
   const ok = (v) => ({ ok: true, text: async () => JSON.stringify(v) });
   const fetch = async (url, init = {}) => {
     const path = url.replace(/^.*\/api/, "");
-    if (path === "/agents/me") return ok({ id: "agent-em", name: "Engineering Manager", companyId: "co-1" });
+    if (path === "/agents/me") return ok({ id: "agent-em", name: "Engineering Manager", companyId: "co-1", ...(reportsTo ? { reportsTo } : {}) });
+    if (path === "/issues/own-1") return ok({ id: "own-1", identifier: "R-1", status: "todo", description: "**Decision**\n> Which way?\n\n**Recommendation**\n> Go.\n\n**Evidence**\n> Seen." });
     if (path === "/companies/co-1/agents") return ok(SEATS);
     if (path === "/companies/co-1/user-directory") return ok({ users: PEOPLE });
     if (path === "/agents/me/inbox-lite") return ok(card.assigneeAgentId === "agent-em" ? [{ id: card.id, status: card.status, unresolvedBlockerIssueIds: [] }] : []);
@@ -94,6 +96,7 @@ function board({ description = "Ship the release.", by = { createdByAgentId: "ag
   };
   return { card, writes, comments, fetch, wake, runs, record };
 }
+const ROUTE = { escalateTo: parseEscalateTo("user:user-avery|Avery") };
 const seatOn = (b, opts = {}) => {
   const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
   return (answer) => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch: b.fetch, answer,
@@ -141,7 +144,7 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
   await check("a card the seat blocked itself: the model is started and told the three ways out; setting off, it is not", async () => {
     const off = await blockedLater(SEAT);
     assert.strictEqual(off.prompts.length, off.first, "off: the model was started on the seat's own block");
-    const on = await blockedLater(SEAT, { opts: { resolveOwn: true } });
+    const on = await blockedLater(SEAT, { opts: { resolveOwn: true, ...ROUTE } });
     assert.strictEqual(on.prompts.length, on.first + 1, "on: the model was not started");
     const p = on.prompts.at(-1);
     assert.match(p, /the block is your own/);
@@ -150,31 +153,28 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     assert.match(p, /Put to the owner: .*with the operation/);
   });
 
-  await check("a seat's own block is resolved once: its look is not repeated, and a later block is looked at again", async () => {
-    const t = await blockedLater(SEAT, { opts: { resolveOwn: true } });
+  await check("a seat's own block is resolved once: the look is not repeated on the wakes after it", async () => {
+    const t = await blockedLater(SEAT, { opts: { resolveOwn: true, ...ROUTE } });
     const looked = t.prompts.length;
-    // The look ended blocked again (its answer): a wake after it is the answer's wait.
-    t.b.wake("r3"); await t.seat(t.answer).tick();
+    assert.strictEqual(looked, t.first + 1, "the look");
+    // The look handed the card on (escalateTo): wakes after it start nothing.
+    for (const id of ["r3", "r4"]) { t.b.wake(id); await t.seat(t.answer).tick(); }
     assert.strictEqual(t.prompts.length, looked, "the same block was looked at twice");
-    // A new failure of a job run is a new block.
-    blockAgain(t.b, SEAT, "rJob2");
-    t.b.wake("r4"); await t.seat(t.answer).tick();
-    assert.strictEqual(t.prompts.length, looked + 1, "a new block was not looked at");
   });
 
   await check("a card a person blocked is untouched, setting on", async () => {
-    const t = await blockedLater(PERSON, { opts: { resolveOwn: true } });
+    const t = await blockedLater(PERSON, { opts: { resolveOwn: true, ...ROUTE } });
     assert.strictEqual(t.prompts.length, t.first, "the model was started on a person's block");
   });
 
   await check("a card in Paperclip's legacy reconciliation hold is untouched, setting on", async () => {
-    const t = await blockedLater(SEAT, { opts: { resolveOwn: true },
+    const t = await blockedLater(SEAT, { opts: { resolveOwn: true, ...ROUTE },
       mutate: (b) => { b.card.executionBlocker = { cause: "legacy_execution_requires_reconciliation", runId: "rJob", recoveryActionId: "ra-1" }; } });
     assert.strictEqual(t.prompts.length, t.first, "the model was started under the reconciliation hold");
   });
 
   await check("a card waiting on an open linked card is untouched, setting on", async () => {
-    const t = await blockedLater(SEAT, { opts: { resolveOwn: true }, mutate: (b) => { b.card.blockedBy = [{ id: "c-9", identifier: "T-9", status: "todo" }]; } });
+    const t = await blockedLater(SEAT, { opts: { resolveOwn: true, ...ROUTE }, mutate: (b) => { b.card.blockedBy = [{ id: "c-9", identifier: "T-9", status: "todo" }]; } });
     assert.strictEqual(t.prompts.length, t.first, "the model was started on a card that waits on an open card");
   });
 
@@ -184,7 +184,7 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
       b.card.labels = [{ name: "Needs EM ruling" }];
       b.card.status = "blocked";
       b.record(PERSON, { status: { from: "in_progress", to: "blocked" } }, null);
-      const seat = seatOn(b, on ? { resolveOwn: true } : {});
+      const seat = seatOn(b, on ? { resolveOwn: true, ...ROUTE } : {});
       const prompts = [];
       const answer = async (p) => { prompts.push(p); return STUCK; };
       b.wake("r1"); await seat(answer).tick();
@@ -196,59 +196,159 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     }
   });
 
-  // The model's plain blocked reply on a recovery run is not an ending: the
-  // code puts the question to the owner (announced), else escalates, else warns.
+  // A recovery run that ends in a plain blocked reply is not an ending: the
+  // code puts the question to the owner (announced in that wake), else hands
+  // the card up, else to the configured holder; with no route, nothing is
+  // started or used up.
+  const marker = (record) => `<!-- process.escalate:${Buffer.from(JSON.stringify(record)).toString("base64url")} -->`;
   function routes() {
-    const calls = [], asks = [], warns = [];
-    const escalate = async (body) => { calls.push(body); return { ok: true, operation: body.operation, holder: { id: "user-avery" }, hops: [] }; };
-    const log = { ...silent, warn: (_o, m) => warns.push(String(m ?? _o)), child() { return log; } };
-    return { calls, asks, warns, escalate, log, onOwnerAsk: async (a) => { asks.push(a); return true; } };
+    const r = { calls: [], asks: [], warns: [], board: null };
+    // As the live action: an ask records its hop and the owner's card on the seat's card; a hand-up gives it to the manager.
+    r.escalate = async (body) => {
+      r.calls.push(body);
+      const b = r.board;
+      if (body.operation === ASK_OPERATION) {
+        b.comments.push({ id: `m${b.comments.length}`, authorAgentId: "agent-em", createdAt: new Date(Date.now() + b.comments.length).toISOString(), createdByRunId: "r2",
+          body: marker({ card: "c-1", [ASK_CARD_FIELD]: "own-1", [ASK_CARD_IDENTIFIER_FIELD]: "R-1", hops: [{ from: "agent-em", to: "user-avery", operation: ASK_OPERATION, idempotencyKey: body.idempotencyKey, [ASK_CARD_FIELD]: "own-1" }] }) });
+        b.card.status = "blocked";
+      } else if (body.operation === "hand_up") { b.card.assigneeAgentId = "agent-po"; b.card.status = "blocked"; }
+      return { ok: true, operation: body.operation, holder: { id: "agent-po" }, hops: [] };
+    };
+    r.log = { ...silent, warn: (_o, m) => r.warns.push(String(m ?? _o)), child() { return r.log; } };
+    r.onOwnerAsk = async (a) => { r.asks.push(a); return true; };
+    return r;
   }
-  const opsOf = (r) => r.calls.map((c) => c.operation);
+  const askCalls = (r) => r.calls.filter((c) => c.operation === ASK_OPERATION);
+  const withBoard = (r) => (b) => { r.board = b; };
+  const heldBoard = () => {
+    const b = board({ by: { createdByAgentId: "agent-po" }, reportsTo: "agent-po" });
+    b.card.labels = [{ name: "Needs EM ruling" }];
+    b.card.status = "blocked";
+    b.record(PERSON, { status: { from: "in_progress", to: "blocked" } }, null);
+    return b;
+  };
+  async function heldTicks(b, seat, answer) {
+    for (const id of ["r1", "r2", "r3"]) { b.wake(id); await seat(answer).tick(); }
+  }
 
-  await check("R1: a self-block second look ending in a plain blocked reply puts the reply to the owner as an ask", async () => {
+  await check("self-block second look, plain blocked reply, ask route: one ask is made and announced in that wake, never announced twice", async () => {
     const r = routes();
-    const t = await blockedLater(SEAT, { opts: { resolveOwn: true, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk, log: r.log } });
+    const t = await blockedLater(SEAT, { opts: { resolveOwn: true, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk, log: r.log }, mutate: withBoard(r) });
     assert.strictEqual(t.prompts.length, t.first + 1);
-    const asked = r.calls.filter((c) => c.operation !== "hand_up" && c.operation !== "resolve" && c.operation !== "return");
-    assert.strictEqual(asked.length, 1, `calls: ${opsOf(r)}`);
-    assert.match(asked[0].decision, /Nothing here is mine to do; it needs a decision\./);
-    assert.ok(asked[0].evidence && asked[0].recommendation, "the ask carries its evidence and recommendation");
+    assert.strictEqual(askCalls(r).length, 1, `calls: ${r.calls.map((c) => c.operation)}`);
+    assert.match(askCalls(r)[0].decision, /Nothing here is mine to do; it needs a decision\./);
+    assert.ok(askCalls(r)[0].evidence && askCalls(r)[0].recommendation);
+    assert.strictEqual(r.asks.length, 1, "announced in the recovery wake");
+    assert.strictEqual(r.asks[0].ownerCardId, "own-1");
+    // The following polls scan the card again: the same ask is not announced twice.
+    t.b.wake("r3"); await t.seat(t.answer).tick();
+    assert.strictEqual(r.asks.length, 1, "announced again by the scan");
   });
 
-  await check("R2: with no owner-ask channel, the same reply escalates to the configured holder", async () => {
+  await check("self-block second look, plain reply, hand-up route (reporting line, no ask channel, no holder): the card is handed up", async () => {
     const r = routes();
-    const t = await blockedLater(SEAT, { opts: { resolveOwn: true, escalate: r.escalate, log: r.log, escalateTo: parseEscalateTo("user:user-avery|Avery") } });
-    assert.strictEqual(opsOf(r).length, 0, `no ask expected: ${opsOf(r)}`);
-    assert.strictEqual(t.b.card.assigneeUserId, "user-avery", "the card went to the escalation holder");
+    const b = board({ by: { createdByAgentId: "agent-em" }, reportsTo: "agent-po" });
+    r.board = b;
+    const seat = seatOn(b, { resolveOwn: true, escalate: r.escalate, log: r.log });
+    const prompts = [];
+    const answer = async (p) => { prompts.push(p); return STUCK; };
+    await seat(answer).tick();
+    blockAgain(b, SEAT, "rJob"); b.wake("r2");
+    await seat(answer).tick();
+    assert.strictEqual(prompts.length, 2);
+    assert.deepStrictEqual(r.calls.map((c) => c.operation), ["hand_up"]);
+    assert.strictEqual(b.card.assigneeAgentId, "agent-po");
+  });
+
+  await check("self-block second look, plain reply, escalateTo only: the card goes to the holder", async () => {
+    const r = routes();
+    const t = await blockedLater(SEAT, { opts: { resolveOwn: true, log: r.log, ...ROUTE }, mutate: withBoard(r) });
+    assert.strictEqual(r.calls.length, 0);
+    assert.strictEqual(t.b.card.assigneeUserId, "user-avery");
     assert.strictEqual(t.b.card.status, "blocked");
   });
 
-  await check("R3: with neither an ask channel nor an escalation holder, a warning is logged and the card is left", async () => {
-    const r = routes();
-    const t = await blockedLater(SEAT, { opts: { resolveOwn: true, log: r.log } });
-    assert.strictEqual(t.b.card.assigneeAgentId, "agent-em");
-    assert.ok(r.warns.some((w) => /no owner ask or escalation is configured/.test(w)), `warns: ${r.warns}`);
-  });
-
-  await check("R4: a held escalation's second look ending in a plain blocked reply is put to the owner; without a channel it escalates", async () => {
-    for (const mode of ["ask", "escalate"]) {
+  await check("held escalation second look, plain reply: ask route asks and announces in that wake; hand-up route hands up; holder route escalates", async () => {
+    for (const mode of ["ask", "hand_up", "holder"]) {
       const r = routes();
-      const b = board({ by: { createdByAgentId: "agent-po" } });
-      b.card.labels = [{ name: "Needs EM ruling" }];
-      b.card.status = "blocked";
-      b.record(PERSON, { status: { from: "in_progress", to: "blocked" } }, null);
-      const opts = mode === "ask" ? { escalate: r.escalate, onOwnerAsk: r.onOwnerAsk } : { escalateTo: parseEscalateTo("user:user-avery|Avery") };
+      const b = heldBoard();
+      r.board = b;
+      const opts = mode === "ask" ? { escalate: r.escalate, onOwnerAsk: r.onOwnerAsk } : mode === "hand_up" ? { escalate: r.escalate } : ROUTE;
       const seat = seatOn(b, { resolveOwn: true, log: r.log, ...opts });
-      const answer = async () => STUCK;
-      b.wake("r1"); await seat(answer).tick();
-      for (const id of ["r2", "r3"]) { b.wake(id); await seat(answer).tick(); }
+      await heldTicks(b, seat, async () => STUCK);
       if (mode === "ask") {
-        assert.deepStrictEqual(r.calls.filter((c) => c.operation !== "resolve" && c.operation !== "return" && c.operation !== "hand_up").length, 1, `calls: ${opsOf(r)}`);
+        assert.strictEqual(askCalls(r).length, 1, `ask calls: ${r.calls.map((c) => c.operation)}`);
+        assert.strictEqual(r.asks.length, 1, "announced in the recovery wake");
+        b.wake("r4"); await seat(async () => STUCK).tick();
+        assert.strictEqual(r.asks.length, 1, "announced twice");
+      } else if (mode === "hand_up") {
+        assert.deepStrictEqual(r.calls.map((c) => c.operation), ["hand_up"]);
+        assert.strictEqual(b.card.assigneeAgentId, "agent-po");
       } else {
         assert.strictEqual(b.card.assigneeUserId, "user-avery", "escalated to the configured holder");
       }
     }
+  });
+
+  await check("a model that made its own hand-off or ask in the run is not overridden", async () => {
+    const r = routes();
+    const b = board({ by: { createdByAgentId: "agent-em" }, reportsTo: "agent-po" });
+    r.board = b;
+    const seat = seatOn(b, { resolveOwn: true, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk, log: r.log });
+    const answer = async (p) => {
+      // Second look: the model asks the owner itself, through the action, then reports.
+      if (/the block is your own/.test(p)) await r.escalate({ operation: ASK_OPERATION, issue: "c-1", idempotencyKey: "own-choice", decision: "Which way?" });
+      return STUCK;
+    };
+    await seat(answer).tick();
+    blockAgain(b, SEAT, "rJob"); b.wake("r2");
+    await seat(answer).tick();
+    assert.strictEqual(askCalls(r).length, 1, "the code asked on top of the model's own ask");
+    assert.strictEqual(r.asks.length, 1, "the model's ask was announced in that wake");
+  });
+
+  await check("no route: nothing is started or used up, a warning names the setting, and the next wake with a route starts the model", async () => {
+    for (const held of [false, true]) {
+      const r = routes();
+      const b = held ? heldBoard() : board({ by: { createdByAgentId: "agent-em" } });
+      r.board = b;
+      const dir = mkdtempSync(join(tmpdir(), "pc-"));
+      const stateFile = join(dir, "s.json");
+      const mk = (answer, extra) => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: r.log, fetch: b.fetch, answer,
+        externalWriter: /^source: \S+#\d+$/, resolveOwn: true, ...extra });
+      const prompts = [];
+      const answer = async (p) => { prompts.push(p); return STUCK; };
+      if (held) { b.wake("r1"); await mk(answer, {}).tick(); } else { await mk(answer, {}).tick(); blockAgain(b, SEAT, "rJob"); b.wake("r2"); }
+      const before = prompts.length;
+      if (held) { for (const id of ["r2", "r3"]) { b.wake(id); await mk(answer, {}).tick(); } } else await mk(answer, {}).tick();
+      assert.strictEqual(prompts.length, before, `held ${held}: the model was started with no route`);
+      assert.ok(r.warns.some((w) => /PAPERCLIP_ESCALATE_URL.*PAPERCLIP_ESCALATE_TO/.test(w)), `held ${held}: warns ${r.warns}`);
+      const saved = JSON.parse(readFileSync(stateFile, "utf8"));
+      assert.ok(!JSON.stringify(saved).match(/ownLook|ownRun|heldLook/), `held ${held}: recovery state was persisted`);
+      // A route appears: the very next wake looks again.
+      if (held) b.wake("r4"); else b.wake("r3");
+      await mk(answer, { escalate: r.escalate, onOwnerAsk: r.onOwnerAsk }).tick();
+      assert.strictEqual(prompts.length, before + 1, `held ${held}: the next wake did not start the model`);
+      assert.strictEqual(askCalls(r).length, 1, `held ${held}: ask calls ${r.calls.map((c) => c.operation)}`);
+    }
+  });
+
+  await check("startup validation: on with no route is a problem; a route, or off, is not", () => {
+    assert.match(resolveOwnRouteProblem({ PAPERCLIP_RESOLVE_OWN: "on" }), /PAPERCLIP_ESCALATE_URL.*PAPERCLIP_ESCALATE_TO/);
+    assert.strictEqual(resolveOwnRouteProblem({ PAPERCLIP_RESOLVE_OWN: "off" }), null);
+    assert.strictEqual(resolveOwnRouteProblem({}), null);
+    assert.strictEqual(resolveOwnRouteProblem({ PAPERCLIP_RESOLVE_OWN: "on", PAPERCLIP_ESCALATE_TO: "agent:Product Owner" }), null);
+    assert.strictEqual(resolveOwnRouteProblem({ PAPERCLIP_RESOLVE_OWN: "on", PAPERCLIP_ESCALATE_URL: "https://x.example.com/mcp", PAPERCLIP_ESCALATE_BEARER_ENV: "T", T: "v" }), null);
+    // A URL whose bearer variable is empty is no route.
+    assert.match(resolveOwnRouteProblem({ PAPERCLIP_RESOLVE_OWN: "on", PAPERCLIP_ESCALATE_URL: "https://x.example.com/mcp", PAPERCLIP_ESCALATE_BEARER_ENV: "T" }), /PAPERCLIP_RESOLVE_OWN=on/);
+  });
+
+  await check("doctor flags PAPERCLIP_RESOLVE_OWN=on with no route, and stays silent when off", async () => {
+    const { checkResolveOwn, FAIL, PASS } = await import("../scripts/lib/checks.mjs");
+    assert.strictEqual(checkResolveOwn({ PAPERCLIP_RESOLVE_OWN: "on" }).status, FAIL);
+    assert.strictEqual(checkResolveOwn({ PAPERCLIP_RESOLVE_OWN: "on", PAPERCLIP_ESCALATE_TO: "agent:x" }).status, PASS);
+    assert.strictEqual(checkResolveOwn({}), null);
+    assert.strictEqual(checkResolveOwn({ PAPERCLIP_RESOLVE_OWN: "maybe" }).status, FAIL);
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

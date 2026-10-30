@@ -15,7 +15,7 @@ const { isNonReply, nonReplyCorrection } = require("./lib/non-reply");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
 const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
 const { createOwnerAsks, announceAsk, answerAsk, routeReply, idsIn, replyContext, whichMessage } = require("./lib/owner-asks");
-const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector, parseIntake, parseRewake, parseResolveOwn } = require("./lib/paperclip");
+const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector, parseIntake, parseRewake, parseResolveOwn, resolveOwnRouteProblem } = require("./lib/paperclip");
 const { parseContract, toolLine } = require("./lib/handoff-contract");
 const { escalateClientFor, escalateBoard } = require("./lib/process-escalate");
 const { createAttempts } = require("./lib/attempts");
@@ -3366,6 +3366,7 @@ const BOARD_TRIGGERS = { intake: undefined, rewake: 0, resolveOwn: false, proble
 try { BOARD_TRIGGERS.intake = parseIntake(process.env.PAPERCLIP_INTAKE); } catch (err) { BOARD_TRIGGERS.problems.push(err.message); }
 try { BOARD_TRIGGERS.rewake = parseRewake(process.env.PAPERCLIP_REWAKE); } catch (err) { BOARD_TRIGGERS.problems.push(err.message); }
 try { BOARD_TRIGGERS.resolveOwn = parseResolveOwn(process.env.PAPERCLIP_RESOLVE_OWN); } catch (err) { BOARD_TRIGGERS.problems.push(err.message); }
+{ const routeProblem = resolveOwnRouteProblem(process.env); if (routeProblem) BOARD_TRIGGERS.problems.push(routeProblem); }
 const BOARD_POLICY_PROBLEMS = [
   ...BOARD_TRIGGERS.problems,
   ...boardPolicyProblems(BOARD_POLICY, boardDeniedPaths(), CLAUDE_CWD),

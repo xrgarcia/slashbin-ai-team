@@ -456,6 +456,21 @@ export function checkBillingKeyAbsent(env = process.env) {
 }
 
 /**
+ * PAPERCLIP_RESOLVE_OWN=on with no route for a card the model leaves blocked
+ * (the bot refuses to turn the board connector on in that state). Null when
+ * the setting is off, so a host that does not use it sees no new line.
+ */
+export function checkResolveOwn(env = process.env) {
+  const { resolveOwnRouteProblem, parseResolveOwn } = require_("../../lib/paperclip.js");
+  let on;
+  try { on = parseResolveOwn(env.PAPERCLIP_RESOLVE_OWN); } catch (err) { return bad("PAPERCLIP_RESOLVE_OWN", err.message, "Use on or off."); }
+  if (!on) return null;
+  const problem = resolveOwnRouteProblem(env);
+  return problem ? bad("PAPERCLIP_RESOLVE_OWN", `the board connector stays off: ${problem}`, "See docs/model-work-triggers.md.")
+    : ok("PAPERCLIP_RESOLVE_OWN", "on, with a route for a card the model leaves blocked");
+}
+
+/**
  * Read the per-bot settings out of a PM2 ecosystem file WITHOUT evaluating it.
  *
  * Evaluating it would execute arbitrary JS and, worse, would resolve the token
