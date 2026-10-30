@@ -4,7 +4,8 @@
  * on that block is no one's hold, and the model is started to fix the card,
  * hand it to its owner or put it to the owner. A block a person set, and a card
  * in Paperclip's reconciliation hold, stay untouched. An escalation ruled to
- * stand gets one more look.
+ * stand gets one more look, and so does an ask the seat answered as waiting
+ * with nothing open it waits on, once per answer.
  */
 const assert = require("assert");
 const { ASK_OPERATION, ASK_CARD_FIELD, ASK_CARD_IDENTIFIER_FIELD } = require("../lib/owner-asks");
@@ -27,6 +28,7 @@ function board({ description = "Ship the release.", by = { createdByAgentId: "ag
   const card = { id: "c-1", identifier: "T-1", title: "Release the change", description,
     status: "in_progress", assigneeAgentId: "agent-em", assigneeUserId: null, labels: [], createdAt: "2026-01-01T00:00:00Z", requestDepth: 0, ...by };
   const activity = [], comments = [], writes = [];
+  const owners = { "own-1": ownerCard(1) };
   const runs = [{ id: "r1", agentId: "agent-em", status: "running" }];
   // Why each run woke, as Paperclip records it (none: the run does not say).
   const reasons = {};
@@ -38,7 +40,9 @@ function board({ description = "Ship the release.", by = { createdByAgentId: "ag
   const fetch = async (url, init = {}) => {
     const path = url.replace(/^.*\/api/, "");
     if (path === "/agents/me") return ok({ id: "agent-em", name: "Engineering Manager", companyId: "co-1", ...(reportsTo ? { reportsTo } : {}) });
-    if (path === "/issues/own-1") return ok({ id: "own-1", identifier: "R-1", status: "todo", description: "**Decision**\n> Which way?\n\n**Recommendation**\n> Go.\n\n**Evidence**\n> Seen." });
+    // The owners' cards an ask opens (own-1 is there from the start).
+    const own = path.match(/^\/issues\/(own-\d+)$/);
+    if (own && owners[own[1]]) return ok(owners[own[1]]);
     if (path === "/companies/co-1/agents") return ok(SEATS);
     if (path === "/companies/co-1/user-directory") return ok({ users: PEOPLE });
     if (path === "/agents/me/inbox-lite") return ok(card.assigneeAgentId === "agent-em" ? [{ id: card.id, status: card.status, unresolvedBlockerIssueIds: [] }] : []);
@@ -95,7 +99,11 @@ function board({ description = "Ship the release.", by = { createdByAgentId: "ag
     // The board's checkout of a wake: a blocked card the bot holds is in progress for the run.
     if (card.status === "blocked" && card.assigneeAgentId === "agent-em") { card.status = "in_progress"; card.blockedTransitionAt = null; }
   };
-  return { card, writes, comments, fetch, wake, runs, record };
+  return { card, writes, comments, fetch, wake, runs, record, owners, now };
+}
+/** An owner's card as an ask opens it. */
+function ownerCard(n) {
+  return { id: `own-${n}`, identifier: `R-${n}`, status: "todo", description: "**Decision**\n> Which way?\n\n**Recommendation**\n> Go.\n\n**Evidence**\n> Seen." };
 }
 const ROUTE = { escalateTo: parseEscalateTo("user:user-avery|Avery") };
 const seatOn = (b, opts = {}) => {
@@ -203,7 +211,7 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
   // started or used up.
   const marker = (record) => `<!-- process.escalate:${Buffer.from(JSON.stringify(record)).toString("base64url")} -->`;
   function routes() {
-    const r = { calls: [], asks: [], warns: [], board: null };
+    const r = { calls: [], asks: [], warns: [], errors: [], board: null };
     // As the live action: an ask records its hop and the owner's card on the seat's card; a hand-up gives it to the manager.
     r.escalate = async (body) => {
       r.calls.push(body);
@@ -217,7 +225,7 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
       } else if (body.operation === "hand_up") { b.card.assigneeAgentId = "agent-po"; b.card.status = "blocked"; }
       return { ok: true, operation: body.operation, holder: { id: "agent-po" }, hops: [] };
     };
-    r.log = { ...silent, warn: (_o, m) => r.warns.push(String(m ?? _o)), child() { return r.log; } };
+    r.log = { ...silent, warn: (_o, m) => r.warns.push(String(m ?? _o)), error: (_o, m) => r.errors.push(String(m ?? _o)), child() { return r.log; } };
     r.onOwnerAsk = async (a) => { r.asks.push(a); return true; };
     return r;
   }
@@ -433,6 +441,264 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     assert.strictEqual(checkResolveOwn({ PAPERCLIP_RESOLVE_OWN: "on", PAPERCLIP_ESCALATE_TO: "agent:x" }).status, PASS);
     assert.strictEqual(checkResolveOwn({}), null);
     assert.strictEqual(checkResolveOwn({ PAPERCLIP_RESOLVE_OWN: "maybe" }).status, FAIL);
+  });
+
+  // An ask the seat answered as waiting (its own run ended it blocked), woken
+  // again with nothing open it waits on: with the setting on, one look per
+  // answer, ending in the same three ways out as a seat's own block.
+  /** The seat answers the ask blocked (r1); `mutate` changes the board; the board wakes it again (r2). */
+  async function answeredWait({ opts = {}, reportsTo = null, mutate = () => {}, r = null } = {}) {
+    const b = board({ by: { createdByAgentId: "agent-em" }, reportsTo });
+    if (r) r.board = b;
+    const seat = seatOn(b, opts);
+    const prompts = [];
+    const answer = async (p) => { prompts.push(p); return STUCK; };
+    await seat(answer).tick();
+    mutate(b);
+    b.wake("r2");
+    await seat(answer).tick();
+    return { b, seat, prompts, answer };
+  }
+  const LOOK = /You answered this card earlier that it waits/;
+
+  await check("an answered ask's wait, setting on: the model looks once, told the three ways out", async () => {
+    const t = await answeredWait({ opts: { resolveOwn: true, ...ROUTE } });
+    assert.strictEqual(t.prompts.length, 2, `${t.prompts.length} runs`);
+    const p = t.prompts[1];
+    assert.match(p, LOOK);
+    assert.match(p, /Nothing here is mine to do; it needs a decision\./, "the look is not told what it answered");
+    assert.match(p, /Fixed:/);
+    assert.match(p, /Handed to its owner: call process\.escalate/);
+    assert.match(p, /Put to the owner: .*with the operation/);
+  });
+
+  await check("an answered ask's look that ends in a plain block is routed by the code: ask (announced in that wake), hand-up, or the holder", async () => {
+    for (const mode of ["ask", "hand_up", "holder"]) {
+      const r = routes();
+      const opts = mode === "ask" ? { escalate: r.escalate, onOwnerAsk: r.onOwnerAsk } : mode === "hand_up" ? { escalate: r.escalate } : ROUTE;
+      const t = await answeredWait({ opts: { resolveOwn: true, log: r.log, ...opts }, reportsTo: "agent-po", r });
+      assert.strictEqual(t.prompts.length, 2, `${mode}: ${t.prompts.length} runs`);
+      if (mode === "ask") {
+        assert.deepStrictEqual(r.calls.map((c) => c.operation), [ASK_OPERATION]);
+        assert.match(askCalls(r)[0].decision, /Nothing here is mine to do; it needs a decision\./);
+        assert.strictEqual(r.asks.length, 1, "not announced in the look's wake");
+        assert.strictEqual(r.asks[0].ownerCardId, "own-1");
+      } else if (mode === "hand_up") {
+        assert.deepStrictEqual(r.calls.map((c) => c.operation), ["hand_up"]);
+        assert.strictEqual(t.b.card.assigneeAgentId, "agent-po");
+      } else {
+        assert.strictEqual(r.calls.length, 0);
+        assert.strictEqual(t.b.card.assigneeUserId, "user-avery", "not escalated to the configured holder");
+        assert.strictEqual(t.b.card.status, "blocked");
+      }
+    }
+  });
+
+  await check("an answered ask's look whose ask could not be announced and cannot be handed up is not used up: the next wake looks again", async () => {
+    const r = routes();
+    r.onOwnerAsk = unbound(r);
+    const t = await answeredWait({ opts: { resolveOwn: true, log: r.log, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk }, r });
+    assert.strictEqual(t.prompts.length, 2);
+    assert.ok(r.warns.some((w) => /nothing is used up, the next wake tries again/.test(w)), `warns ${r.warns}`);
+    assert.deepStrictEqual(t.b.card.blockedBy ?? [], [], "the owner card is still a blocker");
+    t.b.wake("r3"); await t.seat(t.answer).tick();
+    assert.strictEqual(t.prompts.length, 3, "the next wake did not look again");
+    assert.match(t.prompts[2], LOOK);
+  });
+
+  await check("a second wake on the same answer gets the note; a newer answer re-arms the look", async () => {
+    const r = routes();
+    const t = await answeredWait({ opts: { resolveOwn: true, log: r.log, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk }, r });
+    assert.strictEqual(t.prompts.length, 2);
+    // The owner's card is taken off the card's links undone: the look's own answer is what stands.
+    t.b.card.blockedBy = [];
+    const before = t.b.writes.length;
+    t.b.wake("r3"); await t.seat(t.answer).tick();
+    assert.strictEqual(t.prompts.length, 2, "the same answer was looked at twice");
+    assert.ok(t.b.writes.slice(before).some((w) => w.runId === "r3"), "the wake was not answered by the note");
+    // A newer ask, answered blocked again: its wait gets its own look.
+    t.b.comments.push({ id: `c${t.b.comments.length}`, authorAgentId: null, authorUserId: "user-avery", createdAt: new Date(Date.now() + 60000).toISOString(), body: "Anything new on this?" });
+    t.b.wake("r4"); await t.seat(t.answer).tick();
+    assert.strictEqual(t.prompts.length, 3, "the newer ask was not run");
+    assert.doesNotMatch(t.prompts[2], LOOK, "a new ask was run as a look");
+    t.b.card.blockedBy = [];
+    t.b.wake("r5"); await t.seat(t.answer).tick();
+    assert.strictEqual(t.prompts.length, 4, "the newer answer did not re-arm the look");
+    assert.match(t.prompts[3], LOOK);
+  });
+
+  // As the live action (process.escalate request_ray_action): a key it has
+  // recorded replays that hop; otherwise it reuses the record's owner card
+  // only while it is open (a done or cancelled one is replaced by a new open
+  // card, as shipped in the services' release of #399), else opens a new one.
+  // `legacy` models the earlier build, which reused a closed card. The
+  // owner's card is added to the card's blockers only when it is not there.
+  function liveAsks({ legacy = false } = {}) {
+    const r = routes();
+    r.legacy = legacy;
+    let made = 0, rayCard = null;
+    const hops = [];
+    r.escalate = async (body) => {
+      r.calls.push(body);
+      const b = r.board;
+      const replay = hops.find((h) => h.idempotencyKey === body.idempotencyKey && h.operation === body.operation);
+      if (replay) return { ok: true, operation: body.operation, replayed: true, holder: { id: "agent-em" }, hops };
+      if (body.operation === "hand_up") {
+        hops.push({ from: "agent-em", to: "agent-po", operation: "hand_up", idempotencyKey: body.idempotencyKey });
+        b.card.assigneeAgentId = "agent-po"; b.card.status = "blocked";
+      } else {
+        // The record's owner card is reused only while open; `r.legacy` reuses it even closed.
+        const id = rayCard && (r.legacy || !["done", "cancelled"].includes(b.owners[rayCard].status)) ? rayCard : `own-${++made}`;
+        b.owners[id] ??= ownerCard(made);
+        rayCard = id;
+        hops.push({ from: "agent-em", to: "user-avery", operation: ASK_OPERATION, idempotencyKey: body.idempotencyKey, [ASK_CARD_FIELD]: id });
+        if (!(b.card.blockedBy ?? []).some((x) => x.id === id)) b.card.blockedBy = [...(b.card.blockedBy ?? []), { id, identifier: b.owners[id].identifier, status: b.owners[id].status }];
+        b.card.status = "blocked";
+      }
+      b.comments.push({ id: `m${b.comments.length}`, authorAgentId: "agent-em", createdAt: b.now(), createdByRunId: b.runs[0].id,
+        body: marker({ card: "c-1", ...(rayCard ? { [ASK_CARD_FIELD]: rayCard, [ASK_CARD_IDENTIFIER_FIELD]: b.owners[rayCard].identifier } : {}), hops: [...hops] }) });
+      return { ok: true, operation: body.operation, replayed: false, holder: { id: "agent-po" }, hops };
+    };
+    /** The owner answers the open ask. `recorded`: through record_answer, which clears the record's owner card; else relayed from chat, which leaves it. */
+    r.answered = (b, { recorded }) => {
+      const id = hops.findLast((h) => h.operation === ASK_OPERATION)[ASK_CARD_FIELD];
+      b.owners[id].status = "done";
+      b.card.blockedBy = (b.card.blockedBy ?? []).map((x) => x.id === id ? { ...x, status: "done" } : x);
+      if (recorded) {
+        rayCard = null;
+        hops.push({ from: "agent-em", to: "agent-em", operation: "record_answer", idempotencyKey: `answer:${id}` });
+        b.comments.push({ id: `m${b.comments.length}`, authorAgentId: "agent-em", createdAt: b.now(), createdByRunId: null, body: marker({ card: "c-1", hops: [...hops] }) });
+      }
+      // The answer comes back on the card as a newer ask, and the seat's key reopens it (relayOwnerAnswer).
+      b.comments.push({ id: `c${b.comments.length}`, authorAgentId: null, authorUserId: "user-avery", createdAt: b.now(), body: "Answered on my card. Carry on." });
+      b.record(SEAT, { status: { from: b.card.status, to: "todo" } }, null);
+      b.card.status = "todo";
+    };
+    return r;
+  }
+  /** An answered wait looked at and put to the owner; the owner answers; the newer ask is answered blocked (r3); the next wake (r4) is its look. */
+  async function newerAnswer({ recorded, reportsTo = null, bound = () => true, look = STUCK, legacy = false }) {
+    const r = liveAsks({ legacy });
+    const onOwnerAsk = async (a) => { r.asks.push(a); return bound(); };
+    let n = 0;
+    const answer = async (p) => { t.prompts.push(p); return ++n === 4 ? look : STUCK; };
+    const t = { prompts: [] };
+    const b = board({ by: { createdByAgentId: "agent-em" }, reportsTo });
+    r.board = b;
+    const seat = seatOn(b, { resolveOwn: true, log: r.log, escalate: r.escalate, onOwnerAsk });
+    await seat(answer).tick();
+    b.wake("r2"); await seat(answer).tick();
+    assert.deepStrictEqual(r.asks.map((a) => a.ownerCardId), ["own-1"], "the first look's ask");
+    r.answered(b, { recorded });
+    b.wake("r3"); await seat(answer).tick();
+    assert.strictEqual(t.prompts.length, 3, "the newer ask was not run");
+    assert.doesNotMatch(t.prompts[2], LOOK);
+    b.wake("r4"); await seat(answer).tick();
+    assert.strictEqual(t.prompts.length, 4, "the newer answer got no look");
+    assert.match(t.prompts[3], LOOK);
+    return { r, b, seat, answer, prompts: t.prompts };
+  }
+
+  await check("after an earlier look's ask is answered and recorded, a newer answered wait gets its own ask, announced in that wake", async () => {
+    const t = await newerAnswer({ recorded: true });
+    const keys = askCalls(t.r).map((c) => c.idempotencyKey);
+    assert.strictEqual(keys.length, 2, `asks ${keys}`);
+    assert.notStrictEqual(keys[0], keys[1], "the newer look replayed the earlier ask");
+    assert.deepStrictEqual(t.r.asks.map((a) => a.ownerCardId), ["own-1", "own-2"], "the newer ask was not announced in its wake");
+    assert.ok(t.b.card.blockedBy.some((x) => x.id === "own-2" && x.status === "todo"), "the card does not wait on the new ask");
+  });
+
+  await check("after an earlier ask is answered from chat (the record still names its closed card), the action opens a new card for the newer look: announced in that wake, and the card waits on it", async () => {
+    const t = await newerAnswer({ recorded: false, reportsTo: "agent-po" });
+    assert.deepStrictEqual(t.r.asks.map((a) => a.ownerCardId), ["own-1", "own-2"], "the newer ask was not announced in its wake");
+    assert.ok(t.b.card.blockedBy.some((x) => x.id === "own-2" && x.status === "todo"), "the card does not wait on the new ask");
+    assert.ok(!t.r.calls.some((c) => c.operation === "hand_up"), "a delivered ask was handed up");
+    assert.strictEqual(t.b.card.status, "blocked");
+  });
+
+  await check("legacy action (reuses a closed owner card): a newer look's ask that comes back closed is never taken for an ask: handed up, else put back and asked again under a new key", async () => {
+    const up = await newerAnswer({ recorded: false, reportsTo: "agent-po", legacy: true });
+    assert.ok(up.r.warns.some((w) => /already closed/.test(w)), `warns ${up.r.warns}`);
+    assert.strictEqual(up.b.card.assigneeAgentId, "agent-po", "the card was not handed up");
+    assert.deepStrictEqual(up.r.calls.map((c) => c.operation), [ASK_OPERATION, ASK_OPERATION, "hand_up"]);
+    const none = await newerAnswer({ recorded: false, legacy: true });
+    assert.strictEqual(none.b.card.assigneeAgentId, "agent-em");
+    assert.deepStrictEqual(none.r.asks.map((a) => a.ownerCardId), ["own-1"], "a closed card was announced as an ask");
+    assert.ok(none.r.errors.some((e) => /asks again under a new key/.test(e)), `errors ${none.r.errors}`);
+    // Not used up: the next wake looks again, under a key of its own, so a
+    // replay cannot hand back the same closed card.
+    none.b.wake("r5"); await none.seat(none.answer).tick();
+    assert.strictEqual(none.prompts.length, 5, "an unfinished look was not retried");
+    assert.match(none.prompts[4], LOOK);
+    let keys = askCalls(none.r).map((c) => c.idempotencyKey);
+    assert.strictEqual(keys.length, 3, `asks ${keys}`);
+    assert.strictEqual(new Set(keys).size, 3, `a retry replayed a key: ${keys}`);
+    assert.deepStrictEqual(none.r.asks.map((a) => a.ownerCardId), ["own-1"], "a closed card was announced as an ask");
+    // Once the action opens a new owner card in place of a closed one, the next retry's ask is announced and the card waits on it.
+    none.r.legacy = false;
+    none.b.wake("r6"); await none.seat(none.answer).tick();
+    assert.strictEqual(none.prompts.length, 6);
+    keys = askCalls(none.r).map((c) => c.idempotencyKey);
+    assert.strictEqual(new Set(keys).size, 4, `a retry replayed a key: ${keys}`);
+    assert.deepStrictEqual(none.r.asks.map((a) => a.ownerCardId), ["own-1", "own-2"], "the open ask was not announced in its wake");
+    assert.ok(none.b.card.blockedBy.some((x) => x.id === "own-2" && x.status === "todo"), "the card does not wait on the new ask");
+    assert.strictEqual(none.b.card.status, "blocked");
+    // Delivered: the look is used up and is not repeated.
+    none.b.wake("r7"); await none.seat(none.answer).tick();
+    assert.strictEqual(none.prompts.length, 6, "a delivered look was repeated");
+  });
+
+  await check("a newer answer's look that ends done is left done, whatever ask the record still names", async () => {
+    const t = await newerAnswer({ recorded: false, reportsTo: "agent-po", look: `Fixed it.\n${OUTCOME_MARK} done` });
+    assert.strictEqual(t.b.card.status, "done");
+    assert.strictEqual(t.b.card.assigneeAgentId, "agent-em");
+    assert.ok(!t.r.calls.some((c) => c.operation === "hand_up"), `calls ${t.r.calls.map((c) => c.operation)}`);
+  });
+
+  await check("a newer answer's look whose ask reached no one is not used up: the retry reuses its own ask and the card waits on it again", async () => {
+    // The first look's ask is announced; the newer look's is not.
+    let bound = false, n = 0;
+    const t = await newerAnswer({ recorded: true, bound: () => ++n === 1 || bound });
+    assert.ok(t.r.warns.some((w) => /nothing is used up, the next wake tries again/.test(w)), `warns ${t.r.warns}`);
+    assert.ok(!(t.b.card.blockedBy ?? []).some((x) => x.id === "own-2"), "the unannounced ask still blocks the card");
+    bound = true;
+    t.b.wake("r5"); await t.seat(t.answer).tick();
+    assert.strictEqual(t.prompts.length, 5, "the next wake did not look again");
+    assert.match(t.prompts[4], LOOK);
+    const keys = askCalls(t.r).map((c) => c.idempotencyKey);
+    assert.strictEqual(keys.length, 3, `asks ${keys}`);
+    assert.strictEqual(keys[2], keys[1], "the retry did not reuse its own ask");
+    assert.strictEqual(t.r.asks.at(-1).ownerCardId, "own-2", "the retry's ask was not announced");
+    assert.ok(t.b.card.blockedBy.some((x) => x.id === "own-2"), "the card does not wait on the retried ask, so its answer would not resume it");
+    assert.strictEqual(t.b.card.status, "blocked");
+    // The replayed wake is settled, not left running: its heartbeat ends, and the owner's answer then resumes model work.
+    assert.notStrictEqual(t.b.runs[0].status, "running", "the replayed wake's heartbeat is still running");
+    t.r.answered(t.b, { recorded: false });
+    t.b.wake("r6"); await t.seat(t.answer).tick();
+    assert.ok(t.prompts.length > 5, "the owner's answer to the replayed ask started no model work");
+  });
+
+  await check("an answered ask's wait on an open linked card, a person's hold, or the reconciliation hold is untouched, setting on", async () => {
+    const cases = {
+      "open link": (b) => { b.card.blockedBy = [{ id: "c-9", identifier: "T-9", status: "todo" }]; },
+      "person's hold": (b) => { blockAgain(b, PERSON, null); },
+      "reconciliation hold": (b) => { b.card.executionBlocker = { cause: "legacy_execution_requires_reconciliation", runId: "r1", recoveryActionId: "ra-1" }; },
+    };
+    for (const [name, mutate] of Object.entries(cases)) {
+      const t = await answeredWait({ opts: { resolveOwn: true, ...ROUTE }, mutate });
+      assert.strictEqual(t.prompts.length, 1, `${name}: the model was started`);
+      assert.strictEqual(t.b.card.assigneeAgentId, "agent-em", `${name}: the card was handed on`);
+    }
+  });
+
+  await check("setting off: an answered ask's wait gets the note, no model run, as before; PAPERCLIP_REWAKE still decides its looks", async () => {
+    const off = await answeredWait();
+    assert.strictEqual(off.prompts.length, 1, "off: the model was started");
+    assert.strictEqual(off.b.card.assigneeAgentId, "agent-em");
+    assert.strictEqual(off.b.card.status, "blocked");
+    const rewake = await answeredWait({ opts: { rewake: 1 } });
+    assert.strictEqual(rewake.prompts.length, 2, "PAPERCLIP_REWAKE=1: no look");
+    assert.doesNotMatch(rewake.prompts[1], LOOK, "PAPERCLIP_REWAKE's look was told the resolve-own note");
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

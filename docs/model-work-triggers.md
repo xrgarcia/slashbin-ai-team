@@ -55,15 +55,22 @@ itself left blocked is no one's hold: a scheduled job that failed ended it
 blocked, or the board blocked it when a run was lost. With `on`, the model is
 started on such a card, once per block, and must end it fixed, handed to its
 owner through `process.escalate`, or put to the owner as a yes or no question.
-A block the model's own answer set is that answer's wait and is left to
-`PAPERCLIP_REWAKE`. A block a person set, and a card in the board's legacy
+A block the model's own answer set is that answer's wait. With `on`, a wake
+on that wait which `PAPERCLIP_REWAKE` does not look at (it is off, or its looks
+are used up) gets one look of its own, with the same three ways out: once per
+answer, and only while nothing it waits on is an open card (a linked card, or
+one the answer named), the seat still holds the card, and the card is not in
+review. A look that ends blocked again is not a newer answer; an answer made
+since (the card resumed, or was asked something new, and waits again) is, and
+gets its own look. A wait on an open linked card is left as it is: it resumes
+when that card is done. A block a person set, and a card in the board's legacy
 reconciliation hold, stay untouched. The same setting makes an escalation the
 model ruled would stand, with nothing done on the card since, get one more
 look with the same three ways out, so a ruling of "hold stands" cannot be the
 end of it.
 
-The three ways out are enforced in code, not left to the prompt. When either
-look ends in a plain blocked reply, with no hand-off or ask made during the run
+The three ways out are enforced in code, not left to the prompt. When any of
+these looks ends in a plain blocked reply, with no hand-off or ask made during the run
 and the card not resumed, the code puts the model's reply to the owner as an ask
 and announces it in that same wake (the scan skips an ask already announced);
 without the ask channel it hands the card up the reporting line through
@@ -75,6 +82,18 @@ An ask counts as made only when a chat message is bound to it. If it could
 not be announced (no channel), the code hands the card up through
 `process.escalate` in that same wake instead; if that cannot be done either, the
 look is not used up, a warning says so, and the next wake looks again.
+An ask an earlier answer made counts for nothing here. A hand-off or ask made
+during the run is one the card did not carry when the run began. An answer
+look's hand-offs are keyed to the answer it looks at, so a newer answer gets
+its own ask, and a retry of the same look reuses the one it made, with the card
+blocked on its owner card again. While the card is still blocked with the seat,
+an ask that comes back as an owner card already closed asks no one: the card is
+handed up instead. If it cannot be handed up, an error says so and the look is
+not used up: the next wake looks again, and its ask uses a new key, because a
+replay of the old key would return the same closed card. Whether that retry
+reaches an open owner card depends on `process.escalate` opening a new one in
+place of a closed one. A card the
+look finished, or handed on, is left as it is.
 
 Cards a different writer keeps in step (`PAPERCLIP_EXTERNAL_WRITER`, a mirror of
 an issue tracker, say) have these routes too: a hand-up or an ask puts the card
