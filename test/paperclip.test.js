@@ -961,7 +961,7 @@ const poller = (b, answer) => createPaperclipPoller({
     const b = board({ runs: running });
     await poller(b, async () => `All done.\n${OUTCOME_MARK} done`).tick();
     assert.deepStrictEqual(b.writes.map((w) => w.body), [{ status: "done", comment: "All done." }]);
-    assert.deepStrictEqual(outcomeOf(`${OUTCOME_MARK} blocked`), { comment: "", status: "blocked", waitsOn: [], escalate: false, giveBack: false, followUp: false, person: null });
+    assert.deepStrictEqual(outcomeOf(`${OUTCOME_MARK} blocked`), { comment: "", status: "blocked", waitsOn: [], escalate: false, giveBack: false, followUp: false, person: null, until: null, ask: false });
     assert.match(buildTaskPrompt({ identifier: "T-1", title: "Q" }, [], ME, "u"), new RegExp(`${OUTCOME_MARK} blocked`));
   });
 

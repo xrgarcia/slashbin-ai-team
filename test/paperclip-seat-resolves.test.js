@@ -113,6 +113,8 @@ const seatOn = (b, opts = {}) => {
 };
 const visible = (b) => b.comments.filter((c) => !c.deletedAt);
 const STUCK = `Nothing here is mine to do; it needs a decision.\n${OUTCOME_MARK} blocked`;
+const WAITING = `Another team is building the fix; nothing is needed from anyone.\n${OUTCOME_MARK} blocked until its pull request passes review`;
+const ASKS = `Ship the fix today? Yes ships it; no holds it to Monday.\n${OUTCOME_MARK} ask`;
 const SEAT = { actorType: "agent", actorId: "agent-em" };
 const PERSON = { actorType: "user", actorId: "user-avery" };
 
@@ -128,13 +130,14 @@ function blockAgain(b, actor, runId) {
  * card out and ends it blocked as `actor`; the board wakes the seat again (r2).
  * Resolves to the prompts the model was given, and the count after the first.
  */
-async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
+async function blockedLater(actor, { opts = {}, mutate = () => {}, reply = STUCK } = {}) {
   const b = board({ by: { createdByAgentId: "agent-em" } });
   const seat = seatOn(b, opts);
   const prompts = [];
-  const answer = async (p) => { prompts.push(p); return STUCK; };
+  let first = Infinity;
+  const answer = async (p) => { prompts.push(p); return prompts.length > first ? reply : STUCK; };
   await seat(answer).tick();
-  const first = prompts.length;
+  first = prompts.length;
   blockAgain(b, actor, "rJob");
   mutate(b);
   b.wake("r2");
@@ -150,7 +153,7 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     for (const bad of ["1", "true", "yes"]) assert.throws(() => parseResolveOwn(bad), /PAPERCLIP_RESOLVE_OWN/, bad);
   });
 
-  await check("a card the seat blocked itself: the model is started and told the three ways out; setting off, it is not", async () => {
+  await check("a card the seat blocked itself: the model is started and told the ways out; setting off, it is not", async () => {
     const off = await blockedLater(SEAT);
     assert.strictEqual(off.prompts.length, off.first, "off: the model was started on the seat's own block");
     const on = await blockedLater(SEAT, { opts: { resolveOwn: true, ...ROUTE } });
@@ -158,8 +161,10 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     const p = on.prompts.at(-1);
     assert.match(p, /the block is your own/);
     assert.match(p, /Fixed:/);
-    assert.match(p, /Handed to its owner: call process\.escalate/);
-    assert.match(p, /Put to the owner: .*with the operation/);
+    assert.match(p, /Handed up: end with the line PAPERCLIP-OUTCOME: escalate/);
+    assert.match(p, /Put to the owner: .*PAPERCLIP-OUTCOME: ask/);
+    assert.match(p, /Waiting on something already moving: .*PAPERCLIP-OUTCOME: blocked until/);
+    assert.doesNotMatch(p, /call process\.escalate/, "a board run holds no agent key: it is never told to call process.escalate itself");
   });
 
   await check("a seat's own block is resolved once: the look is not repeated on the wakes after it", async () => {
@@ -187,7 +192,7 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     assert.strictEqual(t.prompts.length, t.first, "the model was started on a card that waits on an open card");
   });
 
-  await check("an escalation ruled to stand gets one more look with the three ways out; setting off, it does not", async () => {
+  await check("an escalation ruled to stand gets one more look with the ways out; setting off, it does not", async () => {
     for (const on of [false, true]) {
       const b = board({ by: { createdByAgentId: "agent-po" } });
       b.card.labels = [{ name: "Needs EM ruling" }];
@@ -256,6 +261,26 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
     assert.strictEqual(r.asks.length, 1, "announced again by the scan");
   });
 
+  await check("self-block second look that waits on a named event (blocked until): nobody is asked or handed it, on every route", async () => {
+    for (const mode of ["ask", "hand_up"]) {
+      const r = routes();
+      const opts = mode === "ask" ? { escalate: r.escalate, onOwnerAsk: r.onOwnerAsk } : { escalate: r.escalate };
+      const t = await blockedLater(SEAT, { opts: { resolveOwn: true, log: r.log, ...opts }, mutate: withBoard(r), reply: WAITING });
+      assert.strictEqual(t.prompts.length, t.first + 1, `${mode}: the model was not started`);
+      assert.deepStrictEqual(r.calls.map((c) => c.operation), [], `${mode}: a moving wait was routed`);
+      assert.strictEqual(r.asks.length, 0, `${mode}: a moving wait was put to the owner`);
+      assert.strictEqual(t.b.card.status, "blocked");
+    }
+  });
+
+  await check("an ask line is the model's own owner ask: one ask, made by the seat's client and announced", async () => {
+    const r = routes();
+    const t = await blockedLater(SEAT, { opts: { resolveOwn: true, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk, log: r.log }, mutate: withBoard(r), reply: ASKS });
+    assert.strictEqual(askCalls(r).length, 1, `calls: ${r.calls.map((c) => c.operation)}`);
+    assert.match(askCalls(r)[0].decision, /Ship the fix today\?/);
+    assert.strictEqual(r.asks.length, 1);
+  });
+
   await check("self-block second look, plain reply, hand-up route (reporting line, no ask channel, no holder): the card is handed up", async () => {
     const r = routes();
     const b = board({ by: { createdByAgentId: "agent-em" }, reportsTo: "agent-po" });
@@ -299,6 +324,26 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
         assert.strictEqual(b.card.assigneeUserId, "user-avery", "escalated to the configured holder");
       }
     }
+  });
+
+  await check("held escalation second look: a wait on a named event is left as it is; an ask line asks", async () => {
+    for (const mode of ["ask", "hand_up"]) {
+      const r = routes();
+      const b = heldBoard();
+      r.board = b;
+      const opts = mode === "ask" ? { escalate: r.escalate, onOwnerAsk: r.onOwnerAsk } : { escalate: r.escalate };
+      const seat = seatOn(b, { resolveOwn: true, log: r.log, ...opts });
+      await heldTicks(b, seat, async () => WAITING);
+      assert.deepStrictEqual(r.calls.map((c) => c.operation), [], `${mode}: a moving wait was routed`);
+      assert.strictEqual(r.asks.length, 0, `${mode}: a moving wait was put to the owner`);
+    }
+    const r = routes();
+    const b = heldBoard();
+    r.board = b;
+    const seat = seatOn(b, { resolveOwn: true, log: r.log, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk });
+    await heldTicks(b, seat, async () => ASKS);
+    assert.ok(askCalls(r).length >= 1, `ask calls: ${r.calls.map((c) => c.operation)}`);
+    assert.strictEqual(r.asks.length, 1);
   });
 
   await check("a model that made its own hand-off or ask in the run is not overridden", async () => {
@@ -461,15 +506,17 @@ async function blockedLater(actor, { opts = {}, mutate = () => {} } = {}) {
   }
   const LOOK = /You answered this card earlier that it waits/;
 
-  await check("an answered ask's wait, setting on: the model looks once, told the three ways out", async () => {
+  await check("an answered ask's wait, setting on: the model looks once, told the ways out", async () => {
     const t = await answeredWait({ opts: { resolveOwn: true, ...ROUTE } });
     assert.strictEqual(t.prompts.length, 2, `${t.prompts.length} runs`);
     const p = t.prompts[1];
     assert.match(p, LOOK);
     assert.match(p, /Nothing here is mine to do; it needs a decision\./, "the look is not told what it answered");
     assert.match(p, /Fixed:/);
-    assert.match(p, /Handed to its owner: call process\.escalate/);
-    assert.match(p, /Put to the owner: .*with the operation/);
+    assert.match(p, /Handed up: end with the line PAPERCLIP-OUTCOME: escalate/);
+    assert.match(p, /Put to the owner: .*PAPERCLIP-OUTCOME: ask/);
+    assert.match(p, /Waiting on something already moving: .*PAPERCLIP-OUTCOME: blocked until/);
+    assert.doesNotMatch(p, /call process\.escalate/, "a board run holds no agent key: it is never told to call process.escalate itself");
   });
 
   await check("an answered ask's look that ends in a plain block is routed by the code: ask (announced in that wake), hand-up, or the holder", async () => {
