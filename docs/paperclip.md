@@ -136,6 +136,8 @@ what remains; the marker is removed from the visible reply.
 | `PAPERCLIP-OUTCOME: return` | The task is handed back to whoever gave it, blocked, with the remaining step explained |
 | `PAPERCLIP-OUTCOME: blocked on ACME-12, ACME-13` | The task records its dependencies and the agent resumes when they finish |
 | `PAPERCLIP-OUTCOME: blocked on Avery` | The task waits with that board user as its assignee; the agent remains the unblock owner |
+| `PAPERCLIP-OUTCOME: blocked until the build passes` | The task stays blocked on an event already moving elsewhere. With `PAPERCLIP_RESOLVE_OWN=on`, a look that ends this way is never turned into an owner ask or a hand-up |
+| `PAPERCLIP-OUTCOME: ask` | The task stays blocked and the reply is put to the board owner as a yes or no question, through the connector's own `process.escalate` client (needs `PAPERCLIP_ESCALATE_URL`; without an owner-ask channel it is handed up instead). A board run holds no agent key, so it asks this way rather than calling `process.escalate` itself |
 
 The requester for a return comes from the board's assignment record, falling back
 to the creator. A person named in a wait must exist on the board. If the target
