@@ -96,6 +96,7 @@ check("landing is off without BOT_LAND_PATHS", () => {
   writeFileSync(join(f.repo, "notes", "company.md"), "v2\n");
   refused(land(f.repo, ["-m", "x", "notes/company.md"], { BOT_LAND_PATHS: "" }), /landing is off/);
   refused(land(f.repo, ["-m", "x", "notes/company.md"], { BOT_LAND_PATHS: "!notes/**" }), /landing is off/);
+  refused(land(f.repo, ["-m", "x", "notes/company.md"], { BOT_LAND_PATHS: "" }), /needs a terminal landing.*never ask a person/);
   rmSync(f.dir, { recursive: true, force: true });
 });
 

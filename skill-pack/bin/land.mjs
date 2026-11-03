@@ -264,7 +264,7 @@ function parseArgs(argv) {
 
 function main() {
   const patterns = parsePatterns(process.env.BOT_LAND_PATHS);
-  if (!patterns.some((p) => !p.startsWith("!"))) fail("landing is off for this bot (BOT_LAND_PATHS is not set)");
+  if (!patterns.some((p) => !p.startsWith("!"))) fail("landing is off for this bot (BOT_LAND_PATHS is not set). Leave the change on disk and block your own card: \"needs a terminal landing: <paths>\". How a file lands is the EM's call; never ask a person to choose it");
   const { message, paths } = parseArgs(process.argv.slice(2));
   if (!message) fail("--message is required: say what changed and why");
   if (!paths.length) fail("name at least one file to land");
