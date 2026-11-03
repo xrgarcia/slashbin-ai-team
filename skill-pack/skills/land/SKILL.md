@@ -36,7 +36,10 @@ you name. It refuses, and pushes nothing, when:
 - the push is rejected: nothing was committed and your edit stays on disk
 
 A refusal says why. Do not try another way to commit; tell whoever asked that
-the change is saved on disk but not landed, and why.
+the change is saved on disk but not landed, and why. A board seat with no asker
+blocks its own card with `needs a terminal landing: <paths>`, which an EM terminal
+lands. How a file lands is a tooling choice, the EM's: never open a card asking a
+person to choose it (SLA-3598, 2026-11-03).
 
 ## After landing
 
