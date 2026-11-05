@@ -2410,6 +2410,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       // The final result event as it came, and stderr's tail: where a runner
       // refusal shows (detectRefusal).
       resultLine: "",
+      resultIsError: false,
       stderrTail: "",
       progress,
       // A board answer is the card's record: only what follows the last tool
@@ -2598,6 +2599,22 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
         return;
       }
 
+      // A clean exit can still be a refusal: Claude ends a 429 or a usage limit
+      // on an is_error result and may exit 0. Only a run that gave no answer, or
+      // ended on an error result, is read for one — never a real answer.
+      const refusal = state.resultIsError || !fullResponse.trim()
+        ? detectRefusal({ stdout: state.resultLine, stderr: state.stderrTail, exitCode: code }, RUNNER_REFUSAL) : undefined;
+      if (refusal) {
+        const failure = new Error(`Claude refused the run: ${refusal.reason}`);
+        failure.refusal = refusal;
+        failure.sessionStarted = Boolean(state.sessionId);
+        failure.toolCalls = state.toolCalls;
+        failure.producedText = fullResponse.trim().length > 0;
+        reqLog.warn({ code, reason: refusal.reason, resetAt: refusal.resetAtMs ? new Date(refusal.resetAtMs).toISOString() : null }, "Claude refused the run — a usage or rate limit, not a failure");
+        reject(failure);
+        return;
+      }
+
       reqLog.info({ elapsed }, "Claude completed");
       resolve(fullResponse);
     });
@@ -2663,6 +2680,7 @@ function handleStreamEvent(event, reqLog, sendMessage, state) {
       // subtype tells a step-cap stop apart from a real crash — both exit non-zero
       state.resultSubtype = event.subtype;
       state.resultLine = JSON.stringify(event);
+      state.resultIsError = event.is_error === true;
       reqLog.info(
         { subtype: event.subtype, isError: event.is_error, numTurns: event.num_turns, costUsd: event.cost_usd, durationMs: event.duration_ms, inputTokens: event.total_input_tokens ?? inputTotal(event.usage), cachedInputTokens: event.total_cached_input_tokens ?? event.usage?.cache_read_input_tokens, outputTokens: event.total_output_tokens ?? event.usage?.output_tokens },
         "Claude result summary"

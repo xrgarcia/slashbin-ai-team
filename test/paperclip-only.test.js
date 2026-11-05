@@ -333,11 +333,22 @@ for (const e of [{ type: "system", subtype: "init", session_id: "s-1" },
     board.close();
   }
 
-  console.log("\nA runner refusal (out of tokens) is not an answer: nothing is posted, and the task waits for the limit to lift");
+  // SLA-3693: the CLI ended on Claude's usage-limit result and exit 1. The
+  // bot posted "I could not answer this one just now" as the card's answer,
+  // blocked, and its second look put that to the owner as a decision. A
+  // refusal is one whatever the exit code, and wherever the runner says it:
+  // the final result on stdout, or only stderr (err.log of the board attempt).
+  const REFUSALS = [
+    { name: "usage-limit result, exit 1", port: 10, stated: true, exit: 1,
+      stdout: [{ type: "result", subtype: "success", is_error: true, api_error_status: 429, result: "You've hit your limit · resets 3am (America/Chicago)", session_id: "s-1" }] },
+    { name: "429 result, clean exit 0", port: 11, stated: false, exit: 0,
+      stdout: [{ type: "result", subtype: "success", is_error: true, api_error_status: 429, result: "API Error: Rate limited", session_id: "s-1" }] },
+    { name: "usage-limit banner on stderr only, exit 1", port: 12, stated: true, exit: 1, stdout: [],
+      stderr: "Error: You've hit your session limit · resets 3am (America/Chicago)" },
+  ];
+  for (const R of REFUSALS) {
+  console.log(`\nA runner refusal (${R.name}) is not an answer: nothing is posted, and the task waits for the limit to lift`);
   {
-    // SLA-3693: the CLI ended on Claude's usage-limit result and exit 1. The
-    // bot posted "I could not answer this one just now" as the card's answer,
-    // blocked, and its second look put that to the owner as a decision.
     const ME = { id: "agent-1", name: "Throwaway" };
     const issue = { id: "iss-1", identifier: "T-1", title: "A question", status: "in_progress", assigneeAgentId: ME.id, createdAt: "2026-01-01T00:00:00Z" };
     const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "what is two plus two?" }];
@@ -363,21 +374,21 @@ for (const e of [{ type: "system", subtype: "init", session_id: "s-1" },
     for (const d of ["cwd", "state", "history"]) mkdirSync(join(rdir, d));
     const fake = join(rdir, "claude-refuses.cjs");
     writeFileSync(fake, `#!/usr/bin/env node
-for (const e of [{ type: "system", subtype: "init", session_id: "s-1" },
-  { type: "result", subtype: "success", is_error: true, api_error_status: 429, result: "You've hit your limit · resets 3am (America/Chicago)", session_id: "s-1" }]) console.log(JSON.stringify(e));
-process.exit(1);
+for (const e of ${JSON.stringify([{ type: "system", subtype: "init", session_id: "s-1" }, ...R.stdout])}) console.log(JSON.stringify(e));
+${R.stderr ? `process.stderr.write(${JSON.stringify(R.stderr + "\n")});` : ""}
+process.exitCode = ${R.exit};
 `);
     chmodSync(fake, 0o755);
-    const res = await runBot(botEnv(rdir, "pctest-refused", base + 10, { PAPERCLIP_URL: `http://127.0.0.1:${board.address().port}`, PAPERCLIP_API_KEY: "test-key", CLAUDE_BIN: fake, PAPERCLIP_EVENTS: "off", PAPERCLIP_POLL_MS: "500" }),
+    const res = await runBot(botEnv(rdir, `pctest-refused-${R.port}`, base + R.port, { PAPERCLIP_URL: `http://127.0.0.1:${board.address().port}`, PAPERCLIP_API_KEY: "test-key", CLAUDE_BIN: fake, PAPERCLIP_EVENTS: "off", PAPERCLIP_POLL_MS: "500" }),
       run, { until: (o) => /Paperclip run refused by the runner[\s\S]*stated/.test(o), timeoutMs: 45000 });
 
-    await check("the refusal is recognised, with the reset it states", () => {
+    await check(`${R.name}: the refusal is recognised${R.stated ? ", with the reset it states" : ", waiting the back-off"}`, () => {
       assert.strictEqual(res.code, null, `exited ${res.code}\n${res.out.slice(-3000)}`);
       assert.match(res.out, /Claude refused the run — a usage or rate limit, not a failure/);
-      assert.match(res.out, /Paperclip run refused by the runner[\s\S]*stated\S*: true/);
+      assert.match(res.out, new RegExp(`Paperclip run refused by the runner[\\s\\S]*stated\\S*: ${R.stated}`));
     });
 
-    await check("nothing is written to the card: no fallback comment, no block, no ask — and the polls meanwhile run nothing", async () => {
+    await check(`${R.name}: nothing is written to the card: no fallback comment, no block, no ask — and the polls meanwhile run nothing`, async () => {
       // Polls every 500ms meanwhile: each finds the limit still on.
       await new Promise((r) => setTimeout(r, 2000));
       assert.strictEqual(res.child.exitCode, null, "the bot exited");
@@ -388,6 +399,7 @@ process.exit(1);
 
     await stop(res.child);
     board.close();
+  }
   }
 
   console.log("\nStartup checks only the runs the enabled surfaces can make");

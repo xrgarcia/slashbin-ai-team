@@ -237,6 +237,33 @@ check("a claim that never started is relaunched only through the gate", async ()
   assert.strictEqual(launches(count), 0, "the relaunch skipped the gate");
 });
 
+// SLA-3693: a runner may state its refusal ("You've hit your limit · resets
+// 3am") only on stderr. The worker wrote it to err.log and the follower never
+// read it, so the bot saw a bare exit 1 and posted the fallback.
+check("stderr reaches the follower before close: while running, and adopting a finished attempt", async () => {
+  const noisy = join(root, "noisy.sh");
+  writeFileSync(noisy, `#!/bin/sh
+sleep "$SLEEP"
+echo "Error: You've hit your session limit" >&2
+exit 1
+`, { mode: 0o755 });
+  const dir = mkdtempSync(join(root, "state-"));
+  const errOf = (child) => new Promise((resolve, reject) => {
+    const err = [];
+    child.stderr.on("data", (d) => err.push(Buffer.from(d)));
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, err: Buffer.concat(err).toString() }));
+  });
+  const a = createAttempts(dir, { pollMs: 50 });
+  const live = await errOf(a.run("e1", { bin: noisy, args: [], cwd: root, timeoutMs: 0, env: { PATH: process.env.PATH, SLEEP: "0.3" } }));
+  assert.strictEqual(live.code, 1);
+  assert.match(live.err, /You've hit your session limit/, "followed while running");
+  const later = createAttempts(dir, { pollMs: 50 }).run("e1", { bin: noisy, args: [], cwd: root, timeoutMs: 0, env: { PATH: process.env.PATH, SLEEP: "0" } });
+  assert.strictEqual(later.adopted, "finished");
+  const adopted = await errOf(later);
+  assert.match(adopted.err, /You've hit your session limit/, "replayed when adopted finished");
+});
+
 check("an attempt id cannot name a path outside the attempts folder", () => {
   assert.throws(() => fresh().dirOf("../x"), /bad attempt id/);
 });
