@@ -135,7 +135,7 @@ async function blockedLater(actor, { opts = {}, mutate = () => {}, reply = STUCK
   const seat = seatOn(b, opts);
   const prompts = [];
   let first = Infinity;
-  const answer = async (p) => { prompts.push(p); return prompts.length > first ? reply : STUCK; };
+  const answer = async (p) => { prompts.push(p); return prompts.length > first ? (typeof reply === "function" ? reply() : reply) : STUCK; };
   await seat(answer).tick();
   first = prompts.length;
   blockAgain(b, actor, "rJob");
@@ -746,6 +746,96 @@ async function blockedLater(actor, { opts = {}, mutate = () => {}, reply = STUCK
     const rewake = await answeredWait({ opts: { rewake: 1 } });
     assert.strictEqual(rewake.prompts.length, 2, "PAPERCLIP_REWAKE=1: no look");
     assert.doesNotMatch(rewake.prompts[1], LOOK, "PAPERCLIP_REWAKE's look was told the resolve-own note");
+  });
+
+  // SLA-3697 (2026-11-04): the seat's run failed (it was out of tokens), the
+  // fallback "I could not answer this one just now" stood in as a plain block,
+  // and the second look put that non-answer to the owner as a decision. A run that
+  // gave no answer has nothing to decide: it is never asked, handed up or
+  // escalated, on any route.
+  const CRASH = () => { throw new Error("Claude exited with code 1 after 8s"); };
+  await check("self-block second look whose run gave no answer: nobody is asked, handed it or escalated to, on every route", async () => {
+    for (const mode of ["ask", "hand_up", "holder"]) {
+      const r = routes();
+      const opts = mode === "ask" ? { escalate: r.escalate, onOwnerAsk: r.onOwnerAsk } : mode === "hand_up" ? { escalate: r.escalate } : ROUTE;
+      const t = await blockedLater(SEAT, { opts: { resolveOwn: true, log: r.log, ...opts }, mutate: withBoard(r), reply: CRASH });
+      assert.strictEqual(t.prompts.length, t.first + 1, `${mode}: the model was not started`);
+      assert.deepStrictEqual(r.calls.map((c) => c.operation), [], `${mode}: a non-answer was routed`);
+      assert.strictEqual(r.asks.length, 0, `${mode}: a non-answer was put to the owner`);
+      assert.strictEqual(t.b.card.assigneeAgentId, "agent-em", `${mode}: the card left the seat`);
+      assert.strictEqual(t.b.card.assigneeUserId, null, `${mode}: the card went to a person`);
+    }
+  });
+
+  await check("held escalation second look whose run gave no answer: nobody is asked, handed it or escalated to, on every route", async () => {
+    for (const mode of ["ask", "hand_up", "holder"]) {
+      const r = routes();
+      const b = heldBoard();
+      r.board = b;
+      const opts = mode === "ask" ? { escalate: r.escalate, onOwnerAsk: r.onOwnerAsk } : mode === "hand_up" ? { escalate: r.escalate } : ROUTE;
+      const seat = seatOn(b, { resolveOwn: true, log: r.log, ...opts });
+      let n = 0;
+      await heldTicks(b, seat, async () => (++n === 1 ? STUCK : CRASH()));
+      assert.ok(n >= 2, `${mode}: the second look did not run`);
+      assert.deepStrictEqual(r.calls.map((c) => c.operation), [], `${mode}: a non-answer was routed`);
+      assert.strictEqual(r.asks.length, 0, `${mode}: a non-answer was put to the owner`);
+      assert.strictEqual(b.card.assigneeUserId, null, `${mode}: the card went to a person`);
+    }
+  });
+
+  await check("a second look that answered still asks: the guard is the non-answer, not the look", async () => {
+    const r = routes();
+    const t = await blockedLater(SEAT, { opts: { resolveOwn: true, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk, log: r.log }, mutate: withBoard(r) });
+    assert.strictEqual(askCalls(r).length, 1);
+  });
+
+  // A runner refusal — out of tokens, over a usage limit, rate-limited — is
+  // retried when the limit lifts: nothing is posted, nobody is asked, and no
+  // task is run until then.
+  const refused = (resetAtMs) => Object.assign(new Error("Claude exited with code 1 after 8s"), { refusal: { reason: "You've hit your limit · resets 3am (America/Chicago)", resetAtMs } });
+  await check("a refused run posts nothing and asks nobody; tasks wait until the stated reset, then the ask is run afresh", async () => {
+    const r = routes();
+    const b = board();
+    r.board = b;
+    let now = Date.parse("2026-11-05T06:00:00Z");
+    const reset = now + 60 * 60_000;
+    const seat = seatOn(b, { resolveOwn: true, escalate: r.escalate, onOwnerAsk: r.onOwnerAsk, log: r.log, clock: () => now });
+    const prompts = [];
+    let refuse = true;
+    const answer = async (p) => { prompts.push(p); if (refuse) throw refused(reset); return "Released.\nPAPERCLIP-OUTCOME: done"; };
+    await seat(answer).tick();
+    assert.strictEqual(prompts.length, 1, "the model was not started");
+    assert.deepStrictEqual(b.writes, [], `written: ${JSON.stringify(b.writes)}`);
+    assert.strictEqual(visible(b).filter((c) => c.authorAgentId === "agent-em").length, 0, "a comment was posted");
+    assert.deepStrictEqual(r.calls, [], "the refusal was routed");
+    // Before the reset: polled, nothing run.
+    now = reset - 60_000;
+    await seat(answer).tick();
+    assert.strictEqual(prompts.length, 1, "run again before the limit lifted");
+    // After it: the same ask, run afresh, and answered.
+    now = reset + 1;
+    refuse = false;
+    await seat(answer).tick();
+    assert.strictEqual(prompts.length, 2, "not run again once the limit lifted");
+    assert.ok(visible(b).some((c) => c.authorAgentId === "agent-em" && /Released\./.test(c.body)), "the answer was not posted");
+    assert.ok(!visible(b).some((c) => /could not answer this one/.test(c.body)), "the fallback was posted");
+  });
+
+  await check("a refusal that states no reset waits the configured back-off", async () => {
+    const b = board();
+    let now = Date.parse("2026-11-05T06:00:00Z");
+    const seat = seatOn(b, { refusalBackoffMs: 10 * 60_000, clock: () => now });
+    const prompts = [];
+    let refuse = true;
+    const answer = async (p) => { prompts.push(p); if (refuse) throw refused(undefined); return "Released.\nPAPERCLIP-OUTCOME: done"; };
+    await seat(answer).tick();
+    now += 9 * 60_000;
+    await seat(answer).tick();
+    assert.strictEqual(prompts.length, 1, "run again inside the back-off");
+    now += 2 * 60_000;
+    refuse = false;
+    await seat(answer).tick();
+    assert.strictEqual(prompts.length, 2, "not run again after the back-off");
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

@@ -333,6 +333,63 @@ for (const e of [{ type: "system", subtype: "init", session_id: "s-1" },
     board.close();
   }
 
+  console.log("\nA runner refusal (out of tokens) is not an answer: nothing is posted, and the task waits for the limit to lift");
+  {
+    // SLA-3693: the CLI ended on Claude's usage-limit result and exit 1. The
+    // bot posted "I could not answer this one just now" as the card's answer,
+    // blocked, and its second look put that to the owner as a decision.
+    const ME = { id: "agent-1", name: "Throwaway" };
+    const issue = { id: "iss-1", identifier: "T-1", title: "A question", status: "in_progress", assigneeAgentId: ME.id, createdAt: "2026-01-01T00:00:00Z" };
+    const comments = [{ id: "h1", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "what is two plus two?" }];
+    const runs = [{ id: "run-1", agentId: ME.id, status: "running" }];
+    const writes = [];
+    const routes = { "/agents/me": ME, "/agents/me/inbox-lite": [{ id: "iss-1" }], "/issues/iss-1": issue,
+      "/issues/iss-1/comments": comments, "/issues/iss-1/runs": runs, "/issues/iss-1/activity": [],
+      "/heartbeat-runs/run-1": { contextSnapshot: {} } };
+    const board = createServer((req, res) => {
+      let raw = "";
+      req.on("data", (d) => { raw += d; });
+      req.on("end", () => {
+        res.setHeader("content-type", "application/json");
+        const path = req.url.replace(/^\/api/, "").split("?")[0];
+        if (req.method !== "GET") { writes.push({ method: req.method, path, body: raw }); return res.end("{}"); }
+        if (path in routes) return res.end(JSON.stringify(routes[path]));
+        res.statusCode = 404; res.end("{}");
+      });
+    });
+    await new Promise((r) => board.listen(0, "127.0.0.1", r));
+    // A folder of its own: the block above left this task answered in its state.
+    const rdir = mkdtempSync(join(tmpdir(), "paperclip-refused-"));
+    for (const d of ["cwd", "state", "history"]) mkdirSync(join(rdir, d));
+    const fake = join(rdir, "claude-refuses.cjs");
+    writeFileSync(fake, `#!/usr/bin/env node
+for (const e of [{ type: "system", subtype: "init", session_id: "s-1" },
+  { type: "result", subtype: "success", is_error: true, api_error_status: 429, result: "You've hit your limit · resets 3am (America/Chicago)", session_id: "s-1" }]) console.log(JSON.stringify(e));
+process.exit(1);
+`);
+    chmodSync(fake, 0o755);
+    const res = await runBot(botEnv(rdir, "pctest-refused", base + 10, { PAPERCLIP_URL: `http://127.0.0.1:${board.address().port}`, PAPERCLIP_API_KEY: "test-key", CLAUDE_BIN: fake, PAPERCLIP_EVENTS: "off", PAPERCLIP_POLL_MS: "500" }),
+      run, { until: (o) => /Paperclip run refused by the runner[\s\S]*stated/.test(o), timeoutMs: 45000 });
+
+    await check("the refusal is recognised, with the reset it states", () => {
+      assert.strictEqual(res.code, null, `exited ${res.code}\n${res.out.slice(-3000)}`);
+      assert.match(res.out, /Claude refused the run — a usage or rate limit, not a failure/);
+      assert.match(res.out, /Paperclip run refused by the runner[\s\S]*stated\S*: true/);
+    });
+
+    await check("nothing is written to the card: no fallback comment, no block, no ask — and the polls meanwhile run nothing", async () => {
+      // Polls every 500ms meanwhile: each finds the limit still on.
+      await new Promise((r) => setTimeout(r, 2000));
+      assert.strictEqual(res.child.exitCode, null, "the bot exited");
+      assert.deepStrictEqual(writes.filter((w) => w.path.startsWith("/issues/iss-1")), [], JSON.stringify(writes));
+      assert.ok(!/could not answer this one/.test(res.out), "the fallback was posted");
+      assert.strictEqual(issue.status, "in_progress");
+    });
+
+    await stop(res.child);
+    board.close();
+  }
+
   console.log("\nStartup checks only the runs the enabled surfaces can make");
 
   {
