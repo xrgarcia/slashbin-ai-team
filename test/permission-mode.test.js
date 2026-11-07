@@ -84,7 +84,7 @@ check("restricted sessions pass the rule, ahead of BOT_PERMISSION_ALLOW", () => 
   // with no rule and succeeds with this one, alone or after another allow entry.
   const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
   const fn = bot.slice(bot.indexOf("function permissionArgs("), bot.indexOf("function settingsArgs("));
-  assert.match(fn, /"--allowedTools", attachmentReadRule\(ATTACHMENTS_DIR\)/);
+  assert.match(fn, /"--allowedTools", attachmentReadRule\(attachmentsDir\)/);
   assert.match(fn, /PERMISSION_ALLOW \? \[PERMISSION_ALLOW\]/);
   const bypass = fn.slice(fn.indexOf('if (PERMISSION_MODE === "bypass")'), fn.indexOf('"--tools", ALLOWED_TOOLS'));
   assert.ok(bypass.length > 0 && !bypass.includes("attachmentReadRule"), "bypass argv must stay the historical one");
@@ -262,9 +262,14 @@ check("a board run drops every memory variable and denies the path each one name
   // so a new store published to Discord runs cannot be left open to board runs.
   const paths = src.match(/function privateMemoryPaths\(\) \{\s*return \[([^\]]+)\]/)[1].split(",").map((x) => x.trim());
   assert.deepStrictEqual(paths, PRIVATE_MEMORY_ENV.map((name) => {
-    const m = src.match(new RegExp(`\\b${name}: (\\w+),`));
+    const m = src.match(new RegExp(`\\b${name}: (memory\\.)?(\\w+),`));
     assert.ok(m, `${name} is no longer published — update PRIVATE_MEMORY_ENV`);
-    return m[1];
+    if (!m[1]) return m[2];
+    // Published from memoryFor(): the shared (non-private) branch names the path.
+    const shared = src.match(/function memoryFor\(scope\) \{\s*if \(!PRIVATE_CHANNELS\) \{\s*return \{([^}]+)\}/)[1];
+    const f = shared.match(new RegExp(`\\b${m[2]}: (\\w+)`));
+    assert.ok(f, `memoryFor() no longer names ${m[2]}`);
+    return f[1];
   }));
   // Published by the harness, and still withheld from a board run by the builder.
   const published = Object.fromEntries(PRIVATE_MEMORY_ENV.map((name) => [name, `/state/${name}`]));
@@ -298,7 +303,7 @@ check("a board run is least privilege in every mode — never bypass", () => {
   // own transcripts of Discord conversations, and any other bot's files on the
   // host. No list of private paths covers that; least privilege does.
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.match(src, /\.\.\.permissionArgs\(runKind\)/, "the board run no longer takes the board branch");
+  assert.match(src, /\.\.\.permissionArgs\(runKind, memory\.attachments\)/, "the board run no longer takes the board branch");
   assert.match(src, /const runKind = opts\.noBufferContext \? BOARD_KIND : "session";/, "a Paperclip run no longer resolves its kind from the board policy");
   assert.match(src, /const BOARD_KIND = boardRunKind\(BOARD_POLICY\);/);
   assert.strictEqual(boardRunKind(resolveBoardPolicy({})), "board", "the default board run is no longer least privilege");

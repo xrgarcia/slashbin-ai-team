@@ -161,7 +161,7 @@ check("a run whose shell policy clamping would cut is refused before spawn (rule
   const clampAt = spawnBody.indexOf("clampArgs(args)");
   const refuse = spawnBody.indexOf("codexRuntime.policyClamped(args, clamped)");
   assert.ok(clampAt > 0 && refuse > clampAt, "checked after clamping");
-  assert.ok(refuse < spawnBody.indexOf("attempts.run(") && refuse < spawnBody.indexOf("spawn(RUNTIME.bin"), "checked before any spawn");
+  assert.ok(refuse < spawnBody.indexOf("attempts.run(") && refuse < spawnBody.indexOf("spawn(launch.bin") && refuse < spawnBody.indexOf("launchCommand(RUNTIME.bin"), "checked before any spawn");
   assert.match(spawnBody.slice(refuse, refuse + 400), /throw new Error\("Run environment refused/);
   // The policy, long enough to be cut, is what policyClamped finds.
   const { clampArgs } = require("../lib/argv-budget");

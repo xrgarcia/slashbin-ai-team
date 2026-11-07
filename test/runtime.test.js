@@ -294,7 +294,7 @@ check("Claude's command line is the one it always was", () => {
       "--output-format", "stream-json",
       // A run whose reply lands outside Discord gets least privilege, unless
       // its board policy is parity.
-      ...permissionArgs(runKind),
+      ...permissionArgs(runKind, memory.attachments),
       ...skillPackArgs(),
       "--verbose",
       ...(CLAUDE_MAX_TURNS ? ["--max-turns", String(CLAUDE_MAX_TURNS)] : []),

@@ -73,6 +73,7 @@ const EXEMPT = new Set([
   "X",                                     // appears only in envInt()'s own doc comment
   "CLAUDE_PLUGIN_ROOT",                    // set by the CLI for a plugin's hooks
   "TMPDIR",                                // a board attempt's own temp folder, set by the bot for its worker
+  "PATH",                                  // the OS's; read to find the agent binary a confined run starts
 ]);
 
 // Variables the harness PUBLISHES to skills, rather than settings an operator
