@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Confinement** (`BOT_CONFINE=true`, `lib/confine.js`): every agent process a bot starts runs inside bubblewrap, seeing only its working directory, its own memory and a home of its own. Holds for the agent's file tools as well as its shell. A host without bubblewrap refuses the bot rather than running it open.
+- **Private channels** (`BOT_PRIVATE_CHANNELS=true`, `lib/private-channels.js`): each channel's buffer, uploads, schedules, sessions and summaries live in its own folder, and a run is given only its channel's. Requires confinement and the bot's records outside `CLAUDE_CWD`.
+- Job-history rows name the channel the job ran for.
+
 ### Changed
 
 - **A Paperclip routine's card no longer waits behind a long card.** Board

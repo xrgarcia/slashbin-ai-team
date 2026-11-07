@@ -160,7 +160,8 @@ check("a job may pin its own timezone", () => {
 });
 
 check("the schedules path is published so a skill can create jobs", () => {
-  assert.ok(/BOT_SCHEDULES_FILE: SCHEDULES_FILE,/.test(bot),
+  // Published from the run's memory: the bot's file, or in private mode the channel's own.
+  assert.ok(/BOT_SCHEDULES_FILE: memory\.schedules,/.test(bot) && /schedules: SCHEDULES_FILE,/.test(bot),
     "without this a scheduling skill would have to hardcode the path");
 });
 
@@ -245,9 +246,9 @@ check("attachments are keyed on the ATTACHMENT id, not the message id", () => {
   // A message can carry several files and nothing requires their names to differ.
   // Keyed on messageId, two `report.csv` on one message produced the same path,
   // and the existsSync short-circuit handed back the FIRST file for the second.
-  assert.ok(/join\(ATTACHMENTS_DIR, `\$\{attachment\.id\}-/.test(bot),
+  assert.ok(/join\((ATTACHMENTS_DIR|dir), `\$\{attachment\.id\}-/.test(bot),
     "attachment path must be keyed on attachment.id");
-  assert.ok(!/join\(ATTACHMENTS_DIR, `\$\{messageId\}-/.test(bot),
+  assert.ok(!/join\((ATTACHMENTS_DIR|dir), `\$\{messageId\}-/.test(bot),
     "still keyed on messageId — two same-named files on one message collide");
 });
 
@@ -295,7 +296,8 @@ check("there is exactly ONE summarization implementation", () => {
   assert.ok(!/spawn\((CLAUDE_BIN|RUNTIME\.bin)/.test(sum), "summarize.js still spawns Claude itself");
   // bot.js keeps exactly one spawn — the agent, on whichever runtime is set.
   // Summarization is not it.
-  assert.strictEqual((bot.match(/spawn\((CLAUDE_BIN|RUNTIME\.bin)/g) || []).length, 1,
+  // (Started through launchCommand, which confines it when BOT_CONFINE=true.)
+  assert.strictEqual((bot.match(/spawn\((CLAUDE_BIN|RUNTIME\.bin|launch\.bin)/g) || []).length, 1,
     "bot.js should spawn Claude once (the agent); summarization goes through the module");
 
   for (const f of [bot, sum]) {

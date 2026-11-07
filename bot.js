@@ -3,13 +3,15 @@ const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
 const { WebSocket, WebSocketServer } = require("ws");
 const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync, readlinkSync, renameSync, mkdtempSync, rmSync } = require("fs");
-const { basename, join, resolve } = require("path");
+const { basename, dirname, join, resolve } = require("path");
 const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
 const { buildRunEnv, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
+const { resolveConfine, confineCommand, confineProblems, within: pathWithin, real: realPath } = require("./lib/confine");
+const privateChannels = require("./lib/private-channels");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isNonReply, nonReplyCorrection } = require("./lib/non-reply");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
@@ -272,7 +274,7 @@ function escalateBearer() {
 // env and a board task's seat — and decides each variable over the result:
 // whether the run has it, and whether its commands can read it (buildRunEnv,
 // docs/run-environment.md). `run` is "session", "parity" or "board".
-function runEnvFor(run, { channelId = "", runOutbox = OUTBOX_DIR, tmpDir = null, seat = null } = {}) {
+function runEnvFor(run, { channelId = "", runOutbox = OUTBOX_DIR, tmpDir = null, seat = null, memory = memoryFor(String(channelId)) } = {}) {
   return buildRunEnv({
     env: process.env,
     spec: process.env.BOT_RUN_ENV,
@@ -297,14 +299,15 @@ function runEnvFor(run, { channelId = "", runOutbox = OUTBOX_DIR, tmpDir = null,
     // renamed — which is exactly what happened to the shipped /remember, whose
     // three hardcoded paths were ALL dead by the time anyone checked.
     published: {
-      BOT_STATE_DIR: STATE_DIR,
-      BOT_SUMMARIES_DIR: HISTORY_DIR,
-      BOT_ATTACHMENTS_DIR: ATTACHMENTS_DIR,
+      // In private mode, the run's own channel folder (memoryFor).
+      BOT_STATE_DIR: memory.state,
+      BOT_SUMMARIES_DIR: memory.summaries,
+      BOT_ATTACHMENTS_DIR: memory.attachments,
       BOT_OUTBOX_DIR: runOutbox,
-      BOT_BUFFER_FILE: BUFFER_FILE,
-      BOT_SESSIONS_FILE: SESSION_FILE,
-      BOT_JOB_HISTORY_FILE: JOB_HISTORY_FILE,
-      BOT_SCHEDULES_FILE: SCHEDULES_FILE,
+      BOT_BUFFER_FILE: memory.buffer,
+      BOT_SESSIONS_FILE: memory.sessions,
+      BOT_JOB_HISTORY_FILE: memory.jobHistory,
+      BOT_SCHEDULES_FILE: memory.schedules,
       BOT_CHANNEL_ID: String(channelId),
       // Skills name their scripts under $CLAUDE_PLUGIN_ROOT, which Claude sets
       // for a plugin; Codex has no plugin folder, so the harness sets it.
@@ -635,6 +638,57 @@ const OUTBOX_DIR = process.env.BOT_OUTBOX_DIR
   : join(STATE_DIR, "outbox");
 const MAX_OUTBOUND_BYTES = parseInt(process.env.MAX_OUTBOUND_BYTES, 10) || 8 * 1024 * 1024;
 
+// --- Confinement and private channels (lib/confine.js, lib/private-channels.js) ---
+// Both off unless set; a bot that sets neither starts its runs exactly as before.
+const CONFINE = resolveConfine(process.env);
+const PRIVATE_CHANNELS = String(process.env.BOT_PRIVATE_CHANNELS || "").trim().toLowerCase() === "true";
+// The memory a run is given: the bot's shared records, or in private mode the
+// folder of the channel (or board scope) the run serves.
+function memoryFor(scope) {
+  if (!PRIVATE_CHANNELS) {
+    return { buffer: BUFFER_FILE, summaries: HISTORY_DIR, attachments: ATTACHMENTS_DIR, sessions: SESSION_FILE,
+      jobHistory: JOB_HISTORY_FILE, schedules: SCHEDULES_FILE, state: STATE_DIR, home: join(STATE_DIR, "home"), write: [STATE_DIR, HISTORY_DIR, ATTACHMENTS_DIR] };
+  }
+  const p = privateChannels.channelPaths(STATE_DIR, scope);
+  return { buffer: p.buffer, summaries: p.summaries, attachments: p.attachments, sessions: p.sessions,
+    jobHistory: p.jobHistory, schedules: p.schedules, state: p.dir, home: p.home, write: [p.dir] };
+}
+// The scope a run's private memory belongs to: its channel, or one board scope
+// for every board task (a board run already sees no Discord memory).
+function memoryScope(channelId, opts = {}) {
+  return opts.noBufferContext ? "board" : String(channelId);
+}
+// `bin args` as this bot starts them: inside the confinement when it is on.
+// `memory` is memoryFor(scope); `extraWrite` the run's own outbox and temp folder.
+function launchCommand(bin, args, { memory = memoryFor(""), extraWrite = [] } = {}) {
+  if (!CONFINE.enabled) return { bin, args };
+  const read = [...skillPacks(), ...confineConfigFiles(), ...CONFINE.read];
+  return confineCommand({
+    bin, args, cwd: CLAUDE_CWD, home: memory.home,
+    write: [...memory.write, ...extraWrite, ...CONFINE.write],
+    read, bwrap: CONFINE.bwrap,
+  });
+}
+// The summarizer reads only the transcript it is handed; confined, it gets a
+// home of its own and no bot memory at all.
+function summarizerLaunch(bin, args) {
+  return launchCommand(bin, args, { memory: { ...memoryFor("_summarizer"), write: [] } });
+}
+// The home a run's session transcript is written under, "" when unconfined (the
+// host user's own): a stored session is resumed only from the same home.
+function runHome(channelId, opts = {}) {
+  return CONFINE.enabled ? memoryFor(memoryScope(channelId, opts)).home : "";
+}
+// Files the CLI is told to read by path: the MCP configs and the bot's settings.
+function confineConfigFiles() {
+  const files = [];
+  for (const v of [process.env.MCP_CONFIG, process.env.MCP_CONFIG_EXTRA, process.env.BOT_SETTINGS]) {
+    const s = String(v || "").trim();
+    if (s && !s.startsWith("{")) files.push(resolve(CLAUDE_CWD, s));
+  }
+  return files;
+}
+
 // --- Exit codes ---
 // A process manager restarts on failure, which is right for a crash and wrong for
 // a typo. Nothing about restarting fixes a revoked token or a path that does not
@@ -714,6 +768,24 @@ if (!VALID_MODES.includes(PERMISSION_MODE)) {
 if (RUNTIME.problems.length) {
   for (const problem of RUNTIME.problems) log.fatal(problem);
   process.exit(EXIT_CONFIG);
+}
+// Confinement and private channels hold or the bot does not start: a bot set
+// to keep channels apart never runs with them together.
+{
+  const problems = [
+    ...confineProblems(CONFINE),
+    ...(CONFINE.enabled && CODEX ? ["BOT_CONFINE=true is not supported with BOT_RUNTIME=codex yet — Codex runs under its own sandbox"] : []),
+    ...privateChannels.privateProblems({
+      enabled: PRIVATE_CHANNELS, confined: CONFINE.enabled, cwd: realPath(CLAUDE_CWD),
+      historyDir: realPath(HISTORY_DIR), stateDir: realPath(STATE_DIR), attachmentsDir: realPath(ATTACHMENTS_DIR),
+      within: pathWithin,
+    }),
+  ];
+  if (problems.length) {
+    for (const problem of problems) log.fatal(problem);
+    process.exit(EXIT_CONFIG);
+  }
+  if (CONFINE.enabled) log.info({ read: CONFINE.read, write: CONFINE.write, privateChannels: PRIVATE_CHANNELS }, "Confined: every run sees only its working directory and the memory it is given");
 }
 log.info({ runtime: RUNTIME.name, source: RUNTIME.source, bin: RUNTIME.bin, model: RUNTIME.model, ...(CODEX ? { version: RUNTIME.version } : {}) },
   `Runtime: ${RUNTIME.name} — every run of this bot uses it`);
@@ -1124,35 +1196,44 @@ function formatBufferLine(channelName, author, text, fileRefs) {
   return line;
 }
 
-function appendToBuffer(line) {
-  appendFileSync(BUFFER_FILE, line + "\n");
+// In private mode each channel keeps its own buffer (lib/private-channels.js);
+// `channelId` names it. Otherwise, and for a null channel, the one shared buffer.
+function bufferFileFor(channelId = null) {
+  return PRIVATE_CHANNELS && channelId ? memoryFor(String(channelId)).buffer : BUFFER_FILE;
 }
 
-function readBuffer() {
+function appendToBuffer(line, channelId = null) {
+  const file = bufferFileFor(channelId);
+  if (file !== BUFFER_FILE) mkdirSync(dirname(file), { recursive: true });
+  appendFileSync(file, line + "\n");
+}
+
+function readBuffer(channelId = null) {
   try {
-    return readFileSync(BUFFER_FILE, "utf8");
+    return readFileSync(bufferFileFor(channelId), "utf8");
   } catch {
     return "";
   }
 }
 
-function getBufferSize() {
+function getBufferSize(channelId = null) {
   try {
-    return statSync(BUFFER_FILE).size;
+    return statSync(bufferFileFor(channelId)).size;
   } catch {
     return 0;
   }
 }
 
-let rotating = false;
+const rotating = new Set();
 
-async function rotateBuffer() {
-  if (rotating) return;
-  if (getBufferSize() <= BUFFER_MAX_BYTES) return;
-  rotating = true;
+async function rotateBuffer(channelId = null) {
+  const file = bufferFileFor(channelId);
+  if (rotating.has(file)) return;
+  if (getBufferSize(channelId) <= BUFFER_MAX_BYTES) return;
+  rotating.add(file);
 
   try {
-    const content = readBuffer();
+    const content = readBuffer(channelId);
     const lines = content.split("\n").filter(Boolean);
     // Keep the newest 60%, summarize the oldest 40%
     const cutIndex = Math.floor(lines.length * (envInt("BUFFER_ROTATE_PERCENT", 40, { min: 1 }) / 100));
@@ -1167,7 +1248,10 @@ async function rotateBuffer() {
       try {
         const summary = await summarizeBufferLines(oldLines);
         const date = new Date().toISOString().split("T")[0];
-        writeSummary("buffer-rotation", date, oldLines.length, summary, null, "buffer-rotation");
+        // A private channel's rotation summary is stamped with that channel, so
+        // only it is shown the summary again.
+        const owner = file === BUFFER_FILE ? null : String(channelId);
+        writeSummary("buffer-rotation", date, oldLines.length, summary, owner, "buffer-rotation");
         rotLog.info({ date, lines: oldLines.length }, "Rotation summary saved");
       } catch (err) {
         rotLog.warn({ err: err.message }, "Failed to summarize during rotation, trimming anyway");
@@ -1175,25 +1259,25 @@ async function rotateBuffer() {
 
       // Clean up orphaned attachments
       const keepContent = keepLines.join("\n");
-      cleanOrphanedAttachments(keepContent);
+      cleanOrphanedAttachments(keepContent, file === BUFFER_FILE ? ATTACHMENTS_DIR : memoryFor(String(channelId)).attachments);
     }
 
     // Write back only the kept lines
-    writeFileSync(BUFFER_FILE, keepLines.join("\n") + "\n");
+    writeFileSync(file, keepLines.join("\n") + "\n");
   } finally {
-    rotating = false;
+    rotating.delete(file);
   }
 }
 
-function cleanOrphanedAttachments(bufferContent) {
+function cleanOrphanedAttachments(bufferContent, dir = ATTACHMENTS_DIR) {
   // A file drops out of the buffer long before the conversation about it ends —
   // the Claude session still holds its path and will Read it. Only reap files
   // older than the window the summaries cover.
   const minAgeMs = SUMMARY_LOOKBACK_HOURS * 3600000;
   try {
-    const files = readdirSync(ATTACHMENTS_DIR);
+    const files = readdirSync(dir);
     for (const file of files) {
-      const filePath = join(ATTACHMENTS_DIR, file);
+      const filePath = join(dir, file);
       if (bufferContent.includes(filePath)) continue;
       try {
         if (Date.now() - statSync(filePath).mtimeMs < minAgeMs) continue;
@@ -1236,6 +1320,7 @@ async function collectAttachments(msg) {
 
 async function recordMessage(msg) {
   const channelName = msg.channel.name || "DM";
+  const channelId = msg.channel.id;
   const author = msg.author.username || msg.author.tag;
   const text = msg.content || "";
 
@@ -1244,7 +1329,7 @@ async function recordMessage(msg) {
   const failures = [];
   for (const { attachment, messageId, source } of await collectAttachments(msg)) {
     try {
-      const savedPath = await downloadAttachmentPersistent(attachment, messageId);
+      const savedPath = await downloadAttachmentPersistent(attachment, messageId, channelId);
       fileRefs.push({
         name: attachment.name || "file",
         size: attachment.size || 0,
@@ -1265,17 +1350,17 @@ async function recordMessage(msg) {
   if (!text && fileRefs.length === 0) return { fileRefs, failures };
 
   const line = formatBufferLine(channelName, author, text, fileRefs);
-  appendToBuffer(line);
+  appendToBuffer(line, channelId);
 
   // Check if rotation needed (async, don't block)
-  if (getBufferSize() > BUFFER_MAX_BYTES) {
-    rotateBuffer().catch(err => log.warn({ err: err.message }, "Buffer rotation failed"));
+  if (getBufferSize(channelId) > BUFFER_MAX_BYTES) {
+    rotateBuffer(channelId).catch(err => log.warn({ err: err.message }, "Buffer rotation failed"));
   }
 
   return { fileRefs, failures };
 }
 
-function recordBotResponse(channelName, responseText) {
+function recordBotResponse(channelName, responseText, channelId = null) {
   if (!responseText || !responseText.trim()) return;
 
   let text = responseText.trim();
@@ -1286,7 +1371,7 @@ function recordBotResponse(channelName, responseText) {
 
   const botName = client ? (client.user ? (client.user.username || client.user.tag) : "Bot") : BOT_NAME;
   const line = formatBufferLine(channelName, botName, text, null);
-  appendToBuffer(line);
+  appendToBuffer(line, channelId);
 }
 
 // --- Persistent attachment handling ---
@@ -1312,7 +1397,7 @@ function isTextAttachment({ name = "", contentType = "" }) {
     || TEXT_EXTENSIONS.some(ext => n.endsWith(ext));
 }
 
-async function downloadAttachmentPersistent(attachment, messageId) {
+async function downloadAttachmentPersistent(attachment, messageId, channelId = null) {
   const { Readable } = require("stream");
   // attachment.name is user-controlled — strip separators so it cannot escape
   // ATTACHMENTS_DIR.
@@ -1323,7 +1408,10 @@ async function downloadAttachmentPersistent(attachment, messageId) {
   // silently handed back the FIRST file's contents for the second one. The bot
   // would describe two attachments and read one, with no error anywhere.
   // attachment.id is a Discord snowflake: unique per file, forever.
-  const savePath = join(ATTACHMENTS_DIR, `${attachment.id}-${safeName}`);
+  // In private mode a file lands in its channel's own folder.
+  const dir = PRIVATE_CHANNELS && channelId ? memoryFor(String(channelId)).attachments : ATTACHMENTS_DIR;
+  mkdirSync(dir, { recursive: true });
+  const savePath = join(dir, `${attachment.id}-${safeName}`);
 
   // Skip if already downloaded
   if (existsSync(savePath)) return savePath;
@@ -1678,11 +1766,12 @@ client?.on("messageCreate", async (msg) => {
   }
 
   if (prompt === "/status") {
-    const bufSize = getBufferSize();
-    const bufLines = readBuffer().split("\n").filter(Boolean).length;
+    // A private channel is told about its own buffer and files only.
+    const bufSize = getBufferSize(msg.channel.id);
+    const bufLines = readBuffer(msg.channel.id).split("\n").filter(Boolean).length;
     const running = activeProcesses.has(msg.channel.id);
     let attachCount = 0;
-    try { attachCount = readdirSync(ATTACHMENTS_DIR).length; } catch { /* ignore */ }
+    try { attachCount = readdirSync(memoryFor(msg.channel.id).attachments).length; } catch { /* ignore */ }
     await msg.reply(`Buffer: ${Math.round(bufSize / 1024)}KB / ${Math.round(BUFFER_MAX_BYTES / 1024)}KB (${bufLines} messages, ${attachCount} attachments)${running ? " — **running**" : ""}`);
     return;
   }
@@ -1727,7 +1816,7 @@ client?.on("messageCreate", async (msg) => {
     await sendQueue.flush();
 
     // Record bot's response to buffer
-    recordBotResponse(channelName, responseText);
+    recordBotResponse(channelName, responseText, msg.channel.id);
   } catch (err) {
     clearInterval(typing);
     // A failed run must not leave a "working..." message sitting there forever.
@@ -1813,7 +1902,7 @@ if (client && REACTION_HANDLER_ENABLED && ALLOWED_USER_IDS.length > 0) {
         progress
       );
       await sendQueue.flush();
-      recordBotResponse(channelName, responseText);
+      recordBotResponse(channelName, responseText, reaction.message.channel.id);
 
       try {
         await reaction.message.react(REACTION_ACK_EMOJI);
@@ -2010,14 +2099,15 @@ function loadRecentSummaries() {
   }
 }
 
-function buildContextPrompt(reqLog = log) {
+function buildContextPrompt(reqLog = log, channelId = null) {
   // Summaries used to be injected whole, all of them, for the entire lookback
   // window — the one input to the command line with no ceiling on it. Two busy
   // days put this past the kernel's 128KB single-argument limit and every fresh
   // session died with `spawn E2BIG`. Budget it. See lib/argv-budget.js.
   const result = budgetContext({
-    summaries: loadRecentSummaries(),
-    buffer: readBuffer(),
+    // A private channel is given its own summaries and buffer only.
+    summaries: PRIVATE_CHANNELS ? privateChannels.channelSummaries(loadRecentSummaries(), channelId) : loadRecentSummaries(),
+    buffer: readBuffer(channelId),
     maxBytes: CONTEXT_MAX_BYTES,
   });
 
@@ -2171,6 +2261,9 @@ async function runClaude(prompt, channelId, reqLog, sendMessage, attachments = {
   // channel starts fresh. Nor is a board session made under other access.
   const canResume = existingSession &&
     (existingSession.runtime || "claude") === RUNTIME.name &&
+    // A transcript lives in the home the run had: one made in another (shared
+    // vs. private, confined vs. open) cannot be found, so it is not resumed.
+    (existingSession.home || "") === runHome(channelId, opts) &&
     (!opts.noBufferContext || existingSession.access === opts.access) &&
     (Date.now() - existingSession.lastActivity) < SESSION_TIMEOUT_MS;
 
@@ -2223,7 +2316,9 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     });
     const timeContext = `\n\nCurrent time: ${now.toISOString()} (${localTime})`;
 
-    const channelContext = `${timeContext}\n\nYou are responding in channel: #${channelName}. Only respond to the message in THIS channel. The conversation buffer contains messages from multiple channels — focus only on #${channelName} context. Do NOT respond to or act on messages from other channels.`;
+    const channelContext = PRIVATE_CHANNELS
+      ? `${timeContext}\n\nYou are responding in channel: #${channelName}. This channel is private: everything you remember here comes from this channel alone.`
+      : `${timeContext}\n\nYou are responding in channel: #${channelName}. Only respond to the message in THIS channel. The conversation buffer contains messages from multiple channels — focus only on #${channelName} context. Do NOT respond to or act on messages from other channels.`;
 
     // This run's outbox. Per channel, so two concurrent runs cannot claim each
     // other's files (see channelOutbox).
@@ -2274,7 +2369,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     } else {
       // The buffer holds every channel's conversation. A run whose reply lands
       // somewhere else (a Paperclip board) must not see it.
-      const context = opts.noBufferContext ? "" : buildContextPrompt(reqLog);
+      const context = opts.noBufferContext ? "" : buildContextPrompt(reqLog, channelId);
       systemPrompt = context
         ? `${head}${basePrompt}${channelContext}${fileTransferContext}\n\n${context}`
         : `${head}${basePrompt}${channelContext}${fileTransferContext}`;
@@ -2319,8 +2414,15 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     // final here: Codex's shell exclusions come from the same decision, so no
     // variable is kept from commands by a list computed before it was written.
     const seatRun = opts.paperclipRun;
+    // The memory this run is given: in private mode, only its own channel's
+    // folder, its view of the bot's records rebuilt from them now.
+    const memScope = memoryScope(channelId, opts);
+    const memory = memoryFor(memScope);
+    if (PRIVATE_CHANNELS) {
+      privateChannels.writeView({ stateDir: STATE_DIR, key: memScope, historyDir: HISTORY_DIR, sessions: Object.fromEntries(channelSessions), jobHistoryFile: JOB_HISTORY_FILE });
+    }
     const built = runEnvFor(!opts.noBufferContext ? "session" : (narrowBoard ? "board" : "parity"), {
-      channelId, runOutbox, tmpDir: boardTmp,
+      channelId, runOutbox, tmpDir: boardTmp, memory,
       seat: seatRun?.runId ? { value: process.env[seatRun.keyEnv], runId: seatRun.runId } : null,
     });
     if (built.problems.length) {
@@ -2382,9 +2484,12 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     // (lib/attempts.js): the same binary, arguments, environment and
     // folder, its output on disk. A restarted bot follows the same attempt.
     // Every launch of it passes the poller's preflight first (opts.gate).
+    // Confined (lib/confine.js) when BOT_CONFINE=true: the run sees its working
+    // directory, its own memory and outbox, and nothing else of the host.
+    const launch = launchCommand(RUNTIME.bin, safeArgs, { memory, extraWrite: [runOutbox, boardTmp].filter(Boolean) });
     const child = opts.attempt
-      ? attempts.run(opts.attempt, { bin: RUNTIME.bin, args: safeArgs, cwd: CLAUDE_CWD, env: cleanEnv, timeoutMs: CLAUDE_TIMEOUT_MS, ownTmp: boardTmp, gate: opts.gate })
-      : spawn(RUNTIME.bin, safeArgs, {
+      ? attempts.run(opts.attempt, { bin: launch.bin, args: launch.args, cwd: CLAUDE_CWD, env: cleanEnv, timeoutMs: CLAUDE_TIMEOUT_MS, ownTmp: boardTmp, gate: opts.gate })
+      : spawn(launch.bin, launch.args, {
         cwd: CLAUDE_CWD,
         env: cleanEnv,
         stdio: ["ignore", "pipe", "pipe"],
@@ -2547,6 +2652,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
           // A session belongs to the runtime that made it; another cannot resume it.
           ...(CODEX ? { runtime: RUNTIME.name } : {}),
           ...(opts.access ? { access: opts.access } : {}),
+          ...(runHome(channelId, opts) ? { home: runHome(channelId, opts) } : {}),
         });
         saveSessions();
         reqLog.info({ sessionId: state.sessionId, code }, "Session stored for resume");
@@ -2732,6 +2838,7 @@ function summarizeBufferLines(lines) {
     timeoutMs: SUMMARIZE_TIMEOUT_MS,
     permissionArgs: permissionArgs("summarizer"),
     runtime: RUNTIME,
+    wrap: summarizerLaunch,
   });
 }
 
@@ -2824,6 +2931,7 @@ function summarizeWithClaude(channelName, date, messages) {
     timeoutMs: SUMMARIZE_TIMEOUT_MS,
     permissionArgs: permissionArgs("summarizer"),
     runtime: RUNTIME,
+    wrap: summarizerLaunch,
   });
 }
 
@@ -2896,7 +3004,20 @@ if (SUMMARIZE_INTERVAL_MS > 0 && !client) {
 // --- Scheduled jobs ---
 const SCHEDULE_CHECK_MS = envInt("BOT_SCHEDULE_CHECK_MS", 60_000, { min: 1000 }); // scheduler tick
 
+// In private mode each channel's jobs live in its own folder, the only file a
+// run in that channel can write; a job is taken only from its own channel's file.
+const droppedJobsLogged = new Set();
 function loadSchedules() {
+  if (PRIVATE_CHANNELS) {
+    const { jobs, dropped } = privateChannels.loadChannelSchedules(STATE_DIR);
+    for (const d of dropped) {
+      const k = `${d.file}:${d.id}`;
+      if (droppedJobsLogged.has(k)) continue;
+      droppedJobsLogged.add(k);
+      log.warn(d, "Scheduled job ignored: it names a channel other than the one whose file holds it");
+    }
+    return jobs;
+  }
   try {
     return JSON.parse(readFileSync(SCHEDULES_FILE, "utf8"));
   } catch {
@@ -2905,6 +3026,7 @@ function loadSchedules() {
 }
 
 function saveSchedules(schedules) {
+  if (PRIVATE_CHANNELS) return privateChannels.saveChannelSchedules(STATE_DIR, schedules);
   writeFileSync(SCHEDULES_FILE, JSON.stringify(schedules, null, 2) + "\n");
 }
 
@@ -3035,6 +3157,8 @@ function recordJobExecution(job, startTime, durationMs, success, error) {
     firedAt: new Date().toISOString(),
     durationMs,
     success,
+    // The channel the job ran for: a private channel's view keeps only its own rows.
+    ...(job.channel ? { channel: job.channel } : {}),
     ...(error ? { error } : {}),
   };
   try {

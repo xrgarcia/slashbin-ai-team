@@ -315,6 +315,17 @@ For Claude and Codex differences, read [runtimes.md](docs/runtimes.md).
 | `BUFFER_ROTATE_PERCENT` | `40` | Oldest N% summarized away on rotation |
 | `BUFFER_TRUNCATE_RESPONSE` | `500` | Chars of each reply kept in the buffer |
 
+### Confinement and private channels
+For a bot that serves people who must not see each other's work. Both are off unless set; a bot that sets neither runs exactly as before.
+
+| Variable | Default | Description |
+|---|---|---|
+| `BOT_CONFINE` | `false` | `true`: every agent process the bot starts (each run and each summary) runs inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox that holds only its working directory, its memory, the system folders, and the agent and Node installs. The host user's home is replaced by a home of the bot's own; only the CLI sign-in is carried in. This covers the agent's Read, Grep and Glob tools as well as its shell, which Claude Code's own sandbox does not: a file outside the fence does not exist for either. A host where bubblewrap cannot run refuses to start the bot. Not supported with `BOT_RUNTIME=codex` |
+| `BOT_CONFINE_READ` | *(none)* | Comma-separated absolute paths a confined run may read: an MCP server's install folder, a shared reference folder. The skill pack and the MCP and settings files the bot is configured with are added already |
+| `BOT_CONFINE_WRITE` | *(none)* | Comma-separated absolute paths a confined run may also write |
+| `BOT_CONFINE_BWRAP` | `bwrap` | The bubblewrap binary |
+| `BOT_PRIVATE_CHANNELS` | `false` | `true`: each channel's buffer, uploads, scheduled jobs, session transcripts and summaries are kept in a folder of its own (`BOT_STATE_DIR/channels/<id>`), and a run is given only its own channel's. A summary is shown only to the channel stamped in its header. A job is run only from its own channel's file, so a run cannot schedule into another channel. Requires `BOT_CONFINE=true`, and `BOT_HISTORY_DIR`, `BOT_STATE_DIR` and `BOT_ATTACHMENTS_DIR` outside `CLAUDE_CWD` (every run sees its working directory whole); otherwise the bot refuses to start. The working directory itself is shared by every channel: anything a run writes there, every channel can read |
+
 ### Files
 | Variable | Default | Description |
 |---|---|---|

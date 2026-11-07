@@ -262,9 +262,14 @@ check("a board run drops every memory variable and denies the path each one name
   // so a new store published to Discord runs cannot be left open to board runs.
   const paths = src.match(/function privateMemoryPaths\(\) \{\s*return \[([^\]]+)\]/)[1].split(",").map((x) => x.trim());
   assert.deepStrictEqual(paths, PRIVATE_MEMORY_ENV.map((name) => {
-    const m = src.match(new RegExp(`\\b${name}: (\\w+),`));
+    const m = src.match(new RegExp(`\\b${name}: (memory\\.)?(\\w+),`));
     assert.ok(m, `${name} is no longer published — update PRIVATE_MEMORY_ENV`);
-    return m[1];
+    if (!m[1]) return m[2];
+    // Published from memoryFor(): the shared (non-private) branch names the path.
+    const shared = src.match(/function memoryFor\(scope\) \{\s*if \(!PRIVATE_CHANNELS\) \{\s*return \{([^}]+)\}/)[1];
+    const f = shared.match(new RegExp(`\\b${m[2]}: (\\w+)`));
+    assert.ok(f, `memoryFor() no longer names ${m[2]}`);
+    return f[1];
   }));
   // Published by the harness, and still withheld from a board run by the builder.
   const published = Object.fromEntries(PRIVATE_MEMORY_ENV.map((name) => [name, `/state/${name}`]));
