@@ -157,6 +157,24 @@ check("saving never erases a pre-group file: it stays byte for byte and loads ag
   assert.deepStrictEqual(pc.loadChannelSchedules(st).jobs.map((j) => j.id).sort(), ["other", "pre-group"], "groups off: the pre-group job did not come back");
 });
 
+check("a consumed wake in a group file is removed on save and the outside-scope row is kept: it runs once over two ticks", () => {
+  const st = join(root, "sched4");
+  const g = pc.channelGroups('{"hank":["111","222"]}', { enabled: true });
+  const f = join(st, "channels", "group_hank", "jobs", "schedules.json");
+  mkdirSync(join(st, "channels", "group_hank", "jobs"), { recursive: true });
+  writeFileSync(f, JSON.stringify([{ id: "wake", channel: "111", once: true }, { id: "pre", channel: "333" }]));
+  let ran = 0;
+  const tick = () => {
+    const { jobs } = pc.loadChannelSchedules(st, g.scopeOf);
+    const due = jobs.filter((j) => j.id === "wake");
+    ran += due.length;
+    pc.saveChannelSchedules(st, jobs.filter((j) => j.id !== "wake"), g.scopeOf); // the consumed one-shot is removed
+  };
+  tick(); tick();
+  assert.strictEqual(ran, 1, "the consumed wake fired again");
+  assert.deepStrictEqual(JSON.parse(readFileSync(f, "utf8")), [{ id: "pre", channel: "333" }], "the outside-scope row was lost or the wake stayed");
+});
+
 check("membership is built linearly: a repeat inside a group appears once, two groups still refused", () => {
   assert.deepStrictEqual(pc.channelGroups('{"a":["1","1","2"]}', { enabled: true }).members("group_a"), ["1", "2"]);
   assert.ok(pc.channelGroups('{"a":["1"],"b":["1"]}', { enabled: true }).problems.length === 1);
