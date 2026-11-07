@@ -201,6 +201,7 @@ function seat({ c = clock(), whoami = async () => ME } = {}) {
     const fetch = async (url) => {
       const path = url.replace(/^.*\/api/, "");
       if (path === "/agents/me") return { ok: true, text: async () => JSON.stringify(ME) };
+      if (path.startsWith("/companies/co-1/issues?")) return { ok: true, text: async () => "[]" };
       if (path === "/agents/me/inbox-lite") {
         inboxReads++;
         if (inboxReads === 1) await gate;
@@ -214,12 +215,13 @@ function seat({ c = clock(), whoami = async () => ME } = {}) {
     await tickOf();
     await poller.tick("heartbeat.run.queued");
     await poller.tick("heartbeat.run.status");
-    assert.strictEqual(inboxReads, 1, "nothing runs alongside the running tick");
+    // Each tick asked for while one runs reads the inbox once for the routine lane only.
+    assert.strictEqual(inboxReads, 3, "the serial lane's read, and one routine-lane read per request");
     release();
     await first;
-    assert.strictEqual(inboxReads, 2, "the owed tick ran once, not once per request");
+    assert.strictEqual(inboxReads, 4, "the owed tick ran once, not once per request");
     await poller.tick("poll");
-    assert.strictEqual(inboxReads, 3);
+    assert.strictEqual(inboxReads, 5);
     assert.deepStrictEqual(await poller.whoami(), ME);
   });
 

@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A Paperclip routine's card no longer waits behind a long card.** Board
+  cards are still worked one at a time, and the poll timer no longer waits for
+  that card to end. Cards a routine opened (`originKind` `routine_execution`,
+  read with the board's own filter) are worked in a lane of their own, up to two
+  at once, picked up on the next poll whatever the serial lane is doing. A card
+  is held while a handler has it, so no card is handled twice. A daily
+  routine's 8:00 card was 25 minutes late behind a decomposition card
+  (xrgarcia/slashbin-engineering-manager#453).
+
 ### Added
 
 - **An ask only a person can decide reaches them on Discord, and a bare "yes"
