@@ -1,13 +1,12 @@
 /**
  * Paperclip — a routine's card has a lane of its own. Ordinary cards are
  * worked one at a time and one can run for most of an hour; the daily routine
- * card behind it waited 25 minutes (xrgarcia/slashbin-engineering-manager#453,
- * 2026-11-07). Cards a routine opened (originKind routine_execution) are worked
+ * card behind it waited 25 minutes (2026-11-07). Cards a routine opened (originKind routine_execution) are worked
  * beside the serial lane, a few at once, and no card is ever held by two
  * handlers.
  */
 const assert = require("assert");
-const { mkdtempSync } = require("fs");
+const { mkdtempSync, readFileSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
 const { createPaperclipPoller } = require("../lib/paperclip");
@@ -64,14 +63,14 @@ function board(cards, { routineFilter = true } = {}) {
 function gate() {
   const started = [], releases = new Map();
   let concurrent = 0, peak = 0, twice = 0;
-  const answer = (_, issue) => new Promise((resolve) => {
+  const answer = (_, issue) => new Promise((resolve, reject) => {
     if (started.includes(issue.identifier)) twice++;
     started.push(issue.identifier); concurrent++; peak = Math.max(peak, concurrent);
-    releases.set(issue.identifier, () => { concurrent--; resolve("done"); });
+    releases.set(issue.identifier, (refuse) => { concurrent--; refuse ? reject(Object.assign(new Error("limit"), { refusal: { reason: "usage limit" } })) : resolve("done"); });
   });
-  return { answer, started, release: (id) => releases.get(id)(), get peak() { return peak; }, get twice() { return twice; } };
+  return { answer, started, release: (id) => releases.get(id)(), refuse: (id) => releases.get(id)(true), get peak() { return peak; }, get twice() { return twice; } };
 }
-const poller = (b, g) => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile: join(mkdtempSync(join(tmpdir(), "pc-")), "s.json"),
+const poller = (b, g, stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json")) => createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile,
   answer: g.answer, log: silent, fetch: b.fetch });
 
 (async () => {
@@ -144,6 +143,42 @@ const poller = (b, g) => createPaperclipPoller({ url: "https://board.example.com
     g.release("SLA-2"); await t; await p.idle();
     assert.strictEqual(g.peak, 1);
     assert.strictEqual(g.twice, 0);
+  });
+
+  await check("a refusal on one card leaves the other card's saved state and its answer alone", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pc-")), file = join(dir, "s.json");
+    // A ordinary completes, then B (routine) is refused: A's completion records stay saved.
+    const g = gate(), b = board([{ n: 1 }, { n: 2, routine: true }]);
+    const p = poller(b, g, file);
+    const first = p.tick("poll"); await settle();
+    g.release("SLA-1"); await settle();
+    g.refuse("SLA-2"); await first; await p.idle();
+    const saved = JSON.parse(readFileSync(file, "utf8"));
+    assert.ok(saved.handledRuns.includes("r1"), "A's handled run survived B's rollback");
+    assert.ok(saved.answeredAsks.some((k) => k.startsWith("c-1:")), "A's answered ask survived B's rollback");
+    assert.strictEqual(b.state.get(1).card.status, "done");
+
+    // A refused while B is active: B keeps its pending state and its answer closes the card.
+    const file2 = join(dir, "s2.json");
+    const g2 = gate(), b2 = board([{ n: 1 }, { n: 2, routine: true }]);
+    const p2 = poller(b2, g2, file2);
+    const t = p2.tick("poll"); await settle();
+    g2.refuse("SLA-1"); await settle();
+    const mid = JSON.parse(readFileSync(file2, "utf8"));
+    assert.ok(Object.keys(mid.pendingReplies).some((k) => k.startsWith("c-2:")), "B's pending reply survived A's rollback");
+    g2.release("SLA-2"); await t; await p2.idle();
+    assert.strictEqual(b2.state.get(2).card.status, "done", "B's answer closed its card");
+  });
+
+  await check("a refusal stops the cards queued behind it in both lanes", async () => {
+    const g = gate();
+    const p = poller(board([{ n: 1 }, { n: 2 }, { n: 3, routine: true }, { n: 4, routine: true }, { n: 5, routine: true }]), g);
+    const first = p.tick("poll"); await settle();
+    assert.deepStrictEqual(g.started.sort(), ["SLA-1", "SLA-3", "SLA-4"]);
+    g.refuse("SLA-3"); await settle();
+    g.release("SLA-4"); g.release("SLA-1"); await settle();
+    assert.deepStrictEqual(g.started.sort(), ["SLA-1", "SLA-3", "SLA-4"], "neither SLA-2 nor SLA-5 started during the backoff");
+    await first; await p.idle();
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);
