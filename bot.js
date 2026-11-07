@@ -9,7 +9,7 @@ const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
-const { buildRunEnv, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
+const { buildRunEnv, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, discordCredential, MIN_CREDENTIAL_CHARS, expand: expandPath } = require("./lib/permission-mode");
 const { resolveConfine, confineCommand, confineProblems, readWithin, within: pathWithin, real: realPath } = require("./lib/confine");
 const privateChannels = require("./lib/private-channels");
 const { isNothingToReport } = require("./lib/nothing-to-report");
@@ -693,6 +693,19 @@ function confineConfigFiles() {
   }
   return files;
 }
+// The text of every config a run is handed: each inline one, each file, and the
+// repo's own .mcp.json, which the CLI loads from the working directory.
+function configSources() {
+  const out = [];
+  for (const [name, v] of [["MCP_CONFIG", process.env.MCP_CONFIG], ["MCP_CONFIG_EXTRA", process.env.MCP_CONFIG_EXTRA], ["BOT_SETTINGS", process.env.BOT_SETTINGS]]) {
+    const s = String(v || "").trim();
+    if (s.startsWith("{")) out.push({ name, text: s });
+  }
+  for (const f of [...confineConfigFiles(), join(CLAUDE_CWD, ".mcp.json")]) {
+    try { out.push({ name: f, text: readFileSync(f, "utf8") }); } catch { /* absent */ }
+  }
+  return out;
+}
 
 // --- Exit codes ---
 // A process manager restarts on failure, which is right for a crash and wrong for
@@ -785,6 +798,7 @@ if (RUNTIME.problems.length) {
       historyDir: realPath(HISTORY_DIR), stateDir: realPath(STATE_DIR), attachmentsDir: realPath(ATTACHMENTS_DIR),
       within: pathWithin,
     }),
+    ...(PRIVATE_CHANNELS ? privateChannels.configCredentialProblems(configSources(), process.env, discordCredential, MIN_CREDENTIAL_CHARS) : []),
   ];
   if (problems.length) {
     for (const problem of problems) log.fatal(problem);
@@ -1220,23 +1234,30 @@ function bufferFileFor(channelId = null) {
   return PRIVATE_CHANNELS && channelId ? memoryFor(String(channelId)).buffer : BUFFER_FILE;
 }
 
+// A channel's own buffer is never read or written through a link
+// (lib/private-channels.js readOwn/appendOwn/writeOwn).
 function appendToBuffer(line, channelId = null) {
   const file = bufferFileFor(channelId);
-  if (file !== BUFFER_FILE) mkdirSync(dirname(file), { recursive: true });
-  appendFileSync(file, line + "\n");
+  if (file === BUFFER_FILE) return appendFileSync(file, line + "\n");
+  mkdirSync(dirname(file), { recursive: true });
+  privateChannels.appendOwn(file, line + "\n");
 }
 
 function readBuffer(channelId = null) {
+  const file = bufferFileFor(channelId);
+  if (file !== BUFFER_FILE) return privateChannels.readOwn(file);
   try {
-    return readFileSync(bufferFileFor(channelId), "utf8");
+    return readFileSync(file, "utf8");
   } catch {
     return "";
   }
 }
 
 function getBufferSize(channelId = null) {
+  const file = bufferFileFor(channelId);
+  if (file !== BUFFER_FILE) return privateChannels.sizeOwn(file);
   try {
-    return statSync(bufferFileFor(channelId)).size;
+    return statSync(file).size;
   } catch {
     return 0;
   }
@@ -1281,7 +1302,8 @@ async function rotateBuffer(channelId = null) {
     }
 
     // Write back only the kept lines
-    writeFileSync(file, keepLines.join("\n") + "\n");
+    if (file === BUFFER_FILE) writeFileSync(file, keepLines.join("\n") + "\n");
+    else privateChannels.writeOwn(file, keepLines.join("\n") + "\n");
   } finally {
     rotating.delete(file);
   }

@@ -174,5 +174,59 @@ check("folder names cannot climb out of channels/", () => {
   assert.ok(!pc.channelPaths("/s", "../x").dir.includes(".."));
 });
 
+console.log("\nPrivate channels — no config a run is handed carries the Discord login");
+
+{
+  const { discordCredential, MIN_CREDENTIAL_CHARS } = require("../lib/permission-mode");
+  const vars = { DISCORD_TOKEN: "abc.def.SECRETVALUE", OTHER: "abc.def.SECRETVALUE2" };
+  const probe = (text) => pc.configCredentialProblems([{ name: "mcp.json", text }], vars, discordCredential, MIN_CREDENTIAL_CHARS);
+
+  check("a config that names a Discord credential is refused", () => {
+    assert.strictEqual(probe('{"mcpServers":{"x":{"env":{"PO_DISCORD_TOKEN":"${PO_DISCORD_TOKEN}"}}}}').length, 1);
+  });
+  check("a config that holds the login's value under any name is refused", () => {
+    assert.strictEqual(probe('{"mcpServers":{"x":{"env":{"T":"abc.def.SECRETVALUE"}}}}').length, 1);
+  });
+  check("a clean config passes", () => {
+    assert.deepStrictEqual(probe('{"mcpServers":{"x":{"command":"node"}}}'), []);
+  });
+  check("the bot checks every config at startup in private mode", () => {
+    assert.ok(/privateChannels\.configCredentialProblems\(configSources\(\), process\.env, discordCredential, MIN_CREDENTIAL_CHARS\)/.test(bot));
+    assert.ok(/join\(CLAUDE_CWD, "\.mcp\.json"\)/.test(bot));
+  });
+}
+
+console.log("\nPrivate channels — the bot's own files are never used through a link");
+
+check("a buffer linked to another channel's is left untouched; reading it gives nothing", () => {
+  const state = tmp();
+  const a = pc.channelPaths(state, "A"), b = pc.channelPaths(state, "B");
+  mkdirSync(a.dir, { recursive: true }); mkdirSync(b.dir, { recursive: true });
+  writeFileSync(b.buffer, "B-PRIVATE\n");
+  symlinkSync(b.buffer, a.buffer);
+  assert.strictEqual(pc.readOwn(a.buffer), "");
+  assert.strictEqual(pc.sizeOwn(a.buffer), 0);
+  pc.appendOwn(a.buffer, "from A\n");
+  assert.strictEqual(readFileSync(b.buffer, "utf8"), "B-PRIVATE\n");
+  assert.ok(lstatSync(a.buffer).isFile(), "the link was not replaced");
+  pc.writeOwn(a.buffer, "kept\n");
+  assert.strictEqual(readFileSync(b.buffer, "utf8"), "B-PRIVATE\n");
+});
+
+check("a view folder that has become a link is refused", () => {
+  const state = tmp(), elsewhere = tmp();
+  const p = pc.channelPaths(state, "A");
+  mkdirSync(p.dir, { recursive: true });
+  symlinkSync(elsewhere, p.view);
+  assert.throws(() => pc.writeView({ stateDir: state, key: "A", historyDir: tmp(), sessions: {}, jobHistoryFile: join(state, "none") }), /not a plain folder/);
+});
+
+check("the bot's buffer functions go through the link-safe helpers", () => {
+  assert.ok(/privateChannels\.appendOwn\(file/.test(bot));
+  assert.ok(/privateChannels\.readOwn\(file\)/.test(bot));
+  assert.ok(/privateChannels\.sizeOwn\(file\)/.test(bot));
+  assert.ok(/privateChannels\.writeOwn\(file, keepLines/.test(bot));
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
