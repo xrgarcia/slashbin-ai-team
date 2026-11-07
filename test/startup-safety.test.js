@@ -431,7 +431,7 @@ check("restricted sessions deny what is not pre-approved, so MCP tools are gated
   const guarded = /function permissionArgs[\s\S]*?\n}/.exec(bot)[0];
   assert.ok((guarded.match(/"dontAsk"/g) || []).length >= 1,
     "the restricted session path must run in dontAsk");
-  assert.ok(/"--allowedTools", attachmentReadRule\(ATTACHMENTS_DIR\),\s*\.\.\.\(PERMISSION_ALLOW \? \[PERMISSION_ALLOW\]/.test(guarded),
+  assert.ok(/"--allowedTools", attachmentReadRule\(attachmentsDir\),\s*\.\.\.\(PERMISSION_ALLOW \? \[PERMISSION_ALLOW\]/.test(guarded),
     "BOT_PERMISSION_ALLOW must reach --allowedTools, after the uploads-folder rule");
   assert.ok(!/"--allowedTools"/.test(bot.replace(guarded, "")),
     "--allowedTools outside permissionArgs() restricts nothing without dontAsk");

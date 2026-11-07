@@ -5,12 +5,12 @@
  * without bubblewrap skips the live checks and says so; the argument checks run
  * everywhere.
  */
-const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } = require("fs");
+const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync } = require("fs");
 const { join } = require("path");
 const os = require("os");
 const { spawnSync } = require("child_process");
 const assert = require("assert");
-const { resolveConfine, confineCommand, confineProblems } = require("../lib/confine");
+const { resolveConfine, confineCommand, confineProblems, readWithin } = require("../lib/confine");
 
 let passed = 0, failed = 0;
 function check(name, fn) {
@@ -63,6 +63,37 @@ check("a session is resumed only from the home it was made in", () => {
   assert.ok(/\(existingSession\.home \|\| ""\) === runHome\(channelId, opts\)/.test(bot));
 });
 
+console.log("\nConfinement — a file handed back must be one the run could read");
+
+{
+  const root = mkdtempSync(join(os.tmpdir(), "deliver-"));
+  const fence = join(root, "fence"), outside = join(root, "outside");
+  mkdirSync(fence); mkdirSync(outside);
+  writeFileSync(join(fence, "report.csv"), "ok");
+  writeFileSync(join(outside, "secret.txt"), "OTHER-CHANNEL");
+  symlinkSync(join(outside, "secret.txt"), join(fence, "looks-local.csv"));
+
+  check("a file inside the fence is read and handed back as bytes", () => {
+    const r = readWithin(join(fence, "report.csv"), [fence], 1000);
+    assert.ok(r.ok && r.data.toString() === "ok");
+  });
+  check("a path outside the fence is refused, whatever the reply names", () => {
+    assert.strictEqual(readWithin(join(outside, "secret.txt"), [fence], 1000).ok, false);
+  });
+  check("a link inside the fence pointing out of it is refused", () => {
+    assert.strictEqual(readWithin(join(fence, "looks-local.csv"), [fence], 1000).ok, false);
+  });
+  check("a folder or an oversized file is not sent", () => {
+    assert.strictEqual(readWithin(fence, [root], 1000).reason, "not a file");
+    assert.strictEqual(readWithin(join(fence, "report.csv"), [fence], 1).reason, "too large");
+  });
+  check("the bot sends what it read, and only through the fence when confined", () => {
+    assert.ok(/const r = readWithin\(f, fence, MAX_OUTBOUND_BYTES\)/.test(bot));
+    assert.ok(/file: \{ attachment: r\.data, name: basename\(f\) \}/.test(bot));
+    assert.ok(/activeProcesses\.size === 0 && !CONFINE\.enabled/.test(bot));
+  });
+}
+
 const live = confineProblems({ enabled: true, problems: [], bwrap: "bwrap" }).length === 0;
 console.log(`\nConfinement — measured inside bubblewrap${live ? "" : " (SKIPPED: bwrap cannot run on this host)"}`);
 
@@ -109,6 +140,29 @@ if (live) {
     const r = run(`echo x > ${chanA}/note && echo y > ${cwd}/out && echo z > ${root}/escape; echo done`);
     assert.ok(existsSync(join(chanA, "note")) && existsSync(join(cwd, "out")), r.stderr);
     assert.ok(!existsSync(join(root, "escape")), "wrote outside its fence");
+  });
+
+  check("a private channel's folder is read-only to the run except its jobs folder", () => {
+    mkdirSync(join(chanA, "jobs"), { recursive: true });
+    const c = confineCommand({
+      bin: "/bin/sh", args: ["-c", `cat ${chanA}/buffer.txt; ln -s /etc/passwd ${chanA}/planted; echo j > ${chanA}/jobs/schedules.json; echo done`],
+      cwd, home: join(chanA, "home"), read: [chanA], write: [join(chanA, "jobs")], hostHome,
+    });
+    const r = spawnSync(c.bin, c.args, { encoding: "utf8", timeout: 20000 });
+    assert.ok(/A-SECRET/.test(r.stdout), r.stderr);
+    assert.ok(!existsSync(join(chanA, "planted")), "planted a link in the bot's part of the channel");
+    assert.ok(existsSync(join(chanA, "jobs", "schedules.json")), "could not write its jobs");
+  });
+
+  check("the shared sign-in cannot be changed from inside", () => {
+    const r = run(`echo HACKED > ${hostHome}/.claude/.credentials.json; echo done`);
+    assert.strictEqual(readFileSync(join(hostHome, ".claude", ".credentials.json"), "utf8"), "{}", r.stderr);
+  });
+
+  check("a home that has become a link is refused, not bound", () => {
+    const linked = join(root, "linked-home");
+    symlinkSync(hostHome, linked);
+    assert.throws(() => confineCommand({ bin: "/bin/sh", args: [], cwd, home: linked, write: [], hostHome }), /not a plain folder/);
   });
 
   check("Node runs inside it (MCP servers and hooks start with it)", () => {

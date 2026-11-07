@@ -131,7 +131,7 @@ check("the job is claimed BEFORE it runs, not after", () => {
   // it. Claiming afterwards would leave a window where a restart re-fires it —
   // and would let the minute tick and an early signal both fire the same job.
   const fn = bot.slice(bot.indexOf("async function runWakeJob("), bot.indexOf("async function runScheduledJobs("));
-  const claimedAt = fn.indexOf("if (!claimWakeJob(job.id)) return false;");
+  const claimedAt = fn.indexOf("if (!claimWakeJob(job)) return false;");
   const ranAt = fn.indexOf("await runClaude(");
   assert.ok(claimedAt > -1, "the pre-run claim moved or changed shape");
   assert.ok(claimedAt < ranAt, "a wake job must be claimed before its run starts, or a crash re-fires it");
@@ -145,7 +145,7 @@ check("a tick never saves a stale copy of the schedules file", () => {
   const body = fn.slice(0, fn.indexOf("\n}\n"));
   assert.doesNotMatch(body, /saveSchedules\(/,
     "the scheduler loop writes the file directly — it must go through the reload-first helpers");
-  assert.match(bot, /function removeScheduledJob\(id\) \{\s*saveSchedules\(loadSchedules\(\)/,
+  assert.match(bot, /function removeScheduledJob\(job\) \{\s*saveSchedules\(loadSchedules\(\)/,
     "removeScheduledJob must re-read the file before writing it");
 });
 

@@ -2,7 +2,7 @@
  * Private channels (lib/private-channels.js): what one channel says, uploads or
  * schedules is given to that channel's runs and to no other's.
  */
-const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync } = require("fs");
+const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, symlinkSync, lstatSync } = require("fs");
 const { join } = require("path");
 const os = require("os");
 const assert = require("assert");
@@ -61,8 +61,8 @@ console.log("\nPrivate channels — schedules");
 
 check("a job is taken only from its own channel's file", () => {
   const state = tmp();
-  mkdirSync(join(state, "channels", "111"), { recursive: true });
-  writeFileSync(join(state, "channels", "111", "schedules.json"), JSON.stringify([
+  mkdirSync(join(state, "channels", "111", "jobs"), { recursive: true });
+  writeFileSync(join(state, "channels", "111", "jobs", "schedules.json"), JSON.stringify([
     { id: "mine", channel: "111" },
     { id: "planted", channel: "222" },
   ]));
@@ -73,18 +73,82 @@ check("a job is taken only from its own channel's file", () => {
 
 check("saving writes each job to its own channel, and empties a channel left with none", () => {
   const state = tmp();
-  mkdirSync(join(state, "channels", "333"), { recursive: true });
-  writeFileSync(join(state, "channels", "333", "schedules.json"), JSON.stringify([{ id: "gone", channel: "333" }]));
+  mkdirSync(join(state, "channels", "333", "jobs"), { recursive: true });
+  writeFileSync(join(state, "channels", "333", "jobs", "schedules.json"), JSON.stringify([{ id: "gone", channel: "333" }]));
   pc.saveChannelSchedules(state, [{ id: "a", channel: "111" }, { id: "b", channel: "222" }]);
-  const read = (k) => JSON.parse(readFileSync(join(state, "channels", k, "schedules.json"), "utf8")).map((j) => j.id);
+  const read = (k) => JSON.parse(readFileSync(join(state, "channels", k, "jobs", "schedules.json"), "utf8")).map((j) => j.id);
   assert.deepStrictEqual(read("111"), ["a"]);
   assert.deepStrictEqual(read("222"), ["b"]);
   assert.deepStrictEqual(read("333"), []);
 });
 
 check("the bot loads and saves through the per-channel files in private mode", () => {
-  assert.ok(/if \(PRIVATE_CHANNELS\) \{\s*const \{ jobs, dropped \} = privateChannels\.loadChannelSchedules\(STATE_DIR\)/.test(bot));
+  assert.ok(/if \(PRIVATE_CHANNELS\) \{\s*const \{ jobs, dropped, problems \} = privateChannels\.loadChannelSchedules\(STATE_DIR\)/.test(bot));
   assert.ok(/if \(PRIVATE_CHANNELS\) return privateChannels\.saveChannelSchedules\(STATE_DIR, schedules\)/.test(bot));
+});
+
+check("a schedule file that is a link is not read through", () => {
+  const state = tmp(), outside = tmp();
+  writeFileSync(join(outside, "x.json"), JSON.stringify([{ id: "via-link", channel: "111" }]));
+  mkdirSync(join(state, "channels", "111", "jobs"), { recursive: true });
+  symlinkSync(join(outside, "x.json"), join(state, "channels", "111", "jobs", "schedules.json"));
+  const { jobs, problems } = pc.loadChannelSchedules(state);
+  assert.deepStrictEqual(jobs, []);
+  assert.strictEqual(problems.length, 1);
+});
+
+check("saving replaces a planted link instead of writing through it", () => {
+  const state = tmp(), outside = tmp();
+  const target = join(outside, "victim");
+  writeFileSync(target, "UNTOUCHED");
+  mkdirSync(join(state, "channels", "111", "jobs"), { recursive: true });
+  const f = join(state, "channels", "111", "jobs", "schedules.json");
+  symlinkSync(target, f);
+  pc.saveChannelSchedules(state, [{ id: "a", channel: "111" }]);
+  assert.strictEqual(readFileSync(target, "utf8"), "UNTOUCHED");
+  assert.ok(!lstatSync(f).isSymbolicLink());
+});
+
+check("a view is refused when a channel folder the bot writes has become a link", () => {
+  const state = tmp(), hist = tmp(), outside = tmp();
+  mkdirSync(join(state, "channels", "111"), { recursive: true });
+  symlinkSync(outside, join(state, "channels", "111", "home"));
+  assert.throws(() => pc.writeView({ stateDir: state, key: "111", historyDir: hist, sessions: {}, jobHistoryFile: "/none" }), /not a plain folder/);
+});
+
+check("a run may write only its jobs folder; the rest of its channel it reads", () => {
+  assert.ok(/read: \[p\.dir\], write: \[p\.jobs\] \}/.test(bot));
+});
+
+check("a job is matched by id AND channel when removed, stamped or claimed", () => {
+  assert.ok(/const sameJob = \(a, b\) => a\.id === b\.id && String\(a\.channel \?\? ""\) === String\(b\.channel \?\? ""\)/.test(bot));
+  for (const f of ["removeScheduledJob", "stampLastRun", "claimWakeJob"]) {
+    const body = new RegExp(`function ${f}\\([\\s\\S]*?\\n}`).exec(bot)[0];
+    assert.ok(/sameJob\(/.test(body) && !/\.id === /.test(body), `${f} still matches by id alone`);
+  }
+  assert.ok(!/(removeScheduledJob|stampLastRun|claimWakeJob)\(job\.id/.test(bot));
+});
+
+console.log("\nPrivate channels — what a run is handed");
+
+check("a private bot's runs never get its Discord login or bridge token", () => {
+  const { buildRunEnv } = require("../lib/permission-mode");
+  const vars = { PATH: "/usr/bin", HOME: "/h", DISCORD_TOKEN: "discord-secret-value-123456", BRIDGE_TOKEN: "bridge-secret-value-123456" };
+  const base = { env: vars, runtime: "claude", mode: "restricted", run: "session" };
+  const handed = (built) => JSON.stringify(built.env);
+  assert.ok(/discord-secret/.test(handed(buildRunEnv(base))), "control: an internal bot's session run keeps it");
+  assert.ok(!/discord-secret|bridge-secret/.test(handed(buildRunEnv({ ...base, withholdDiscord: true }))), "a private run was handed a Discord credential");
+  assert.ok(/withholdDiscord: PRIVATE_CHANNELS/.test(bot));
+});
+
+check("a private bot's bridge opens only with a token, and a handshake must carry it", () => {
+  assert.ok(/const wss = BRIDGE_NEEDS_TOKEN && !BRIDGE_TOKEN \? null/.test(bot));
+  assert.ok(/if \(BRIDGE_NEEDS_TOKEN && !bridgeTokenMatches\(msg\.token, BRIDGE_TOKEN\)\)/.test(bot));
+});
+
+check("a restricted run may read its own channel's uploads", () => {
+  assert.ok(/\.\.\.permissionArgs\(runKind, memory\.attachments\)/.test(bot));
+  assert.ok(/readDirs: \[memory\.attachments\]/.test(bot));
 });
 
 console.log("\nPrivate channels — refused unless the guarantee holds");

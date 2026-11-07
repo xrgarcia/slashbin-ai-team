@@ -10,12 +10,12 @@ const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
 const { buildRunEnv, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, expand: expandPath } = require("./lib/permission-mode");
-const { resolveConfine, confineCommand, confineProblems, within: pathWithin, real: realPath } = require("./lib/confine");
+const { resolveConfine, confineCommand, confineProblems, readWithin, within: pathWithin, real: realPath } = require("./lib/confine");
 const privateChannels = require("./lib/private-channels");
 const { isNothingToReport } = require("./lib/nothing-to-report");
 const { isNonReply, nonReplyCorrection } = require("./lib/non-reply");
 const { isWakeJob, buildWakePrompt } = require("./lib/wake");
-const { signalRefusal, normalizeSignal } = require("./lib/bridge-signal");
+const { signalRefusal, normalizeSignal, tokenMatches: bridgeTokenMatches } = require("./lib/bridge-signal");
 const { createOwnerAsks, announceAsk, answerAsk, routeReply, idsIn, replyContext, whichMessage } = require("./lib/owner-asks");
 const { parseRunnerRefusal, detectRefusal, DEFAULT_RULES: RUNNER_REFUSAL_DEFAULTS } = require("./lib/refusal");
 const { createPaperclipPoller, paperclipBoards, boardKeyEnvs, replyCollector, parseIntake, parseRewake, parseResolveOwn, resolveOwnRouteProblem } = require("./lib/paperclip");
@@ -200,7 +200,7 @@ const BOARD_KIND = boardRunKind(BOARD_POLICY);
  * `bypass` reproduces the historical behaviour byte-for-byte — that is the
  * documented one-line upgrade for anyone already running this harness.
  */
-function permissionArgs(kind = "session") {
+function permissionArgs(kind = "session", attachmentsDir = ATTACHMENTS_DIR) {
   // A summary run reads untrusted chat text and needs no tools: narrow in every mode.
   if (kind === "summarizer") {
     return summarizerArgs({ tools: SUMMARIZER_TOOLS, deny: PERMISSION_DENY, settings: SESSION_SETTINGS });
@@ -229,7 +229,7 @@ function permissionArgs(kind = "session") {
     "--setting-sources", "",
     "--add-dir", CLAUDE_CWD,
     // The bot's own uploads folder is always readable; dontAsk would deny it.
-    "--allowedTools", attachmentReadRule(ATTACHMENTS_DIR),
+    "--allowedTools", attachmentReadRule(attachmentsDir),
     ...(PERMISSION_ALLOW ? [PERMISSION_ALLOW] : []),
     ...(PERMISSION_DENY ? ["--disallowedTools", PERMISSION_DENY] : []),
   ];
@@ -293,6 +293,8 @@ function runEnvFor(run, { channelId = "", runOutbox = OUTBOX_DIR, tmpDir = null,
     settings: run === "session" ? null : readableSettings(),
     seat,
     tmpDir,
+    // A private bot's runs never hold its Discord login or bridge token.
+    withholdDiscord: PRIVATE_CHANNELS,
     // Publish the RESOLVED paths. This is what stops harness-owned skills from
     // rotting: a skill that reads $BOT_BUFFER_FILE cannot go stale, while one
     // that names `.po-bot-conversation-buffer.txt` breaks the moment a bot is
@@ -651,7 +653,10 @@ function memoryFor(scope) {
   }
   const p = privateChannels.channelPaths(STATE_DIR, scope);
   return { buffer: p.buffer, summaries: p.summaries, attachments: p.attachments, sessions: p.sessions,
-    jobHistory: p.jobHistory, schedules: p.schedules, state: p.dir, home: p.home, write: [p.dir] };
+    jobHistory: p.jobHistory, schedules: p.schedules, state: p.dir, dir: p.dir, home: p.home,
+    // The channel folder is the bot's: a run reads it and writes only its jobs.
+    // (Its home is bound separately, at the path the CLI expects.)
+    read: [p.dir], write: [p.jobs] };
 }
 // The scope a run's private memory belongs to: its channel, or one board scope
 // for every board task (a board run already sees no Discord memory).
@@ -662,7 +667,7 @@ function memoryScope(channelId, opts = {}) {
 // `memory` is memoryFor(scope); `extraWrite` the run's own outbox and temp folder.
 function launchCommand(bin, args, { memory = memoryFor(""), extraWrite = [] } = {}) {
   if (!CONFINE.enabled) return { bin, args };
-  const read = [...skillPacks(), ...confineConfigFiles(), ...CONFINE.read];
+  const read = [...skillPacks(), ...confineConfigFiles(), ...(memory.read || []), ...CONFINE.read];
   return confineCommand({
     bin, args, cwd: CLAUDE_CWD, home: memory.home,
     write: [...memory.write, ...extraWrite, ...CONFINE.write],
@@ -1005,10 +1010,16 @@ async function resolveBridgeChannel(channelId, ctx) {
   return null;
 }
 
-const wss = new WebSocketServer({ port: WS_PORT, host: WS_HOST });
-log.info({ port: WS_PORT }, "WebSocket bridge listening");
+// A private bot's runs share the host's network, so loopback is no boundary
+// for it: any run could connect, register as an agent or wake another
+// channel's jobs. Its bridge takes only callers that hold BRIDGE_TOKEN (which
+// its runs never get), and without one it does not open at all.
+const BRIDGE_NEEDS_TOKEN = PRIVATE_CHANNELS;
+const wss = BRIDGE_NEEDS_TOKEN && !BRIDGE_TOKEN ? null : new WebSocketServer({ port: WS_PORT, host: WS_HOST });
+if (wss) log.info({ port: WS_PORT, token: BRIDGE_NEEDS_TOKEN }, "WebSocket bridge listening");
+else log.warn({ port: WS_PORT }, "WebSocket bridge not opened: a private-channel bot needs BRIDGE_TOKEN for it");
 
-wss.on("connection", (ws) => {
+wss?.on("connection", (ws) => {
   let agentId = null;
   let heartbeatMisses = 0;
 
@@ -1032,6 +1043,12 @@ wss.on("connection", (ws) => {
     }
 
     if (msg.type === "handshake") {
+      if (BRIDGE_NEEDS_TOKEN && !bridgeTokenMatches(msg.token, BRIDGE_TOKEN)) {
+        log.warn({ agentId: msg.agentId }, "Bridge handshake refused: no valid BRIDGE_TOKEN");
+        try { ws.send(JSON.stringify({ type: "handshake_ack", success: false, message: "BRIDGE_TOKEN required" })); } catch { /* ignore */ }
+        ws.close();
+        return;
+      }
       agentId = msg.agentId;
       connectedAgents.set(agentId, {
         ws,
@@ -1056,6 +1073,7 @@ wss.on("connection", (ws) => {
     // would buy no safety — the boundary is the token or loopback, below — and
     // would cost every user a concept they do not need.
     if (msg.type === "signal") {
+      // A private bot's bridge is open only with a token, which this enforces.
       const refusal = signalRefusal({ token: msg.token, host: WS_HOST, expectedToken: BRIDGE_TOKEN });
       if (refusal) {
         log.warn({ agentId, name: msg.name, host: WS_HOST }, refusal);
@@ -2323,6 +2341,10 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     // This run's outbox. Per channel, so two concurrent runs cannot claim each
     // other's files (see channelOutbox).
     const runOutbox = channelOutbox(channelId);
+    // The memory this run is given: in private mode, only its own channel's
+    // folder, its view of the bot's records rebuilt from them before it starts.
+    const memScope = memoryScope(channelId, opts);
+    const memory = memoryFor(memScope);
 
     // Harness mechanics, not personality — appended even when BOT_SYSTEM_PROMPT
     // overrides the base prompt, because these are the only ways files move.
@@ -2390,7 +2412,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       "--output-format", "stream-json",
       // A run whose reply lands outside Discord gets least privilege, unless
       // its board policy is parity.
-      ...permissionArgs(runKind),
+      ...permissionArgs(runKind, memory.attachments),
       ...skillPackArgs(),
       "--verbose",
       ...(CLAUDE_MAX_TURNS ? ["--max-turns", String(CLAUDE_MAX_TURNS)] : []),
@@ -2414,10 +2436,6 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     // final here: Codex's shell exclusions come from the same decision, so no
     // variable is kept from commands by a list computed before it was written.
     const seatRun = opts.paperclipRun;
-    // The memory this run is given: in private mode, only its own channel's
-    // folder, its view of the bot's records rebuilt from them now.
-    const memScope = memoryScope(channelId, opts);
-    const memory = memoryFor(memScope);
     if (PRIVATE_CHANNELS) {
       privateChannels.writeView({ stateDir: STATE_DIR, key: memScope, historyDir: HISTORY_DIR, sessions: Object.fromEntries(channelSessions), jobHistoryFile: JOB_HISTORY_FILE });
     }
@@ -2444,7 +2462,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
         instructions: systemPrompt + codexRuntime.skillsPrompt(packs),
         prompt: finalPrompt,
         releaseDir: RUNTIME.releaseDir,
-        readDirs: [ATTACHMENTS_DIR],
+        readDirs: [memory.attachments],
         filesystem: narrowBoard ? codexRuntime.boardFilesystem({
           cwd: CLAUDE_CWD, denied: boardReadDeniedPaths(), policy: BOARD_POLICY, releaseDir: RUNTIME.releaseDir, tmpDir: boardTmp, expand: expandPath,
         }) : null,
@@ -2587,7 +2605,8 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
       // Backward compatibility: a bot whose own context hardcodes the old shared
       // outbox path still works — but only when nothing else is in flight, since
       // that is the only moment a file in the shared root is unambiguously ours.
-      if (activeProcesses.size === 0) {
+      // A confined run cannot see the shared root, so nothing in it is its own.
+      if (activeProcesses.size === 0 && !CONFINE.enabled) {
         for (const p of collectOutboxFiles(startTime, OUTBOX_DIR)) {
           if (!writtenFiles.includes(p)) writtenFiles.push(p);
         }
@@ -2619,15 +2638,30 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
         const attachable = [];
         const tooBig = [];
         // Claude can Write the same path twice in one reply — send it once.
+        // A confined run hands back only what it could itself read: the host
+        // reads every other path, so a name in a reply is not authority. The
+        // bytes are read once, here, from the file the check judged.
+        const fence = CONFINE.enabled
+          ? [CLAUDE_CWD, memory.dir || memory.state, runOutbox, boardTmp, ...memory.write, ...(memory.read || []), ...CONFINE.write, ...CONFINE.read]
+          : null;
+        const refused = [];
         for (const f of [...new Set(writtenFiles)]) {
+          if (fence) {
+            const r = readWithin(f, fence, MAX_OUTBOUND_BYTES);
+            if (r.ok) attachable.push({ path: f, file: { attachment: r.data, name: basename(f) } });
+            else if (r.reason === "too large") tooBig.push({ path: f, size: r.size });
+            else if (r.reason !== "ENOENT") refused.push({ path: f, reason: r.reason });
+            continue;
+          }
           let size;
           try { size = statSync(f).size; } catch { continue; }
           if (size > MAX_OUTBOUND_BYTES) tooBig.push({ path: f, size });
-          else attachable.push(f);
+          else attachable.push({ path: f, file: { attachment: f } });
         }
+        if (refused.length) reqLog.warn({ files: refused }, "Not attaching files outside the run's fence");
         if (attachable.length > 0) {
-          sendMessage({ files: attachable.map(f => ({ attachment: f })) });
-          reqLog.info({ files: attachable }, "Attaching files to Discord");
+          sendMessage({ files: attachable.map(a => a.file) });
+          reqLog.info({ files: attachable.map(a => a.path) }, "Attaching files to Discord");
         }
         // Oversized files used to fail inside msg.reply and get logged where the
         // user never sees it — they just got a reply with no file.
@@ -3009,7 +3043,13 @@ const SCHEDULE_CHECK_MS = envInt("BOT_SCHEDULE_CHECK_MS", 60_000, { min: 1000 })
 const droppedJobsLogged = new Set();
 function loadSchedules() {
   if (PRIVATE_CHANNELS) {
-    const { jobs, dropped } = privateChannels.loadChannelSchedules(STATE_DIR);
+    const { jobs, dropped, problems } = privateChannels.loadChannelSchedules(STATE_DIR);
+    for (const d of problems) {
+      const k = `${d.file}:${d.problem}`;
+      if (droppedJobsLogged.has(k)) continue;
+      droppedJobsLogged.add(k);
+      log.warn(d, "Channel schedule file ignored: its jobs are not run until it is a plain file again");
+    }
     for (const d of dropped) {
       const k = `${d.file}:${d.id}`;
       if (droppedJobsLogged.has(k)) continue;
@@ -3038,15 +3078,20 @@ function saveSchedules(schedules) {
  * write. Saving the stale array would delete the follow-up the run just
  * scheduled, and the watch would end without anyone noticing it had stopped.
  */
-function removeScheduledJob(id) {
-  saveSchedules(loadSchedules().filter((j) => j.id !== id));
+// A job is its id AND its channel. Two channels can hold the same id (a private
+// channel writes its own file, and its ids are its own to choose), so matching
+// on id alone would let one channel's job remove or stamp another's.
+const sameJob = (a, b) => a.id === b.id && String(a.channel ?? "") === String(b.channel ?? "");
+
+function removeScheduledJob(job) {
+  saveSchedules(loadSchedules().filter((j) => !sameJob(j, job)));
 }
 
-function stampLastRun(id, key) {
+function stampLastRun(job, key) {
   const current = loadSchedules();
-  const job = current.find((j) => j.id === id);
-  if (!job) return;
-  job._lastRun = key;
+  const found = current.find((j) => sameJob(j, job));
+  if (!found) return;
+  found._lastRun = key;
   saveSchedules(current);
 }
 
@@ -3072,11 +3117,11 @@ const WAKE_CARRY_MAX_MS = envInt("BOT_WAKE_CARRY_MAX_MS", SESSION_TIMEOUT_MS, { 
  * second finds nothing and does nothing. Without it, a deploy that finishes
  * exactly on the minute gets reported twice.
  */
-function claimWakeJob(id) {
+function claimWakeJob(wanted) {
   const current = loadSchedules();
-  const job = current.find((j) => j.id === id);
+  const job = current.find((j) => sameJob(j, wanted));
   if (!job) return null;
-  saveSchedules(current.filter((j) => j.id !== id));
+  saveSchedules(current.filter((j) => !sameJob(j, wanted)));
   return job;
 }
 
@@ -3314,7 +3359,7 @@ async function runWakeJob(job, sLog, explicitRelease = null, { detach = false } 
   const due = Date.parse(job.runAt);
   if (!Number.isFinite(due)) {
     sLog.error({ id: job.id, runAt: job.runAt }, "Wake job has an unreadable runAt — removing rather than retrying it every tick");
-    removeScheduledJob(job.id);
+    removeScheduledJob(job);
     return false;
   }
 
@@ -3335,7 +3380,7 @@ async function runWakeJob(job, sLog, explicitRelease = null, { detach = false } 
   // heartbeat noise a quiet scheduler exists to avoid.
   if (job.deadline && Date.now() > Date.parse(job.deadline)) {
     sLog.info({ id: job.id, deadline: job.deadline }, "Wake job passed its deadline before firing, removing");
-    removeScheduledJob(job.id);
+    removeScheduledJob(job);
     return false;
   }
 
@@ -3353,7 +3398,7 @@ async function runWakeJob(job, sLog, explicitRelease = null, { detach = false } 
   // it. Claiming also settles the race between the tick and a signal. Re-arming
   // is the RUN's job — it has the schedule skill and the exact command in its
   // prompt.
-  if (!claimWakeJob(job.id)) return false;
+  if (!claimWakeJob(job)) return false;
   if (release?.kind === "signal") recentSignals.delete(release.name);
 
   const chainStarted = Date.parse(job.chainStartedAt || job.createdAt || job.runAt);
@@ -3419,7 +3464,7 @@ async function runScheduledJobs() {
       if (!shouldRunNow(job.cron, job._lastRun, job.tz || BOT_TIMEZONE)) {
         // Only expire jobs that didn't need to run
         if (job.expires && new Date(job.expires) < now) {
-          removeScheduledJob(job.id);
+          removeScheduledJob(job);
           sLog.info({ id: job.id, expires: job.expires, cron: describeCron(job.cron) }, "Scheduled job expired without firing, removing");
         }
         continue;
@@ -3445,7 +3490,7 @@ async function runScheduledJobs() {
       const nk = zonedParts(now, BOT_TIMEZONE);
       const nowKey = `${nk.month}-${nk.day}-${nk.hour}-${nk.min}`;
       job._lastRun = nowKey;
-      stampLastRun(job.id, nowKey);
+      stampLastRun(job, nowKey);
 
       // First Way: validate before executing
       sLog.info({ id: job.id, cron: job.cron, humanTime: describeCron(job.cron), prompt: job.prompt.substring(0, 80) }, "Firing scheduled job");
@@ -3470,7 +3515,7 @@ async function runScheduledJobs() {
 
       // Expire one-time jobs after successful execution
       if (job.expires) {
-        removeScheduledJob(job.id);
+        removeScheduledJob(job);
         sLog.info({ id: job.id }, "One-time job completed, removing");
       }
     }

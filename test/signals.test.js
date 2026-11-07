@@ -195,10 +195,10 @@ check("an unmatched signal is remembered, not an error", () => {
 });
 
 check("a released job is claimed, so tick and signal cannot double-fire it", () => {
-  assert.match(bot, /function claimWakeJob\(id\)[\s\S]{0,320}saveSchedules\(current\.filter/,
+  assert.match(bot, /function claimWakeJob\(wanted\)[\s\S]{0,320}saveSchedules\(current\.filter/,
     "claiming must read and write with no await between, or a deploy finishing on the minute reports twice");
   const fn = bot.slice(bot.indexOf("async function runWakeJob("), bot.indexOf("async function runScheduledJobs("));
-  assert.match(fn, /if \(!claimWakeJob\(job\.id\)\) return false;/);
+  assert.match(fn, /if \(!claimWakeJob\(job\)\) return false;/);
 });
 
 check("a signal is acknowledged when claimed, not when the run ends", () => {

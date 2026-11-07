@@ -84,7 +84,7 @@ check("restricted sessions pass the rule, ahead of BOT_PERMISSION_ALLOW", () => 
   // with no rule and succeeds with this one, alone or after another allow entry.
   const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
   const fn = bot.slice(bot.indexOf("function permissionArgs("), bot.indexOf("function settingsArgs("));
-  assert.match(fn, /"--allowedTools", attachmentReadRule\(ATTACHMENTS_DIR\)/);
+  assert.match(fn, /"--allowedTools", attachmentReadRule\(attachmentsDir\)/);
   assert.match(fn, /PERMISSION_ALLOW \? \[PERMISSION_ALLOW\]/);
   const bypass = fn.slice(fn.indexOf('if (PERMISSION_MODE === "bypass")'), fn.indexOf('"--tools", ALLOWED_TOOLS'));
   assert.ok(bypass.length > 0 && !bypass.includes("attachmentReadRule"), "bypass argv must stay the historical one");
@@ -303,7 +303,7 @@ check("a board run is least privilege in every mode — never bypass", () => {
   // own transcripts of Discord conversations, and any other bot's files on the
   // host. No list of private paths covers that; least privilege does.
   const src = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
-  assert.match(src, /\.\.\.permissionArgs\(runKind\)/, "the board run no longer takes the board branch");
+  assert.match(src, /\.\.\.permissionArgs\(runKind, memory\.attachments\)/, "the board run no longer takes the board branch");
   assert.match(src, /const runKind = opts\.noBufferContext \? BOARD_KIND : "session";/, "a Paperclip run no longer resolves its kind from the board policy");
   assert.match(src, /const BOARD_KIND = boardRunKind\(BOARD_POLICY\);/);
   assert.strictEqual(boardRunKind(resolveBoardPolicy({})), "board", "the default board run is no longer least privilege");
