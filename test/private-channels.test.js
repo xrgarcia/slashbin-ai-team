@@ -84,7 +84,7 @@ check("saving writes each job to its own channel, and empties a channel left wit
 
 check("the bot loads and saves through the per-channel files in private mode", () => {
   assert.ok(/if \(PRIVATE_CHANNELS\) \{\s*const \{ jobs, dropped, problems \} = privateChannels\.loadChannelSchedules\(STATE_DIR, CHANNEL_GROUPS\.scopeOf\)/.test(bot));
-  assert.ok(/if \(PRIVATE_CHANNELS\) return privateChannels\.saveChannelSchedules\(STATE_DIR, schedules, CHANNEL_GROUPS\.scopeOf\)/.test(bot));
+  assert.ok(/privateChannels\.saveChannelSchedules\(STATE_DIR, schedules, CHANNEL_GROUPS\.scopeOf\)/.test(bot));
 });
 
 check("a schedule file that is a link is not read through", () => {

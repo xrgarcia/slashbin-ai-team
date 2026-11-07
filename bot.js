@@ -3096,7 +3096,12 @@ function loadSchedules() {
 }
 
 function saveSchedules(schedules) {
-  if (PRIVATE_CHANNELS) return privateChannels.saveChannelSchedules(STATE_DIR, schedules, CHANNEL_GROUPS.scopeOf);
+  if (PRIVATE_CHANNELS) {
+    // A scope folder whose file cannot be read is left as it is, and said so.
+    const { skipped } = privateChannels.saveChannelSchedules(STATE_DIR, schedules, CHANNEL_GROUPS.scopeOf);
+    for (const d of skipped) log.warn(d, "Channel schedule file not written: it could not be read, so it is left as it is");
+    return;
+  }
   writeFileSync(SCHEDULES_FILE, JSON.stringify(schedules, null, 2) + "\n");
 }
 
