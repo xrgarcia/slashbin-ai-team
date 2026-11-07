@@ -142,6 +142,30 @@ check("a job naming a channel outside the scope is still dropped", () => {
   assert.deepStrictEqual(dropped.map((d) => d.id).sort(), ["planted-other-group", "planted-solo"]);
 });
 
+check("saving never erases a pre-group file: it stays byte for byte and loads again once groups are off", () => {
+  const st = join(root, "sched3");
+  const f = join(st, "channels", "111", "jobs", "schedules.json");
+  mkdirSync(join(st, "channels", "111", "jobs"), { recursive: true });
+  mkdirSync(join(st, "channels", "444", "jobs"), { recursive: true });
+  const before = JSON.stringify([{ id: "pre-group", channel: "111" }], null, 2) + "\n";
+  writeFileSync(f, before);
+  writeFileSync(join(st, "channels", "444", "jobs", "schedules.json"), JSON.stringify([{ id: "gone", channel: "444" }]));
+  // 111 is now in a group; a save for an unrelated ungrouped channel 333 follows.
+  pc.saveChannelSchedules(st, [{ id: "other", channel: "333" }], pc.channelGroups('{"hank":["111","222"]}', { enabled: true }).scopeOf);
+  assert.strictEqual(readFileSync(f, "utf8"), before, "the pre-group file was rewritten");
+  assert.deepStrictEqual(JSON.parse(readFileSync(join(st, "channels", "444", "jobs", "schedules.json"), "utf8")), [], "a live scope left with no jobs was not emptied");
+  assert.deepStrictEqual(pc.loadChannelSchedules(st).jobs.map((j) => j.id).sort(), ["other", "pre-group"], "groups off: the pre-group job did not come back");
+});
+
+check("membership is built linearly: a repeat inside a group appears once, two groups still refused", () => {
+  assert.deepStrictEqual(pc.channelGroups('{"a":["1","1","2"]}', { enabled: true }).members("group_a"), ["1", "2"]);
+  assert.ok(pc.channelGroups('{"a":["1"],"b":["1"]}', { enabled: true }).problems.length === 1);
+  const ids = Array.from({ length: 50000 }, (_, i) => String(i));
+  const t0 = Date.now();
+  assert.strictEqual(pc.channelGroups(JSON.stringify({ big: ids }), { enabled: true }).members("group_big").length, 50000);
+  assert.ok(Date.now() - t0 < 2000, "building a large group is not linear");
+});
+
 console.log("\nChannel groups — confinement binds only the group's folder");
 
 check("a group channel's run is handed its group's folder and no other scope's", () => {
