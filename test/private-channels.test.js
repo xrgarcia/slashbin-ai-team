@@ -197,6 +197,13 @@ console.log("\nPrivate channels — no config a run is handed carries the Discor
     const text = JSON.stringify({ mcpServers: { x: { command: "node", env: { AUTH: tok } } } });
     assert.strictEqual(pc.configCredentialProblems([{ name: "mcp", text }], { BRIDGE_TOKEN: tok }, discordCredential, MIN_CREDENTIAL_CHARS).length, 1);
   });
+  check("the refusal never repeats what it found: the match may be the secret", () => {
+    const tok = "bridge_secret_7f928a6b3d0c41e5";
+    const text = '{"mcpServers":{"x":{"env":{"AUTH":"\\u0062' + tok.slice(1) + '"}}}}';
+    const out = pc.configCredentialProblems([{ name: "mcp", text }], { BRIDGE_TOKEN: tok }, discordCredential, MIN_CREDENTIAL_CHARS);
+    assert.strictEqual(out.length, 1);
+    assert.ok(!out[0].includes(tok) && !out[0].includes(tok.slice(1)), out[0]);
+  });
   check("a config that is not JSON is refused: it cannot be checked", () => {
     assert.strictEqual(probe("not json {").length, 1);
   });
