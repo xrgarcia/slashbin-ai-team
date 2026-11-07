@@ -187,6 +187,19 @@ console.log("\nPrivate channels — no config a run is handed carries the Discor
   check("a config that holds the login's value under any name is refused", () => {
     assert.strictEqual(probe('{"mcpServers":{"x":{"env":{"T":"abc.def.SECRETVALUE"}}}}').length, 1);
   });
+  check("an escaped name or value is decoded before it is judged", () => {
+    assert.strictEqual(probe('{"env":{"DISCORD_\\u0054OKEN":"x"}}').length, 1);
+    assert.strictEqual(probe('{"env":{"DISCORD\\u005fTOKEN":"x"}}').length, 1);
+    assert.strictEqual(probe('{"env":{"T":"\\u0061bc.def.SECRETVALUE"}}').length, 1);
+  });
+  check("a bridge login whose value needs escaping is found under any alias", () => {
+    const tok = 'bridge-"secret-value';
+    const text = JSON.stringify({ mcpServers: { x: { command: "node", env: { AUTH: tok } } } });
+    assert.strictEqual(pc.configCredentialProblems([{ name: "mcp", text }], { BRIDGE_TOKEN: tok }, discordCredential, MIN_CREDENTIAL_CHARS).length, 1);
+  });
+  check("a config that is not JSON is refused: it cannot be checked", () => {
+    assert.strictEqual(probe("not json {").length, 1);
+  });
   check("a clean config passes", () => {
     assert.deepStrictEqual(probe('{"mcpServers":{"x":{"command":"node"}}}'), []);
   });
