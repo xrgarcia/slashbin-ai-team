@@ -83,8 +83,8 @@ check("saving writes each job to its own channel, and empties a channel left wit
 });
 
 check("the bot loads and saves through the per-channel files in private mode", () => {
-  assert.ok(/if \(PRIVATE_CHANNELS\) \{\s*const \{ jobs, dropped, problems \} = privateChannels\.loadChannelSchedules\(STATE_DIR\)/.test(bot));
-  assert.ok(/if \(PRIVATE_CHANNELS\) return privateChannels\.saveChannelSchedules\(STATE_DIR, schedules\)/.test(bot));
+  assert.ok(/if \(PRIVATE_CHANNELS\) \{\s*const \{ jobs, dropped, problems \} = privateChannels\.loadChannelSchedules\(STATE_DIR, CHANNEL_GROUPS\.scopeOf\)/.test(bot));
+  assert.ok(/privateChannels\.saveChannelSchedules\(STATE_DIR, schedules, CHANNEL_GROUPS\.scopeOf\)/.test(bot));
 });
 
 check("a schedule file that is a link is not read through", () => {
@@ -246,6 +246,47 @@ check("the bot's buffer functions go through the link-safe helpers", () => {
   assert.ok(/privateChannels\.readOwn\(file\)/.test(bot));
   assert.ok(/privateChannels\.sizeOwn\(file\)/.test(bot));
   assert.ok(/privateChannels\.writeOwn\(file, keepLines/.test(bot));
+});
+
+console.log("\nPrivate channels — channel groups (channelGroups)");
+
+check("no groups: a channel is its own scope, as before", () => {
+  const g = pc.channelGroups(undefined, { enabled: true });
+  assert.strictEqual(g.scopeOf("111"), "111");
+  assert.deepStrictEqual(g.members("111"), ["111"]);
+  assert.deepStrictEqual(g.problems, []);
+});
+
+check("a group's scope key is group_<name> and its folder is channels/group_<name>", () => {
+  const g = pc.channelGroups('{"hank":["111","222"]}', { enabled: true });
+  assert.strictEqual(g.scopeOf("222"), "group_hank");
+  assert.ok(pc.channelPaths("/s", g.scopeOf("111")).dir.endsWith("/channels/group_hank"));
+});
+
+check("a group view: members' summaries (stamped with the scope) and sessions, nobody else's", () => {
+  const state = tmp(), hist = tmp();
+  const groups = pc.channelGroups('{"hank":["111","222"]}', { enabled: true });
+  writeFileSync(join(hist, "g.md"), "<!-- channel: group_hank -->\nshared");
+  writeFileSync(join(hist, "raw.md"), "<!-- channel: 111 -->\nbefore joining");
+  writeFileSync(join(hist, "o.md"), "<!-- channel: 333 -->\nelsewhere");
+  const p = pc.writeView({ stateDir: state, key: "group_hank", historyDir: hist, sessions: { 111: { sessionId: "a" }, 222: { sessionId: "b" }, 333: { sessionId: "c" } }, jobHistoryFile: "/none", groups });
+  assert.deepStrictEqual(readdirSync(p.summaries), ["g.md"]);
+  assert.deepStrictEqual(Object.keys(JSON.parse(readFileSync(p.sessions, "utf8"))).sort(), ["111", "222"]);
+});
+
+check("schedules go by scope when given scopeOf", () => {
+  const state = tmp();
+  const groups = pc.channelGroups('{"hank":["111","222"]}', { enabled: true });
+  pc.saveChannelSchedules(state, [{ id: "a", channel: "111" }, { id: "b", channel: "222" }], groups.scopeOf);
+  assert.deepStrictEqual(pc.loadChannelSchedules(state, groups.scopeOf).jobs.map((j) => j.id).sort(), ["a", "b"]);
+  assert.strictEqual(pc.loadChannelSchedules(state).dropped.length, 2, "without scopeOf the group's file holds jobs for channels it is not named for");
+});
+
+check("the four refusals are plain strings", () => {
+  for (const [raw, enabled] of [["{x", true], ['{"A":["1"]}', true], ['{"a":["1"],"b":["1"]}', true], ['{"a":["1"]}', false]]) {
+    const { problems } = pc.channelGroups(raw, { enabled });
+    assert.ok(problems.length >= 1 && problems.every((p) => typeof p === "string"), raw);
+  }
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

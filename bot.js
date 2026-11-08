@@ -274,7 +274,7 @@ function escalateBearer() {
 // env and a board task's seat — and decides each variable over the result:
 // whether the run has it, and whether its commands can read it (buildRunEnv,
 // docs/run-environment.md). `run` is "session", "parity" or "board".
-function runEnvFor(run, { channelId = "", runOutbox = OUTBOX_DIR, tmpDir = null, seat = null, memory = memoryFor(String(channelId)) } = {}) {
+function runEnvFor(run, { channelId = "", runOutbox = OUTBOX_DIR, tmpDir = null, seat = null, memory = memoryFor(memoryScope(channelId)) } = {}) {
   return buildRunEnv({
     env: process.env,
     spec: process.env.BOT_RUN_ENV,
@@ -658,10 +658,14 @@ function memoryFor(scope) {
     // (Its home is bound separately, at the path the CLI expects.)
     read: [p.dir], write: [p.jobs] };
 }
-// The scope a run's private memory belongs to: its channel, or one board scope
-// for every board task (a board run already sees no Discord memory).
+// BOT_CHANNEL_GROUPS: named channels that share one scope (lib/private-channels.js).
+const CHANNEL_GROUPS = privateChannels.channelGroups(process.env.BOT_CHANNEL_GROUPS, { enabled: PRIVATE_CHANNELS });
+// The scope a run's private memory belongs to: its channel's group, else the
+// channel itself, or one board scope for every board task (a board run already
+// sees no Discord memory). The one place a channel becomes a scope: every
+// folder, buffer, summary stamp and view derives from what this returns.
 function memoryScope(channelId, opts = {}) {
-  return opts.noBufferContext ? "board" : String(channelId);
+  return opts.noBufferContext ? "board" : CHANNEL_GROUPS.scopeOf(channelId);
 }
 // `bin args` as this bot starts them: inside the confinement when it is on.
 // `memory` is memoryFor(scope); `extraWrite` the run's own outbox and temp folder.
@@ -798,6 +802,7 @@ if (RUNTIME.problems.length) {
       historyDir: realPath(HISTORY_DIR), stateDir: realPath(STATE_DIR), attachmentsDir: realPath(ATTACHMENTS_DIR),
       within: pathWithin,
     }),
+    ...CHANNEL_GROUPS.problems,
     ...(PRIVATE_CHANNELS ? privateChannels.configCredentialProblems(configSources(), process.env, discordCredential, MIN_CREDENTIAL_CHARS) : []),
   ];
   if (problems.length) {
@@ -1231,7 +1236,7 @@ function formatBufferLine(channelName, author, text, fileRefs) {
 // In private mode each channel keeps its own buffer (lib/private-channels.js);
 // `channelId` names it. Otherwise, and for a null channel, the one shared buffer.
 function bufferFileFor(channelId = null) {
-  return PRIVATE_CHANNELS && channelId ? memoryFor(String(channelId)).buffer : BUFFER_FILE;
+  return PRIVATE_CHANNELS && channelId ? memoryFor(memoryScope(channelId)).buffer : BUFFER_FILE;
 }
 
 // A channel's own buffer is never read or written through a link
@@ -1289,7 +1294,7 @@ async function rotateBuffer(channelId = null) {
         const date = new Date().toISOString().split("T")[0];
         // A private channel's rotation summary is stamped with that channel, so
         // only it is shown the summary again.
-        const owner = file === BUFFER_FILE ? null : String(channelId);
+        const owner = file === BUFFER_FILE ? null : memoryScope(channelId);
         writeSummary("buffer-rotation", date, oldLines.length, summary, owner, "buffer-rotation");
         rotLog.info({ date, lines: oldLines.length }, "Rotation summary saved");
       } catch (err) {
@@ -1298,7 +1303,7 @@ async function rotateBuffer(channelId = null) {
 
       // Clean up orphaned attachments
       const keepContent = keepLines.join("\n");
-      cleanOrphanedAttachments(keepContent, file === BUFFER_FILE ? ATTACHMENTS_DIR : memoryFor(String(channelId)).attachments);
+      cleanOrphanedAttachments(keepContent, file === BUFFER_FILE ? ATTACHMENTS_DIR : memoryFor(memoryScope(channelId)).attachments);
     }
 
     // Write back only the kept lines
@@ -1449,7 +1454,7 @@ async function downloadAttachmentPersistent(attachment, messageId, channelId = n
   // would describe two attachments and read one, with no error anywhere.
   // attachment.id is a Discord snowflake: unique per file, forever.
   // In private mode a file lands in its channel's own folder.
-  const dir = PRIVATE_CHANNELS && channelId ? memoryFor(String(channelId)).attachments : ATTACHMENTS_DIR;
+  const dir = PRIVATE_CHANNELS && channelId ? memoryFor(memoryScope(channelId)).attachments : ATTACHMENTS_DIR;
   mkdirSync(dir, { recursive: true });
   const savePath = join(dir, `${attachment.id}-${safeName}`);
 
@@ -1811,7 +1816,7 @@ client?.on("messageCreate", async (msg) => {
     const bufLines = readBuffer(msg.channel.id).split("\n").filter(Boolean).length;
     const running = activeProcesses.has(msg.channel.id);
     let attachCount = 0;
-    try { attachCount = readdirSync(memoryFor(msg.channel.id).attachments).length; } catch { /* ignore */ }
+    try { attachCount = readdirSync(memoryFor(memoryScope(msg.channel.id)).attachments).length; } catch { /* ignore */ }
     await msg.reply(`Buffer: ${Math.round(bufSize / 1024)}KB / ${Math.round(BUFFER_MAX_BYTES / 1024)}KB (${bufLines} messages, ${attachCount} attachments)${running ? " — **running**" : ""}`);
     return;
   }
@@ -2146,7 +2151,7 @@ function buildContextPrompt(reqLog = log, channelId = null) {
   // session died with `spawn E2BIG`. Budget it. See lib/argv-budget.js.
   const result = budgetContext({
     // A private channel is given its own summaries and buffer only.
-    summaries: PRIVATE_CHANNELS ? privateChannels.channelSummaries(loadRecentSummaries(), channelId) : loadRecentSummaries(),
+    summaries: PRIVATE_CHANNELS ? privateChannels.channelSummaries(loadRecentSummaries(), memoryScope(channelId)) : loadRecentSummaries(),
     buffer: readBuffer(channelId),
     maxBytes: CONTEXT_MAX_BYTES,
   });
@@ -2356,8 +2361,11 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     });
     const timeContext = `\n\nCurrent time: ${now.toISOString()} (${localTime})`;
 
+    const channelGroup = PRIVATE_CHANNELS ? CHANNEL_GROUPS.groupOf(channelId) : null;
     const channelContext = PRIVATE_CHANNELS
-      ? `${timeContext}\n\nYou are responding in channel: #${channelName}. This channel is private: everything you remember here comes from this channel alone.`
+      ? (channelGroup
+        ? `${timeContext}\n\nYou are responding in channel: #${channelName}. This channel is private, but its memory is shared with every channel in group ${channelGroup}: everything you remember here comes from those channels alone.`
+        : `${timeContext}\n\nYou are responding in channel: #${channelName}. This channel is private: everything you remember here comes from this channel alone.`)
       : `${timeContext}\n\nYou are responding in channel: #${channelName}. Only respond to the message in THIS channel. The conversation buffer contains messages from multiple channels — focus only on #${channelName} context. Do NOT respond to or act on messages from other channels.`;
 
     // This run's outbox. Per channel, so two concurrent runs cannot claim each
@@ -2459,7 +2467,7 @@ function spawnClaude(prompt, channelId, reqLog, sendMessage, attachments, channe
     // variable is kept from commands by a list computed before it was written.
     const seatRun = opts.paperclipRun;
     if (PRIVATE_CHANNELS) {
-      privateChannels.writeView({ stateDir: STATE_DIR, key: memScope, historyDir: HISTORY_DIR, sessions: Object.fromEntries(channelSessions), jobHistoryFile: JOB_HISTORY_FILE });
+      privateChannels.writeView({ stateDir: STATE_DIR, key: memScope, historyDir: HISTORY_DIR, sessions: Object.fromEntries(channelSessions), jobHistoryFile: JOB_HISTORY_FILE, groups: CHANNEL_GROUPS });
     }
     const built = runEnvFor(!opts.noBufferContext ? "session" : (narrowBoard ? "board" : "parity"), {
       channelId, runOutbox, tmpDir: boardTmp, memory,
@@ -3028,7 +3036,7 @@ async function runSummarizer() {
         const dayMessages = groups[date];
         try {
           const summary = await summarizeWithClaude(channelName, date, dayMessages);
-          writeSummary(channelName, date, dayMessages.length, summary, channelId);
+          writeSummary(channelName, date, dayMessages.length, summary, memoryScope(channelId));
           totalSummaries++;
           sumLog.info({ channel: channelName, date, messages: dayMessages.length }, "Summary saved");
         } catch (err) {
@@ -3065,7 +3073,7 @@ const SCHEDULE_CHECK_MS = envInt("BOT_SCHEDULE_CHECK_MS", 60_000, { min: 1000 })
 const droppedJobsLogged = new Set();
 function loadSchedules() {
   if (PRIVATE_CHANNELS) {
-    const { jobs, dropped, problems } = privateChannels.loadChannelSchedules(STATE_DIR);
+    const { jobs, dropped, problems } = privateChannels.loadChannelSchedules(STATE_DIR, CHANNEL_GROUPS.scopeOf);
     for (const d of problems) {
       const k = `${d.file}:${d.problem}`;
       if (droppedJobsLogged.has(k)) continue;
@@ -3088,7 +3096,12 @@ function loadSchedules() {
 }
 
 function saveSchedules(schedules) {
-  if (PRIVATE_CHANNELS) return privateChannels.saveChannelSchedules(STATE_DIR, schedules);
+  if (PRIVATE_CHANNELS) {
+    // A scope folder whose file cannot be read is left as it is, and said so.
+    const { skipped } = privateChannels.saveChannelSchedules(STATE_DIR, schedules, CHANNEL_GROUPS.scopeOf);
+    for (const d of skipped) log.warn(d, "Channel schedule file not written: it could not be read, so it is left as it is");
+    return;
+  }
   writeFileSync(SCHEDULES_FILE, JSON.stringify(schedules, null, 2) + "\n");
 }
 

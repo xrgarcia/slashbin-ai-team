@@ -20,6 +20,7 @@ const { spawn } = require("child_process");
 const { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } = require("fs");
 const { join } = require("path");
 const summarizeCore = require("./lib/summarize-core");
+const { channelGroups } = require("./lib/private-channels");
 const { summarizerArgs } = require("./lib/permission-mode");
 const { resolveRuntime } = require("./lib/runtime");
 const { codexReleaseDir } = require("./lib/runtime/codex");
@@ -160,9 +161,12 @@ function summarizeWithClaude(channelName, date, messages) {
 // overwriting destroyed a whole day of summaries every time the summarizer ran,
 // because the checkpoint means each run only covers messages since the last one.
 // (Fourth place this logic is duplicated. See slashbin-ai-team#44.)
+// The stamp is the channel's memory scope (BOT_CHANNEL_GROUPS): its group's key
+// when it is in one, else its own id, as before.
+const CHANNEL_GROUPS = channelGroups(process.env.BOT_CHANNEL_GROUPS);
 function writeSummary(channelName, date, messageCount, summary, channelId = null) {
   return summarizeCore.writeSummary({
-    historyDir: HISTORY_DIR, channelName, date, messageCount, summary, channelId,
+    historyDir: HISTORY_DIR, channelName, date, messageCount, summary, channelId: channelId ? CHANNEL_GROUPS.scopeOf(channelId) : channelId,
     kind: "channel-day", timezone: process.env.BOT_TIMEZONE,
   });
 }

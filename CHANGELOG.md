@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Confinement** (`BOT_CONFINE=true`, `lib/confine.js`): every agent process a bot starts runs inside bubblewrap, seeing only its working directory, its own memory and a home of its own. Holds for the agent's file tools as well as its shell. A host without bubblewrap refuses the bot rather than running it open.
 - **Private channels** (`BOT_PRIVATE_CHANNELS=true`, `lib/private-channels.js`): each channel's buffer, uploads, schedules, sessions and summaries live in its own folder, and a run is given only its channel's. Requires confinement and the bot's records outside `CLAUDE_CWD`. A channel's folder is read-only to its runs except `home/` and `jobs/`; a file a reply hands back is sent only if the run itself could read it; scheduled jobs are matched by id and channel; runs never hold the bot's Discord login or bridge token, and the bridge opens only with `BRIDGE_TOKEN`.
 - Job-history rows name the channel the job ran for.
+- **Channel groups** (`BOT_CHANNEL_GROUPS`, `channelGroups` in `lib/private-channels.js`): with private channels, named channels share one memory scope (`group_<name>`): one buffer, one set of summaries and scheduled jobs, one confined folder. `memoryScope` is now the only place a channel becomes a scope. Summaries are stamped with the scope. Unset, every channel is its own scope, as before.
 
 ### Changed
 
