@@ -29,8 +29,8 @@ const state = join(root, "state"), hist = join(root, "history");
 mkdirSync(state, { recursive: true });
 mkdirSync(hist, { recursive: true });
 
-// Hank's two channels (H1, H2) share a group; P1 and P2 share another; SOLO is in none.
-const raw = JSON.stringify({ hank: ["H1", "H2"], "po-team": ["P1", "P2"] });
+// Acme's two channels (H1, H2) share a group; P1 and P2 share another; SOLO is in none.
+const raw = JSON.stringify({ acme: ["H1", "H2"], "po-team": ["P1", "P2"] });
 const groups = pc.channelGroups(raw, { enabled: true });
 const view = (channel, sessions = {}, jobHistoryFile = join(root, "none")) =>
   pc.writeView({ stateDir: state, key: groups.scopeOf(channel), historyDir: hist, sessions, jobHistoryFile, groups });
@@ -40,14 +40,14 @@ console.log("\nChannel groups — resolving a channel to its scope");
 
 check("a group's scope key is group_<name>; a channel in no group is its own scope", () => {
   assert.deepStrictEqual(groups.problems, []);
-  assert.strictEqual(groups.scopeOf("H1"), "group_hank");
-  assert.strictEqual(groups.scopeOf("H2"), "group_hank");
+  assert.strictEqual(groups.scopeOf("H1"), "group_acme");
+  assert.strictEqual(groups.scopeOf("H2"), "group_acme");
   assert.strictEqual(groups.scopeOf("P1"), "group_po-team");
   assert.strictEqual(groups.scopeOf("SOLO"), "SOLO");
   assert.strictEqual(groups.scopeOf(123), "123");
-  assert.deepStrictEqual(groups.members("group_hank"), ["H1", "H2"]);
+  assert.deepStrictEqual(groups.members("group_acme"), ["H1", "H2"]);
   assert.deepStrictEqual(groups.members("SOLO"), ["SOLO"]);
-  assert.strictEqual(groups.groupOf("H2"), "hank");
+  assert.strictEqual(groups.groupOf("H2"), "acme");
   assert.strictEqual(groups.groupOf("SOLO"), null);
 });
 
@@ -70,14 +70,14 @@ check("a bare group name cannot collide with board or a snowflake: the key is al
 console.log("\nChannel groups — one memory for the group, none for anyone else");
 
 check("a summary stamped with the group is in each group channel's view, and in no other scope's", () => {
-  writeFileSync(join(hist, "2026-11-07-h1.md"), "<!-- channel: group_hank -->\nHank talk from H1");
+  writeFileSync(join(hist, "2026-11-07-h1.md"), "<!-- channel: group_acme -->\nAcme talk from H1");
   writeFileSync(join(hist, "2026-11-07-p1.md"), "<!-- channel: group_po-team -->\nPO talk");
   writeFileSync(join(hist, "2026-11-07-solo.md"), "<!-- channel: SOLO -->\nSolo talk");
   writeFileSync(join(hist, "2026-11-07-old.md"), "no stamp");
   assert.deepStrictEqual(summaryNames(view("H1")), ["2026-11-07-h1.md"]);
   assert.deepStrictEqual(summaryNames(view("H2")), ["2026-11-07-h1.md"], "group channel B did not get channel A's summary");
   assert.deepStrictEqual(summaryNames(view("SOLO")), ["2026-11-07-solo.md"], "a channel in no group got the group's summary");
-  assert.deepStrictEqual(summaryNames(view("P2")), ["2026-11-07-p1.md"], "another group got Hank's summary");
+  assert.deepStrictEqual(summaryNames(view("P2")), ["2026-11-07-p1.md"], "another group got Acme's summary");
 });
 
 check("a joining channel's past private summaries stay unpublished: a raw-id stamp is not the group's", () => {
@@ -87,7 +87,7 @@ check("a joining channel's past private summaries stay unpublished: a raw-id sta
 });
 
 check("the group's context is read through channelSummaries by scope", () => {
-  const contents = ["<!-- channel: group_hank -->\na", "<!-- channel: H1 -->\nb", "<!-- channel: SOLO -->\nc", "d"];
+  const contents = ["<!-- channel: group_acme -->\na", "<!-- channel: H1 -->\nb", "<!-- channel: SOLO -->\nc", "d"];
   assert.deepStrictEqual(pc.channelSummaries(contents, groups.scopeOf("H2")), [contents[0]]);
   assert.deepStrictEqual(pc.channelSummaries(contents, groups.scopeOf("SOLO")), [contents[2]]);
 });
@@ -95,9 +95,9 @@ check("the group's context is read through channelSummaries by scope", () => {
 check("two group channels append to one buffer.txt; another scope's buffer is separate", () => {
   const bufferOf = (ch) => pc.channelPaths(state, groups.scopeOf(ch)).buffer;
   assert.strictEqual(bufferOf("H1"), bufferOf("H2"));
-  pc.appendOwn(bufferOf("H1"), "[#h1] ray: one\n");
-  pc.appendOwn(bufferOf("H2"), "[#h2] doug: two\n");
-  assert.strictEqual(pc.readOwn(bufferOf("H2")), "[#h1] ray: one\n[#h2] doug: two\n");
+  pc.appendOwn(bufferOf("H1"), "[#h1] alice: one\n");
+  pc.appendOwn(bufferOf("H2"), "[#h2] bob: two\n");
+  assert.strictEqual(pc.readOwn(bufferOf("H2")), "[#h1] alice: one\n[#h2] bob: two\n");
   assert.notStrictEqual(bufferOf("SOLO"), bufferOf("H1"));
   assert.strictEqual(pc.readOwn(bufferOf("SOLO")), "");
   assert.strictEqual(existsSync(join(state, "channels", "H1")), false, "a member got a folder of its own");
@@ -124,7 +124,7 @@ check("a job lives in its scope's folder and keeps job.channel as its posting ch
   const st = join(root, "sched");
   pc.saveChannelSchedules(st, [{ id: "a", channel: "H1" }, { id: "b", channel: "H2" }, { id: "c", channel: "SOLO" }], groups.scopeOf);
   const read = (k) => JSON.parse(readFileSync(join(st, "channels", k, "jobs", "schedules.json"), "utf8"));
-  assert.deepStrictEqual(read("group_hank").map((j) => `${j.id}:${j.channel}`), ["a:H1", "b:H2"]);
+  assert.deepStrictEqual(read("group_acme").map((j) => `${j.id}:${j.channel}`), ["a:H1", "b:H2"]);
   assert.deepStrictEqual(read("SOLO").map((j) => j.id), ["c"]);
   const { jobs, dropped } = pc.loadChannelSchedules(st, groups.scopeOf);
   assert.deepStrictEqual(jobs.map((j) => j.id).sort(), ["a", "b", "c"]);
@@ -133,8 +133,8 @@ check("a job lives in its scope's folder and keeps job.channel as its posting ch
 
 check("a job naming a channel outside the scope is still dropped", () => {
   const st = join(root, "sched2");
-  mkdirSync(join(st, "channels", "group_hank", "jobs"), { recursive: true });
-  writeFileSync(join(st, "channels", "group_hank", "jobs", "schedules.json"), JSON.stringify([
+  mkdirSync(join(st, "channels", "group_acme", "jobs"), { recursive: true });
+  writeFileSync(join(st, "channels", "group_acme", "jobs", "schedules.json"), JSON.stringify([
     { id: "member", channel: "H2" }, { id: "planted-solo", channel: "SOLO" }, { id: "planted-other-group", channel: "P1" },
   ]));
   const { jobs, dropped } = pc.loadChannelSchedules(st, groups.scopeOf);
@@ -151,7 +151,7 @@ check("saving never erases a pre-group file: it stays byte for byte and loads ag
   writeFileSync(f, before);
   writeFileSync(join(st, "channels", "444", "jobs", "schedules.json"), JSON.stringify([{ id: "gone", channel: "444" }]));
   // 111 is now in a group; a save for an unrelated ungrouped channel 333 follows.
-  pc.saveChannelSchedules(st, [{ id: "other", channel: "333" }], pc.channelGroups('{"hank":["111","222"]}', { enabled: true }).scopeOf);
+  pc.saveChannelSchedules(st, [{ id: "other", channel: "333" }], pc.channelGroups('{"acme":["111","222"]}', { enabled: true }).scopeOf);
   assert.strictEqual(readFileSync(f, "utf8"), before, "the pre-group file was rewritten");
   assert.deepStrictEqual(JSON.parse(readFileSync(join(st, "channels", "444", "jobs", "schedules.json"), "utf8")), [], "a live scope left with no jobs was not emptied");
   assert.deepStrictEqual(pc.loadChannelSchedules(st).jobs.map((j) => j.id).sort(), ["other", "pre-group"], "groups off: the pre-group job did not come back");
@@ -159,9 +159,9 @@ check("saving never erases a pre-group file: it stays byte for byte and loads ag
 
 check("a consumed wake in a group file is removed on save and the outside-scope row is kept: it runs once over two ticks", () => {
   const st = join(root, "sched4");
-  const g = pc.channelGroups('{"hank":["111","222"]}', { enabled: true });
-  const f = join(st, "channels", "group_hank", "jobs", "schedules.json");
-  mkdirSync(join(st, "channels", "group_hank", "jobs"), { recursive: true });
+  const g = pc.channelGroups('{"acme":["111","222"]}', { enabled: true });
+  const f = join(st, "channels", "group_acme", "jobs", "schedules.json");
+  mkdirSync(join(st, "channels", "group_acme", "jobs"), { recursive: true });
   writeFileSync(f, JSON.stringify([{ id: "wake", channel: "111", once: true }, { id: "pre", channel: "333" }]));
   let ran = 0;
   const tick = () => {
@@ -176,7 +176,7 @@ check("a consumed wake in a group file is removed on save and the outside-scope 
 });
 
 const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
-const hankScope = pc.channelGroups('{"hank":["111","222"]}', { enabled: true }).scopeOf;
+const acmeScope = pc.channelGroups('{"acme":["111","222"]}', { enabled: true }).scopeOf;
 const seed = (name, file, text) => {
   const st = join(root, name);
   mkdirSync(join(st, "channels", file, "jobs"), { recursive: true });
@@ -192,8 +192,8 @@ check("an unreadable dormant file survives a save for another channel (new job a
   const { f: f333 } = seed("eacces", "333", JSON.stringify([{ id: "r333", channel: "333", lastRun: null }]));
   chmodSync(f, 0o000);
   try {
-    pc.saveChannelSchedules(st, [{ id: "r333", channel: "333" }, { id: "new", channel: "333" }], hankScope);            // a new job
-    pc.saveChannelSchedules(st, [{ id: "r333", channel: "333", lastRun: "now" }, { id: "new", channel: "333" }], hankScope); // stampLastRun
+    pc.saveChannelSchedules(st, [{ id: "r333", channel: "333" }, { id: "new", channel: "333" }], acmeScope);            // a new job
+    pc.saveChannelSchedules(st, [{ id: "r333", channel: "333", lastRun: "now" }, { id: "new", channel: "333" }], acmeScope); // stampLastRun
   } finally { chmodSync(f, 0o644); }
   assert.deepStrictEqual(JSON.parse(readFileSync(f, "utf8")), [{ id: "j111", channel: "111" }], "111's file was rewritten");
   assert.deepStrictEqual(JSON.parse(readFileSync(f333, "utf8")).map((j) => j.id), ["r333", "new"]);
@@ -203,16 +203,16 @@ check("an unreadable dormant file survives a save for another channel (new job a
 check("a dormant folder whose file is readable is left byte for byte unchanged by any save", () => {
   const text = '[ {"id":"j111","channel":"111"}   ]';
   const { st, f } = seed("dormant", "111", text);
-  pc.saveChannelSchedules(st, [{ id: "x", channel: "333" }], hankScope);
-  pc.saveChannelSchedules(st, [], hankScope);
-  pc.saveChannelSchedules(st, [{ id: "y", channel: "111" }], hankScope); // 111's job now belongs to group_hank
+  pc.saveChannelSchedules(st, [{ id: "x", channel: "333" }], acmeScope);
+  pc.saveChannelSchedules(st, [], acmeScope);
+  pc.saveChannelSchedules(st, [{ id: "y", channel: "111" }], acmeScope); // 111's job now belongs to group_acme
   assert.strictEqual(readFileSync(f, "utf8"), text);
-  assert.ok(existsSync(join(st, "channels", "group_hank", "jobs", "schedules.json")), "a job for 111 goes to the group's folder");
+  assert.ok(existsSync(join(st, "channels", "group_acme", "jobs", "schedules.json")), "a job for 111 goes to the group's folder");
 });
 
 check("an active folder whose file has bad JSON is skipped, reported without its contents, and not overwritten", () => {
   const { st, f } = seed("badjson", "333", "{SECRETISH not json");
-  const r = pc.saveChannelSchedules(st, [{ id: "x", channel: "333" }], hankScope);
+  const r = pc.saveChannelSchedules(st, [{ id: "x", channel: "333" }], acmeScope);
   assert.strictEqual(readFileSync(f, "utf8"), "{SECRETISH not json");
   assert.strictEqual(r.skipped.length, 1);
   assert.ok(!JSON.stringify(r.skipped).includes("SECRETISH"), "the warning carries file contents");
@@ -221,7 +221,7 @@ check("an active folder whose file has bad JSON is skipped, reported without its
 check("a group folder no longer configured is dormant too", () => {
   const { st, f } = seed("oldgroup", "group_gone", JSON.stringify([{ id: "j", channel: "111" }]));
   const before = readFileSync(f, "utf8");
-  pc.saveChannelSchedules(st, [{ id: "x", channel: "333" }], hankScope);
+  pc.saveChannelSchedules(st, [{ id: "x", channel: "333" }], acmeScope);
   assert.strictEqual(readFileSync(f, "utf8"), before);
 });
 
@@ -275,13 +275,13 @@ check("the summarizer stamps the scope, not the raw channel id", () => {
 console.log("\nChannel groups — the four refusals (channelGroups)");
 
 check("unparseable or mis-shaped JSON", () => {
-  for (const bad of ["{nope", "[]", '"x"', "null", '{"hank":"H1"}', '{"hank":[1,2]}', '{"hank":[""]}']) {
+  for (const bad of ["{nope", "[]", '"x"', "null", '{"acme":"H1"}', '{"acme":[1,2]}', '{"acme":[""]}']) {
     assert.ok(pc.channelGroups(bad, { enabled: true }).problems.length >= 1, `accepted ${bad}`);
   }
 });
 
 check("a group name that is not ^[a-z0-9][a-z0-9-]*$", () => {
-  for (const bad of ["Hank", "-hank", "ha nk", "ha_nk", "../x", ""]) {
+  for (const bad of ["Acme", "-acme", "ha nk", "ha_nk", "../x", ""]) {
     const g = pc.channelGroups(JSON.stringify({ [bad]: ["1"] }), { enabled: true });
     assert.ok(g.problems.some((p) => /group name/.test(p)), `accepted name ${JSON.stringify(bad)}`);
   }
@@ -313,8 +313,8 @@ const runBot = (extra, ms = 20000) => {
 const priv = { BOT_PRIVATE_CHANNELS: "true", BOT_CONFINE: "true" };
 for (const [label, extra, re] of [
   ["unparseable JSON", { ...priv, BOT_CHANNEL_GROUPS: "{nope" }, /BOT_CHANNEL_GROUPS is not valid JSON/],
-  ["mis-shaped JSON", { ...priv, BOT_CHANNEL_GROUPS: '{"hank":"H1"}' }, /must be an array of channel ids/],
-  ["a bad group name", { ...priv, BOT_CHANNEL_GROUPS: '{"Hank":["1"]}' }, /group name "Hank"/],
+  ["mis-shaped JSON", { ...priv, BOT_CHANNEL_GROUPS: '{"acme":"H1"}' }, /must be an array of channel ids/],
+  ["a bad group name", { ...priv, BOT_CHANNEL_GROUPS: '{"Acme":["1"]}' }, /group name "Acme"/],
   ["a channel in two groups", { ...priv, BOT_CHANNEL_GROUPS: '{"a":["1"],"b":["1"]}' }, /listed in two groups/],
   ["groups without BOT_PRIVATE_CHANNELS=true", { BOT_CHANNEL_GROUPS: '{"a":["1"]}' }, /BOT_CHANNEL_GROUPS needs BOT_PRIVATE_CHANNELS=true/],
 ]) {

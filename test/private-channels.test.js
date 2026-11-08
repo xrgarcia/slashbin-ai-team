@@ -258,25 +258,25 @@ check("no groups: a channel is its own scope, as before", () => {
 });
 
 check("a group's scope key is group_<name> and its folder is channels/group_<name>", () => {
-  const g = pc.channelGroups('{"hank":["111","222"]}', { enabled: true });
-  assert.strictEqual(g.scopeOf("222"), "group_hank");
-  assert.ok(pc.channelPaths("/s", g.scopeOf("111")).dir.endsWith("/channels/group_hank"));
+  const g = pc.channelGroups('{"acme":["111","222"]}', { enabled: true });
+  assert.strictEqual(g.scopeOf("222"), "group_acme");
+  assert.ok(pc.channelPaths("/s", g.scopeOf("111")).dir.endsWith("/channels/group_acme"));
 });
 
 check("a group view: members' summaries (stamped with the scope) and sessions, nobody else's", () => {
   const state = tmp(), hist = tmp();
-  const groups = pc.channelGroups('{"hank":["111","222"]}', { enabled: true });
-  writeFileSync(join(hist, "g.md"), "<!-- channel: group_hank -->\nshared");
+  const groups = pc.channelGroups('{"acme":["111","222"]}', { enabled: true });
+  writeFileSync(join(hist, "g.md"), "<!-- channel: group_acme -->\nshared");
   writeFileSync(join(hist, "raw.md"), "<!-- channel: 111 -->\nbefore joining");
   writeFileSync(join(hist, "o.md"), "<!-- channel: 333 -->\nelsewhere");
-  const p = pc.writeView({ stateDir: state, key: "group_hank", historyDir: hist, sessions: { 111: { sessionId: "a" }, 222: { sessionId: "b" }, 333: { sessionId: "c" } }, jobHistoryFile: "/none", groups });
+  const p = pc.writeView({ stateDir: state, key: "group_acme", historyDir: hist, sessions: { 111: { sessionId: "a" }, 222: { sessionId: "b" }, 333: { sessionId: "c" } }, jobHistoryFile: "/none", groups });
   assert.deepStrictEqual(readdirSync(p.summaries), ["g.md"]);
   assert.deepStrictEqual(Object.keys(JSON.parse(readFileSync(p.sessions, "utf8"))).sort(), ["111", "222"]);
 });
 
 check("schedules go by scope when given scopeOf", () => {
   const state = tmp();
-  const groups = pc.channelGroups('{"hank":["111","222"]}', { enabled: true });
+  const groups = pc.channelGroups('{"acme":["111","222"]}', { enabled: true });
   pc.saveChannelSchedules(state, [{ id: "a", channel: "111" }, { id: "b", channel: "222" }], groups.scopeOf);
   assert.deepStrictEqual(pc.loadChannelSchedules(state, groups.scopeOf).jobs.map((j) => j.id).sort(), ["a", "b"]);
   assert.strictEqual(pc.loadChannelSchedules(state).dropped.length, 2, "without scopeOf the group's file holds jobs for channels it is not named for");
