@@ -62,6 +62,13 @@ function board({ description = "Ship the release.", by = { createdByAgentId: "ag
       if (body.status === "blocked" && card.status !== "blocked" && !body.unblockDescriptor && !body.blockedByIssueIds?.length) {
         return { ok: false, status: 422, text: async () => JSON.stringify({ error: "Entering blocked requires unblockDescriptor" }) };
       }
+      // As the live board (issue-execution-policy.ts): the review stage's
+      // current participant moving the card out of review is its decision,
+      // and a decision without a comment is refused.
+      if (card.status === "in_review" && card.executionState?.currentParticipant?.agentId === "agent-em"
+        && body.status && body.status !== "in_review" && !("comment" in body)) {
+        return { ok: false, status: 422, text: async () => JSON.stringify({ error: "Requesting changes requires a comment." }) };
+      }
       writes.push({ runId, body });
       const actor = { actorType: "agent", actorId: "agent-em" };
       // As the live board: entering blocked starts the clock and clears the wake marker.
@@ -175,6 +182,24 @@ const me = { id: "agent-em", name: "Engineering Manager" };
       assert.strictEqual(visible(b).length, posted);
     }
     assert.strictEqual(calls, 1, "a re-wake with nothing new ran the model again");
+  });
+
+  // The bot is the current reviewer of its own card. Paperclip's
+  // review-recovery wake is not one it holds to a comment, but the reviewer's
+  // status write is a decision and needs one: the quiet close was refused
+  // every tick and the run held the seat for days.
+  await check("a re-wake with nothing new on a card this seat is reviewing ends with a comment, not the quiet close", async () => {
+    const b = board({ by: { createdByAgentId: "agent-em" } }), seat = seatOn(b);
+    await seat(async () => `Checked.\n${OUTCOME_MARK} done`).tick();
+    const posted = visible(b).length;
+    b.card.status = "in_review";
+    b.card.executionState = { status: "pending", currentStageType: "review", currentParticipant: { type: "agent", agentId: "agent-em", userId: null } };
+    b.wake("r2", "execution_review_participant_recovery");
+    await seat(async () => `Checked.\n${OUTCOME_MARK} done`).tick();
+    assert.strictEqual(b.runs[0].status, "succeeded", `the run was not ended: ${JSON.stringify(b.writes.filter((w) => w.runId === "r2"))}`);
+    assert.strictEqual(visible(b).length, posted + 1);
+    assert.strictEqual(visible(b).at(-1).createdByRunId, "r2");
+    assert.ok(!b.writes.some((w) => w.runId === "r2" && QUIET_MARK in w.body), "a write carried the quiet mark");
   });
 
   await check("a re-wake with nothing new on a wake Paperclip holds to a comment still gets the note, once", async () => {
