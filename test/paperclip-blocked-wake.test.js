@@ -69,6 +69,20 @@ function board({ description = "Ship the release.", by = { createdByAgentId: "ag
         && body.status && body.status !== "in_review" && !("comment" in body)) {
         return { ok: false, status: 422, text: async () => JSON.stringify({ error: "Requesting changes requires a comment." }) };
       }
+      // With its comment it is recorded: done approves; any other status is
+      // changes requested, and the board itself moves the card to in progress
+      // with whoever did the work, so an unblock note sent with it is refused.
+      if (card.status === "in_review" && card.executionState?.currentParticipant?.agentId === "agent-em"
+        && body.status && body.status !== "in_review") {
+        if (body.status === "done") card.executionState = { ...card.executionState, status: "completed", currentParticipant: null, lastDecisionOutcome: "approved" };
+        else {
+          if (body.unblockDescriptor) return { ok: false, status: 422, text: async () => JSON.stringify({ error: "unblockDescriptor requires blocked status" }) };
+          const back = card.executionState.returnAssignee;
+          card.executionState = { ...card.executionState, status: "changes_requested", currentParticipant: null, lastDecisionOutcome: "changes_requested" };
+          body.status = "in_progress"; body.assigneeAgentId = back.agentId ?? null; body.assigneeUserId = back.userId ?? null;
+          delete body.blockedByIssueIds;
+        }
+      }
       writes.push({ runId, body });
       const actor = { actorType: "agent", actorId: "agent-em" };
       // As the live board: entering blocked starts the clock and clears the wake marker.
@@ -200,6 +214,49 @@ const me = { id: "agent-em", name: "Engineering Manager" };
     assert.strictEqual(visible(b).length, posted + 1);
     assert.strictEqual(visible(b).at(-1).createdByRunId, "r2");
     assert.ok(!b.writes.some((w) => w.runId === "r2" && QUIET_MARK in w.body), "a write carried the quiet mark");
+  });
+
+  // The bot is the requester and the review stage's participant on work
+  // another seat did. Its answer is the stage's decision: a held answer
+  // (blocked, return) was refused by the stage, landed as a comment only, and
+  // the board moved the card to blocked with no decision (live 2026-11-10,
+  // SLA-4513: "the originating requester needs to provide final acceptance").
+  const inReview = () => {
+    const b = board({ by: { createdByAgentId: "agent-em" } });
+    b.card.status = "in_review";
+    b.card.executionState = { status: "pending", currentStageType: "review", returnAssignee: { type: "agent", agentId: "agent-po", userId: null },
+      currentParticipant: { type: "agent", agentId: "agent-em", userId: null } };
+    b.comments.push({ id: "cw", authorAgentId: "agent-po", authorUserId: null, createdAt: new Date(Date.now() + 1000).toISOString(), body: "Done: the report was sent (exit 0)." });
+    b.wake("r2", "execution_review_participant_recovery");
+    return b;
+  };
+  for (const [said, answer] of [["blocked", `The requester must accept this.\n${OUTCOME_MARK} blocked`], ["return", `The requester must accept this.\n${OUTCOME_MARK} return`],
+    ["follow-up", `The log summary is missing.\n${OUTCOME_MARK} follow-up`]]) {
+    await check(`a reviewer's ${said} answer is recorded as changes requested: the card goes back to whoever did the work, with one comment`, async () => {
+      const b = inReview(), seat = seatOn(b);
+      await seat(async () => answer).tick();
+      assert.strictEqual(b.card.executionState.lastDecisionOutcome, "changes_requested", JSON.stringify(b.writes));
+      assert.strictEqual(b.card.status, "in_progress");
+      assert.strictEqual(b.card.assigneeAgentId, "agent-po");
+      assert.strictEqual(visible(b).filter((c) => c.createdByRunId === "r2").length, 1);
+      assert.ok(!b.writes.some((w) => w.body?.unblockDescriptor), "a write carried an unblock note");
+    });
+  }
+
+  await check("a reviewer's done answer approves the stage", async () => {
+    const b = inReview(), seat = seatOn(b);
+    await seat(async () => `Accepted: the send is verified.\n${OUTCOME_MARK} done`).tick();
+    assert.strictEqual(b.card.executionState.lastDecisionOutcome, "approved", JSON.stringify(b.writes));
+    assert.strictEqual(b.card.status, "done");
+  });
+
+  await check("the review prompt makes the reviewer the one who accepts, and reads a held answer as a send-back", async () => {
+    const issue = { id: "c-1", identifier: "T-1", title: "Report", status: "in_review", assigneeAgentId: "agent-po", createdByAgentId: "agent-em",
+      executionState: { currentParticipant: { type: "agent", agentId: "agent-em" } } };
+    const p = buildTaskPrompt(issue, [], me, "u");
+    assert.match(p, /board records your answer as the review decision/);
+    assert.match(p, /that is you here/);
+    assert.match(p, /Do not answer a review blocked/);
   });
 
   await check("a re-wake with nothing new on a wake Paperclip holds to a comment still gets the note, once", async () => {
