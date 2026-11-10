@@ -231,7 +231,7 @@ const me = { id: "agent-em", name: "Engineering Manager" };
     return b;
   };
   for (const [said, answer] of [["blocked", `The requester must accept this.\n${OUTCOME_MARK} blocked`], ["return", `The requester must accept this.\n${OUTCOME_MARK} return`],
-    ["follow-up", `The log summary is missing.\n${OUTCOME_MARK} follow-up`]]) {
+    ["follow-up", `The log summary is missing.\n${OUTCOME_MARK} follow-up`], ["escalate", `This needs a manager.\n${OUTCOME_MARK} escalate`], ["ask", `Which run is this?\n${OUTCOME_MARK} ask`]]) {
     await check(`a reviewer's ${said} answer is recorded as changes requested: the card goes back to whoever did the work, with one comment`, async () => {
       const b = inReview(), seat = seatOn(b);
       await seat(async () => answer).tick();
