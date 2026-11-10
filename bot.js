@@ -3736,7 +3736,9 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       // stretch: polls keep succeeding, so nothing else would (slashbin-ai-team#128).
       stallMinutes: envInt("PAPERCLIP_STALL_MINUTES", 15, { min: 0 }),
       onSeatStalled: async ({ seat, reason, status, queued, oldestMinutes }) => {
-        const channelId = escalation.channel ?? promptChannel;
+        // A stall is the platform failing, not a product question: it goes to the
+        // ops channel when one is set, never only the stalled seat's own channel.
+        const channelId = process.env.PAPERCLIP_STALL_CHANNEL || escalation.channel || promptChannel;
         const channel = await resolveBridgeChannel(channelId, { paperclipSeat: seat, stalled: reason });
         if (!channel) throw new Error(`no Discord channel to tell (${channelId ?? "none set"})`);
         const why = reason === "error"
