@@ -1295,7 +1295,16 @@ const wake = (b, id) => {
     assert.strictEqual(patches.filter(inGate).length, 1, "routeGate makes more than one kind of PATCH");
     const escalates = [...src.matchAll(/\bescalateClient\(/g)].map((m) => m.index);
     assert.ok(escalates.length >= 1 && escalates.every(inGate), "process.escalate called outside routeGate");
-    const posts = [...src.matchAll(/api\("POST", `([^`]+)`/g)].map((m) => m[1]);
+    // The one other POST is openStallCard's: it creates a NEW card for the
+    // escalation target when the seat stalls. It routes nothing — no existing
+    // card is read, moved or written — so it has no snapshot to gate against.
+    // It is allowed by this path and from inside that function only.
+    const stall = body("openStallCard");
+    const inStall = (i) => i > stall[0] && i < stall[1];
+    const postAt = [...src.matchAll(/api\("POST", `([^`]+)`/g)].map((m) => ({ path: m[1], at: m.index }));
+    const creates = postAt.filter((p) => p.path === "/companies/${me.companyId}/issues");
+    assert.ok(creates.length === 1 && inStall(creates[0].at), "a card create outside openStallCard, or more than one");
+    const posts = postAt.filter((p) => !creates.includes(p)).map((p) => p.path);
     assert.ok(posts.every((p) => /\/comments$|\/wakeup$|\/recovery-actions\/resolve$/.test(p)), `a POST that is not a comment, a wake or a reconciliation: ${posts}`);
   });
 
