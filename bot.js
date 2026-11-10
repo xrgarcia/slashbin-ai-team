@@ -3735,7 +3735,7 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       // A seat the board stops starting runs for is said on Discord, once per
       // stretch: polls keep succeeding, so nothing else would (slashbin-ai-team#128).
       stallMinutes: envInt("PAPERCLIP_STALL_MINUTES", 15, { min: 0 }),
-      onSeatStalled: async ({ seat, reason, status, queued, oldestMinutes }) => {
+      onSeatStalled: async ({ seat, reason, status, queued, oldestMinutes, cards = [] }) => {
         // A stall is the platform failing, not a product question: it goes to the
         // ops channel when one is set, never only the stalled seat's own channel.
         const channelId = process.env.PAPERCLIP_STALL_CHANNEL || escalation.channel || promptChannel;
@@ -3744,7 +3744,10 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
         const why = reason === "error"
           ? `the board has it in status ${status}`
           : `${queued} run${queued === 1 ? "" : "s"} queued, the oldest for ${oldestMinutes} minutes`;
-        await channel.send({ content: `${escalation.mention ? `${escalation.mention} ` : ""}Paperclip is not starting ${seat}'s runs: ${why}. Hand-offs to ${seat} wait until it does.\n${board.url}`,
+        // Name the cards: blocking ones hold a slot the board shows running but this bot is not working.
+        const lines = cards.slice(0, 15).map((c) => `- ${c.role === "blocking" ? "blocking (running on the board, not worked by this bot)" : "waiting"}, ${c.minutes} min: ${c.identifier ?? c.id}${c.title ? ` ${c.title}` : ""}${c.link ? ` ${c.link}` : ""}`);
+        const more = cards.length > 15 ? `\n…and ${cards.length - 15} more` : "";
+        await channel.send({ content: `${escalation.mention ? `${escalation.mention} ` : ""}Paperclip is not starting ${seat}'s runs: ${why}. Hand-offs to ${seat} wait until it does.${lines.length ? `\n${lines.join("\n")}${more}` : ""}\n${board.url}`,
           allowedMentions: { parse: ["users"] } });
       },
       // The board's attempts, so a cancel or reassignment stops the worker.

@@ -23,7 +23,7 @@ const MIN = 60000;
 
 /** A board with no cards: only the seat's status and its runs, both settable. */
 function seat({ stallMinutes = 15, stallCheckMs = 5 * MIN } = {}) {
-  const s = { status: "idle", runs: [], now: Date.parse("2026-10-27T12:00:00Z"), told: [], refuse: 0 };
+  const s = { status: "idle", runs: [], now: Date.parse("2026-10-27T12:00:00Z"), told: [], refuse: 0, cards: {} };
   const fetch = async (url) => {
     const path = url.replace(/^.*\/api/, "");
     const ok = (v) => ({ ok: true, text: async () => JSON.stringify(v) });
@@ -31,6 +31,10 @@ function seat({ stallMinutes = 15, stallCheckMs = 5 * MIN } = {}) {
     if (path === "/agents/me/inbox-lite") return ok([]);
     if (path.startsWith(`/companies/${ME.companyId}/issues`)) return ok([]);
     if (path.startsWith(`/companies/${ME.companyId}/heartbeat-runs?agentId=${ME.id}`)) return ok(s.runs);
+    const byRun = path.match(/^\/heartbeat-runs\/(.+)$/);
+    if (byRun && s.runById?.[byRun[1]]) return ok(s.runById[byRun[1]]);
+    const card = path.match(/^\/issues\/(.+)$/);
+    if (card && s.cards[card[1]]) return ok(s.cards[card[1]]);
     return { ok: false, status: 404, text: async () => "" };
   };
   const poller = createPaperclipPoller({
@@ -50,10 +54,41 @@ function seat({ stallMinutes = 15, stallCheckMs = 5 * MIN } = {}) {
     const b = seat();
     b.s.runs = [b.queuedFor(20), b.queuedFor(3), { id: "done", status: "succeeded", createdAt: new Date(b.s.now - 60 * MIN).toISOString() }];
     await b.tick();
-    assert.deepStrictEqual(b.s.told, [{ seat: "Bot", reason: "queued", status: "idle", queued: 2, oldestMinutes: 20 }]);
+    assert.deepStrictEqual(b.s.told, [{ seat: "Bot", reason: "queued", status: "idle", queued: 2, oldestMinutes: 20, cards: [] }]);
     b.later(10);
     await b.tick();
     assert.strictEqual(b.s.told.length, 1, "still stalled: not said again");
+  });
+
+  await check("the stuck cards are named: queued ones waiting, running ones this bot is not working blocking, one line per card", async () => {
+    const b = seat();
+    b.s.cards = {
+      "i-1": { id: "i-1", identifier: "ACME-1", title: "Waiting card" },
+      "i-2": { id: "i-2", identifier: "ACME-2", title: "Orphan card" },
+    };
+    const ctx = (issueId, wakeReason) => ({ contextSnapshot: { issueId, wakeReason } });
+    b.s.runs = [
+      { ...b.queuedFor(25), ...ctx("i-1", "issue_assigned") },
+      { ...b.queuedFor(20), ...ctx("i-1", "issue_assigned") },
+      { id: "o1", status: "running", createdAt: new Date(b.s.now - 90 * MIN).toISOString(), startedAt: new Date(b.s.now - 47 * MIN).toISOString(), ...ctx("i-2", "recovery") },
+      { id: "o2", status: "running", createdAt: new Date(b.s.now - 90 * MIN).toISOString(), ...ctx("i-2", "recovery") },
+    ];
+    await b.tick();
+    assert.strictEqual(b.s.told.length, 1);
+    assert.deepStrictEqual(b.s.told[0].cards, [
+      { id: "i-2", identifier: "ACME-2", title: "Orphan card", link: "https://board.test/ACME/issues/ACME-2", role: "blocking", minutes: 90, wakeReason: "recovery" },
+      { id: "i-1", identifier: "ACME-1", title: "Waiting card", link: "https://board.test/ACME/issues/ACME-1", role: "waiting", minutes: 25, wakeReason: "issue_assigned" },
+    ]);
+  });
+
+  await check("a card whose run is read from the run (no snapshot in the list) is still named", async () => {
+    const b = seat();
+    b.s.cards = { "i-1": { id: "i-1", identifier: "ACME-1", title: "T" } };
+    b.s.runs = [b.queuedFor(30)];
+    const orig = b.s.runs[0];
+    b.s.runById = { [orig.id]: { contextSnapshot: { taskId: "i-1" } } };
+    await b.tick();
+    assert.deepStrictEqual(b.s.told[0].cards.map((c) => [c.identifier, c.role]), [["ACME-1", "waiting"]]);
   });
 
   await check("a run queued under stallMinutes is not said", async () => {
@@ -67,7 +102,7 @@ function seat({ stallMinutes = 15, stallCheckMs = 5 * MIN } = {}) {
     const b = seat();
     b.s.status = "error";
     await b.tick();
-    assert.deepStrictEqual(b.s.told, [{ seat: "Bot", reason: "error", status: "error", queued: 0, oldestMinutes: 0 }]);
+    assert.deepStrictEqual(b.s.told, [{ seat: "Bot", reason: "error", status: "error", queued: 0, oldestMinutes: 0, cards: [] }]);
   });
 
   await check("a seat healthy again and then stalled again is said again", async () => {
