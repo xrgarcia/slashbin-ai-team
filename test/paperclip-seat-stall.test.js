@@ -22,11 +22,19 @@ const ME = { id: "agent-1", name: "Bot", companyId: "co-1" };
 const MIN = 60000;
 
 /** A board with no cards: only the seat's status and its runs, both settable. */
-function seat({ stallMinutes = 15, stallCheckMs = 5 * MIN } = {}) {
-  const s = { status: "idle", runs: [], now: Date.parse("2026-10-27T12:00:00Z"), told: [], refuse: 0, cards: {} };
-  const fetch = async (url) => {
+function seat({ stallMinutes = 15, stallCheckMs = 5 * MIN, stallCard = false, escalateTo = null, stateFile = join(mkdtempSync(join(tmpdir(), "seat-")), "s.json"), failCreate = 0 } = {}) {
+  const s = { status: "idle", runs: [], now: Date.parse("2026-10-27T12:00:00Z"), told: [], refuse: 0, cards: {}, created: [], writes: [], failCreate };
+  const fetch = async (url, init = {}) => {
     const path = url.replace(/^.*\/api/, "");
+    if (path === `/companies/${ME.companyId}/agents`) return { ok: true, text: async () => JSON.stringify(s.seats ?? []) };
     const ok = (v) => ({ ok: true, text: async () => JSON.stringify(v) });
+    if (init.method && init.method !== "GET") {
+      if (path === `/companies/${ME.companyId}/issues` && init.method === "POST") {
+        if (s.failCreate > 0) { s.failCreate--; return { ok: false, status: 500, text: async () => "boom" }; }
+        s.created.push(JSON.parse(init.body)); return ok({ id: "new-1", identifier: "ACME-99" });
+      }
+      s.writes.push(`${init.method} ${path}`); return ok({});
+    }
     if (path === "/agents/me") return ok({ ...ME, status: s.status });
     if (path === "/agents/me/inbox-lite") return ok([]);
     if (path.startsWith(`/companies/${ME.companyId}/issues`)) return ok([]);
@@ -38,7 +46,7 @@ function seat({ stallMinutes = 15, stallCheckMs = 5 * MIN } = {}) {
     return { ok: false, status: 404, text: async () => "" };
   };
   const poller = createPaperclipPoller({
-    url: "https://board.test", apiKey: "k", stateFile: join(mkdtempSync(join(tmpdir(), "seat-")), "s.json"),
+    url: "https://board.test", apiKey: "k", stateFile, stallCard, escalateTo,
     answer: async () => "", log: silent, fetch, stallMinutes, stallCheckMs, clock: () => s.now,
     onSeatStalled: async (t) => {
       if (s.refuse > 0) { s.refuse--; throw new Error("discord down"); }
@@ -89,6 +97,73 @@ function seat({ stallMinutes = 15, stallCheckMs = 5 * MIN } = {}) {
     b.s.runById = { [orig.id]: { contextSnapshot: { taskId: "i-1" } } };
     await b.tick();
     assert.deepStrictEqual(b.s.told[0].cards.map((c) => [c.identifier, c.role]), [["ACME-1", "waiting"]]);
+  });
+
+  const lead = { kind: "agent", ref: "lead", name: "Lead" };
+  const withSeats = (b) => { b.s.seats = [{ id: "agent-9", name: "Lead" }]; };
+  const stuckBoard = (o) => {
+    const b = seat({ stallCard: true, escalateTo: lead, ...o });
+    withSeats(b);
+    b.s.cards = { "i-1": { id: "i-1", identifier: "ACME-1", title: "Waiting card" }, "i-2": { id: "i-2", identifier: "ACME-2", title: "Orphan card" } };
+    b.s.runs = [{ ...b.queuedFor(25), contextSnapshot: { issueId: "i-1" } },
+      { id: "o1", status: "running", createdAt: new Date(b.s.now - 90 * MIN).toISOString(), contextSnapshot: { issueId: "i-2" } }];
+    return b;
+  };
+
+  await check("a stall opens one card for the escalation target with the diagnosis and the card list, and writes to no stuck card", async () => {
+    const b = stuckBoard();
+    await b.tick();
+    assert.strictEqual(b.s.created.length, 1);
+    const c = b.s.created[0];
+    assert.strictEqual(c.assigneeAgentId, "agent-9");
+    assert.strictEqual(c.title, "Bot is stalled: 2 cards stuck");
+    assert.match(c.description, /1 run of Bot has been queued, the oldest for 25 minutes/);
+    assert.match(c.description, /blocking, 90 min: ACME-2 Orphan card https:\/\/board.test\/ACME\/issues\/ACME-2/);
+    assert.match(c.description, /waiting, 25 min: ACME-1 Waiting card/);
+    assert.match(c.description, /Only a board operator can cancel a blocking run/);
+    assert.deepStrictEqual(b.s.writes, [], "no write to any card or run");
+    assert.strictEqual(b.s.told.length, 1, "Discord still told");
+    b.later(10); await b.tick();
+    assert.strictEqual(b.s.created.length, 1, "once per stretch");
+  });
+
+  await check("a restart mid-stretch makes no second card; a new stretch makes a new one", async () => {
+    const stateFile = join(mkdtempSync(join(tmpdir(), "seat-")), "s.json");
+    const a = stuckBoard({ stateFile }); withSeats(a);
+    await a.tick();
+    const b = stuckBoard({ stateFile }); withSeats(b);
+    await b.tick();
+    assert.strictEqual(a.s.created.length + b.s.created.length, 1);
+    b.s.runs = []; b.later(6); await b.tick();   // healthy
+    b.s.runs = [b.queuedFor(30)]; b.later(6); await b.tick();
+    assert.strictEqual(b.s.created.length, 1, "the next stretch opens its own");
+  });
+
+  await check("a failed create is retried at the next check and Discord still goes out", async () => {
+    const b = stuckBoard({ failCreate: 1 }); withSeats(b);
+    await b.tick();
+    assert.strictEqual(b.s.created.length, 0);
+    assert.strictEqual(b.s.told.length, 1);
+    b.later(6); await b.tick();
+    assert.strictEqual(b.s.created.length, 1);
+    assert.strictEqual(b.s.told.length, 1, "Discord not repeated");
+  });
+
+  await check("a person as target gets the card by assigneeUserId; with no target only Discord is used", async () => {
+    const u = stuckBoard({ escalateTo: { kind: "user", ref: "u-1", name: "Someone" } });
+    await u.tick();
+    assert.strictEqual(u.s.created[0].assigneeUserId, "u-1");
+    assert.strictEqual(u.s.created[0].assigneeAgentId, undefined);
+    const n = stuckBoard({ escalateTo: null });
+    await n.tick();
+    assert.deepStrictEqual(n.s.created, []);
+    assert.strictEqual(n.s.told.length, 1);
+  });
+
+  await check("the card is off unless asked for", async () => {
+    const b = stuckBoard({ stallCard: false }); withSeats(b);
+    await b.tick();
+    assert.deepStrictEqual(b.s.created, []);
   });
 
   await check("a run queued under stallMinutes is not said", async () => {

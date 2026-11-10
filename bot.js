@@ -3734,6 +3734,7 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       } : null,
       // A seat the board stops starting runs for is said on Discord, once per
       // stretch: polls keep succeeding, so nothing else would (slashbin-ai-team#128).
+      stallCard: process.env.PAPERCLIP_STALL_CARD === "1",
       stallMinutes: envInt("PAPERCLIP_STALL_MINUTES", 15, { min: 0 }),
       onSeatStalled: async ({ seat, reason, status, queued, oldestMinutes, cards = [] }) => {
         // A stall is the platform failing, not a product question: it goes to the
