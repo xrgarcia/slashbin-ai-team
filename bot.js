@@ -8,6 +8,7 @@ const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
 const pino = require("pino");
 const summarizeCore = require("./lib/summarize-core");
+const { stallMessages } = require("./lib/stall-message");
 const { budgetContext, clampArgs, DEFAULT_CONTEXT_MAX_BYTES } = require("./lib/argv-budget");
 const { buildRunEnv, resolvePermissionMode, VALID_MODES, attachmentReadRule, summarizerArgs, PRIVATE_MEMORY_ENV, boardAccessKey, boardRunKind, privateMemoryDeny, boardArgs, boardSettings, boardCwdDenied, boardSecretFiles, boardHistoryDenied, resolveBoardPolicy, boardPolicyProblems, boardEngineeringRules, discordCredential, MIN_CREDENTIAL_CHARS, expand: expandPath } = require("./lib/permission-mode");
 const { resolveConfine, confineCommand, confineProblems, readWithin, within: pathWithin, real: realPath } = require("./lib/confine");
@@ -3734,16 +3735,22 @@ if (PAPERCLIP_BOARDS.length && !PAPERCLIP_CWD_DENIED && !BOARD_POLICY_PROBLEMS.l
       } : null,
       // A seat the board stops starting runs for is said on Discord, once per
       // stretch: polls keep succeeding, so nothing else would (slashbin-ai-team#128).
+      stallCard: process.env.PAPERCLIP_STALL_CARD === "1",
       stallMinutes: envInt("PAPERCLIP_STALL_MINUTES", 15, { min: 0 }),
-      onSeatStalled: async ({ seat, reason, status, queued, oldestMinutes }) => {
-        const channelId = escalation.channel ?? promptChannel;
+      onSeatStalled: async ({ seat, reason, status, queued, oldestMinutes, cards = [] }) => {
+        // A stall is the platform failing, not a product question: it goes to the
+        // ops channel when one is set, never only the stalled seat's own channel.
+        const channelId = process.env.PAPERCLIP_STALL_CHANNEL || escalation.channel || promptChannel;
         const channel = await resolveBridgeChannel(channelId, { paperclipSeat: seat, stalled: reason });
         if (!channel) throw new Error(`no Discord channel to tell (${channelId ?? "none set"})`);
         const why = reason === "error"
           ? `the board has it in status ${status}`
           : `${queued} run${queued === 1 ? "" : "s"} queued, the oldest for ${oldestMinutes} minutes`;
-        await channel.send({ content: `${escalation.mention ? `${escalation.mention} ` : ""}Paperclip is not starting ${seat}'s runs: ${why}. Hand-offs to ${seat} wait until it does.\n${board.url}`,
-          allowedMentions: { parse: ["users"] } });
+        // Every card is named, in messages of at most 2000 characters (lib/stall-message.js).
+        // Blocking ones hold a slot the board shows running but this bot is not working.
+        const messages = stallMessages({ mention: escalation.mention ?? "", cards, footer: board.url,
+          head: `Paperclip is not starting ${seat}'s runs: ${why}. Hand-offs to ${seat} wait until it does.` });
+        for (const content of messages) await channel.send({ content, allowedMentions: { parse: ["users"] } });
       },
       // The board's attempts, so a cancel or reassignment stops the worker.
       attempts,
