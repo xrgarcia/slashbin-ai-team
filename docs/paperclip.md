@@ -144,7 +144,9 @@ to the creator. A person named in a wait must exist on the board. If the target
 cannot be resolved or a handoff is refused, the task stays blocked with the agent
 and the comment explains why.
 
-A run that fails without an answer gets a fallback reply and a blocked outcome.
+A run that fails without an answer gets a fallback reply and a blocked outcome. When a newer
+attempt's answer goes out in the same post, the older unanswered attempt reads "An earlier run on
+this card stopped before it answered" instead, since that answer is the follow-up.
 Board attempts run in a durable worker: a harness restart follows a surviving
 attempt instead of starting the work again. An attempt whose worker died is
 reported blocked. Legacy interrupted attempts have a separate
