@@ -3,6 +3,7 @@ const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const { spawn } = require("child_process");
 const { WebSocket, WebSocketServer } = require("ws");
 const { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, statSync, appendFileSync, readdirSync, readlinkSync, renameSync, mkdtempSync, rmSync } = require("fs");
+const { startedAfterLock } = require("./lib/pid-lock");
 const { basename, dirname, join, resolve } = require("path");
 const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
@@ -890,7 +891,12 @@ const PID_FILE = join(__dirname, `.${BOT_NAME}.pid`);
 (() => {
   try {
     const existingPid = parseInt(readFileSync(PID_FILE, "utf8").trim(), 10);
-    if (existingPid && existingPid !== process.pid) {
+    const lockMtimeMs = statSync(PID_FILE).mtimeMs;
+    // A pid that started after this lock was written was reused (a sibling bot
+    // after a reboot passes every check below: same bot.js, same cwd). lib/pid-lock.js
+    if (existingPid && existingPid !== process.pid && startedAfterLock(existingPid, lockMtimeMs)) {
+      log.warn({ existingPid }, "Lock names a pid that started after the lock was written — stale, taking over");
+    } else if (existingPid && existingPid !== process.pid) {
       try {
         process.kill(existingPid, 0); // throws if process doesn't exist
         // Verify it's actually a bot.js MAIN process for THIS bot instance.
