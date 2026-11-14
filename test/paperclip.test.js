@@ -6,7 +6,7 @@ const assert = require("assert");
 const { readFileSync, readdirSync, writeFileSync, mkdtempSync } = require("fs");
 const { join } = require("path");
 const { tmpdir } = require("os");
-const { paperclipBoards, pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, ALREADY_ANSWERED, unchangedNote, UNBLOCK_ACTION, OUTCOME_MARK, outcomeOf, refusal } = require("../lib/paperclip");
+const { paperclipBoards, pickOpenRun, askOf, askKey, buildTaskPrompt, replyCollector, createPaperclipPoller, FALLBACK_REPLY, SUPERSEDED_REPLY, ALREADY_ANSWERED, unchangedNote, UNBLOCK_ACTION, OUTCOME_MARK, outcomeOf, refusal } = require("../lib/paperclip");
 
 const bot = readFileSync(join(__dirname, "..", "bot.js"), "utf8");
 let pass = 0, fail = 0;
@@ -666,6 +666,34 @@ const poller = (b, answer) => createPaperclipPoller({
       answer: async () => { calls++; return "the answer"; } }).tick();
     assert.strictEqual(calls, 1, "the ask ran a second time");
     assert.deepStrictEqual(b.writes.map((w) => [w.runId, w.body.comment]), [["run-2", FALLBACK_REPLY]]);
+  });
+
+  await check("a run that died is superseded, not 'followed up', when a newer answer goes out with it", async () => {
+    // 2026-11-13: SLA-4488 posted "could not answer … someone will follow up" above the
+    // seat's real answer in one comment; a reader took three answered cards for dead runs.
+    const comments = [{ id: "w", authorAgentId: null, createdAt: "2026-01-02T00:00:00Z", body: "ask" }];
+    let runs = running;
+    const b = board({ runs, comments });
+    const fetch = async (url, init) => {
+      const path = url.replace(/^.*\/api/, "");
+      if (path === "/issues/iss-1/runs") return { ok: true, text: async () => JSON.stringify(runs) };
+      if (path === "/heartbeat-runs/run-2") return { ok: true, text: async () => JSON.stringify({ contextSnapshot: { wakeCommentId: "w2" } }) };
+      return b.fetch(url, init);
+    };
+    const stateFile = join(mkdtempSync(join(tmpdir(), "pc-")), "s.json");
+    let started;
+    const inRun = new Promise((r) => { started = r; });
+    createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: () => { started(); return new Promise(() => {}); } }).tick();   // dies mid-run
+    await inRun;
+    comments.push({ id: "w2", authorAgentId: null, createdAt: "2026-01-02T00:05:00Z", body: "another ask" });
+    runs = [{ id: "run-2", agentId: ME.id, status: "running" }];
+    await createPaperclipPoller({ url: "https://board.example.com", apiKey: "k", stateFile, log: silent, fetch,
+      answer: async () => "the answer" }).tick();
+    const posted = b.writes.map((w) => w.body.comment).filter(Boolean);
+    assert.strictEqual(posted.length, 1, posted.join("\n|\n"));
+    assert.ok(posted[0].startsWith(SUPERSEDED_REPLY) && posted[0].endsWith("the answer"), posted[0]);
+    assert.ok(!posted[0].includes(FALLBACK_REPLY), "a newer answer in the same post is the follow-up");
   });
 
   await check("a damaged state file stops board tasks rather than running answered ones again", async () => {
